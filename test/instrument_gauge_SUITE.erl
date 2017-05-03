@@ -36,9 +36,11 @@ all() ->
 
 
 init_per_suite(Config) ->
+  ok = application:start(instrument),
   Config.
 
 end_per_suite(Config) ->
+  ok = application:stop(instrument),
   Config.
 
 
@@ -46,6 +48,7 @@ init_per_testcase(_, Config) ->
   Config.
 
 end_per_testcase(_Config) ->
+  _ = instrument_registry:unregister_all(),
   ok.
 
 
@@ -54,25 +57,25 @@ end_per_testcase(_Config) ->
 %% ==============
 
 starts_with_zero(_Config) ->
-  M = instrument_gauge:new(c, "no help"),
-  0.0 = instrument_gauge:get(M).
+  M = instrument_gauge:new_gauge(c, "no help"),
+  0.0 = instrument_gauge:get_gauge(M).
 
 add_correctly(_Config) ->
-  M = instrument_gauge:new(c, "no help"),
-  ok = instrument_gauge:inc(M),
-  1.0 = instrument_gauge:get(M),
-  ok = instrument_gauge:inc(M, 41),
-  42.0 = instrument_gauge:get(M).
+  M = instrument_gauge:new_gauge(c, "no help"),
+  ok = instrument_gauge:inc_gauge(M),
+  1.0 = instrument_gauge:get_gauge(M),
+  ok = instrument_gauge:inc_gauge(M, 41),
+  42.0 = instrument_gauge:get_gauge(M).
 
 substract_correctly(_Config) ->
-  M = instrument_gauge:new(c, "no help"),
-  ok = instrument_gauge:dec(M),
-  -1.0 = instrument_gauge:get(M),
-  ok = instrument_gauge:dec(M, 41),
-  -42.0 = instrument_gauge:get(M).
+  M = instrument_gauge:new_gauge(c, "no help"),
+  ok = instrument_gauge:dec_gauge(M),
+  -1.0 = instrument_gauge:get_gauge(M),
+  ok = instrument_gauge:dec_gauge(M, 41),
+  -42.0 = instrument_gauge:get_gauge(M).
 
 can_be_reset(_Config) ->
-  M = instrument_gauge:new(c, "no help"),
-  ok = instrument_gauge:set(M, 1),
-  ok = instrument_gauge:set(M, 2),
-  2.0 = instrument_gauge:get(M).
+  M = instrument_gauge:new_gauge(c, "no help"),
+  ok = instrument_gauge:set_gauge(M, 1),
+  ok = instrument_gauge:set_gauge(M, 2),
+  2.0 = instrument_gauge:get_gauge(M).

@@ -8,3 +8,13 @@
   name,
   help
 }).
+
+
+-record(vector, {
+  name,
+  help,
+  metric,
+  buckets = [],
+  labels = [],
+  labels_map = #{}
+}).

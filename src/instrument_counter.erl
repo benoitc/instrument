@@ -7,16 +7,17 @@
 
 %% public api
 -export([
-  new/2,
-  inc/1, inc/2,
-  get/1,
-  collect/2
+  new_counter/2,
+  inc_counter/1, inc_counter/2,
+  get_counter/1,
+  collect/2,
+  with_counter/2, with_counter/3
 ]).
 
 -include("instrument.hrl").
 
 
-new(Name, Help) ->
+new_counter(Name, Help) ->
   {ok, Ref} = instrument_nif:new_gauge(),
   Info = instrument_lib:mk_info(Name, Help),
   #metric{
@@ -26,12 +27,17 @@ new(Name, Help) ->
   }.
 
 
-inc(#metric{handle=Ref}) -> instrument_nif:inc_gauge(Ref).
+inc_counter(#metric{handle=Ref}) -> instrument_nif:inc_gauge(Ref).
 
-inc(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
-inc(_, _) -> erlang:error(badarg).
+inc_counter(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
+inc_counter(_, _) -> erlang:error(badarg).
 
-get(#metric{handle=Ref}) -> instrument_nif:get_gauge(Ref).
+get_counter(#metric{handle=Ref}) -> instrument_nif:get_gauge(Ref).
+
+with_counter(Counter, F) -> with_counter_1(Counter, F, []).
+with_counter(Counter, F, V) -> with_counter_1(Counter, F, [V]).
+with_counter_1(Counter, F, A) ->
+  instrument_registry:with(Counter, fun(M) -> erlang:apply(?MODULE, F, [M|A]) end).
 
 collect(Info, Ref) ->
   #metric_info{name=Name, help=Help} = Info,

@@ -33,33 +33,38 @@ all() ->
 
 
 init_per_suite(Config) ->
+  ok = application:start(instrument),
   Config.
 
 end_per_suite(Config) ->
+  ok = application:stop(instrument),
   Config.
 
 
 init_per_testcase(_, Config) ->
+  ok = instrument:unregister_all(),
   Config.
 
 end_per_testcase(_Config) ->
+  ok = instrument:unregister_all(),
+  timer:sleep(400),
   ok.
 
 
 starts_with_no_labels(_Config) ->
-  M = instrument_vector:new(["a", "b"], counter, "name", "help"),
-  [] = instrument_vector:with(M, fun instrument_counter:get/1).
+  M = instrument:new_vector(["a", "b"], counter, "name", "help"),
+  [] = instrument:get_vector_with(M, get_counter).
 
 maintain_state_for_a_single_label(_Config) ->
-  M = instrument_vector:new([a, b], counter, "name", "help"),
-  {ok, M2} = instrument_vector:with_label(M, ["foo", "bar"], fun instrument_counter:inc/1),
-  [{["foo", "bar"], 1.0}] = instrument_vector:with(M2, fun instrument_counter:get/1).
+  M = instrument:new_vector([a, b], counter, "name", "help"),
+  ok = instrument:with_label(M, ["foo", "bar"], inc_counter),
+  [{["foo", "bar"], 1.0}] = instrument:get_vector_with(M, get_counter).
 
 
 maintain_state_for_multiple_labels(_Config) ->
-  M = instrument_vector:new(["a"], counter, "name", "help"),
-  {ok, M2} = instrument_vector:with_label(M, ["foo"], fun instrument_counter:inc/1),
-  {ok, M3} = instrument_vector:with_label(M2, ["bar"], fun instrument_counter:inc/1),
-  [{["foo"], 1.0}, {["bar"], 1.0}] = instrument_vector:with(M3, fun instrument_counter:get/1).
+  M = instrument:new_vector(["a"], counter, "name", "help"),
+  ok = instrument:with_label(M, ["foo"], inc_counter),
+  ok = instrument:with_label(M, ["bar"], inc_counter),
+  [{["foo"], 1.0}, {["bar"], 1.0}] = instrument:get_vector_with(M, get_counter).
 
 

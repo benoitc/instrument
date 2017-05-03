@@ -28,8 +28,8 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-  Shared = child_spec(worker, shared, instrument_shared, permanent, []),
-  {ok, { {one_for_all, 0, 1}, [Shared]} }.
+  Registry = child_spec(worker, registry, instrument_registry, permanent, []),
+  {ok, { {one_for_all, 0, 1}, [Registry]} }.
 
 %%====================================================================
 %% Internal functions

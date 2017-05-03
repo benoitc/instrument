@@ -33,23 +33,17 @@
 -export([
   new_vector/4, new_vector/5,
   get_vector_with/2,
-  get_vector_with/3,
-  with_label/3,
+  with_label/3, with_label/4,
   remove_label/2,
   clear_labels/1
 ]).
 
-%% SHARED API
+%% REGISTRY API
 
 -export([
-  new_shared_counter/2,
-  with_shared/2,
-  with_shared/3,
-  get_shared_vector_with/2,
-  get_shared_vector_with/3,
-  shared_with_label/3,
-  shared_with_label/4,
-  unreg/1
+  register/1,
+  unregister/1,
+  unregister_all/0
 ]).
 
 
@@ -79,79 +73,82 @@
 
 -spec new_counter(Name :: metric_name(), Help :: help()) -> Counter :: metric().
 new_counter(Name, Help) ->
-  instrument_counter:new(Name, Help).
+  Metric = instrument_counter:new_counter(Name, Help),
+  ok = register(Metric),
+  Metric.
 
 -spec inc_counter(Counter :: metric()) -> Result :: ok | {error, not_found}.
 inc_counter(Counter) ->
-  instrument_counter:inc(Counter).
+  instrument_counter:with_counter(Counter, inc_counter).
 
 
 -spec inc_counter(Counter :: metric(), Value :: number()) -> Result :: ok | {error, not_found}.
 inc_counter(Counter, Value) ->
-  instrument_counter:inc(Counter, Value).
-
+  instrument_counter:with_counter(Counter, inc_counter, Value).
 
 -spec get_counter(Counter :: metric()) -> Result :: float() | {error, not_found}.
 get_counter(Counter) ->
-  instrument_counter:get(Counter).
-  
+  instrument_counter:with_counter(Counter, get_counter).
+
 
 %% GAUGE
 
 -spec new_gauge(Name :: metric_name(), Help :: help()) -> Gauge :: metric().
 new_gauge(Name, Help) ->
-  instrument_gauge:new(Name, Help).
-
-
+  Metric = instrument_gauge:new_gauge(Name, Help),
+  ok = register(Metric),
+  Metric.
 
 -spec inc_gauge(Gauge :: metric()) -> Result :: ok | {error, not_found}.
 inc_gauge(Gauge) ->
-  instrument_gauge:inc(Gauge).
-
+  instrument_gauge:with_gauge(Gauge, inc_gauge).
 
 -spec inc_gauge(Gauge :: metric(), Value :: number()) -> Result :: ok | {error, not_found}.
 inc_gauge(Gauge, Value) ->
-  instrument_gauge:inc(Gauge, Value).
+  instrument_gauge:with_gauge(Gauge, inc_gauge, Value).
 
 -spec dec_gauge(Gauge :: metric()) -> Result :: ok | {error, not_found}.
 dec_gauge(Gauge) ->
-  instrument_gauge:dec(Gauge).
+  instrument_gauge:with_gauge(Gauge, dec_gauge).
 
 
 -spec dec_gauge(Gauge :: metric(), Value :: number()) -> Result :: ok | {error, not_found}.
 dec_gauge(Gauge, Value) ->
-  instrument_gauge:dec(Gauge, Value).
+  instrument_gauge:with_gauge(Gauge, dec_gauge, Value).
 
 -spec set_gauge(Gauge :: metric(), Value :: number()) -> Result :: ok | {error, not_found}.
 set_gauge(Gauge, Value) ->
-  instrument_gauge:set(Gauge, Value).
+  instrument_gauge:with_gauge(Gauge, set_gauge, Value).
 
 -spec set_gauge_to_current_time(Gauge :: metric()) -> Result :: ok | {error, not_found}.
 set_gauge_to_current_time(Gauge) ->
-  instrument_gauge:set_to_current_time(Gauge).
+  Time = erlang:monotonic_time(second),
+  set_gauge(Gauge, Time).
 
 
 -spec get_gauge(Gauge :: metric()) -> Result :: float() | {error, not_found}.
 get_gauge(Gauge) ->
-  instrument_gauge:get(Gauge).
+  instrument_gauge:with_gauge(Gauge, get_gauge).
 
 %% HISTOGRAM
 
 -spec new_histogram(Name :: metric_name(), Help :: help()) -> Hist::metric().
 new_histogram(Name, Help) ->
-  instrument_histogram:new(Name, Help).
+  Metric = new_histogram:new(Name, Help),
+  ok = register(Metric),
+  Metric.
 
 -spec new_histogram(Name :: metric_name(), Help :: help(), Buckets::list()) -> Hist::metric().
 new_histogram(Name, Help, Buckets) ->
-  instrument_histogram:new(Name, Help, Buckets).
+  instrument_histogram:new_histogram(Name, Help, Buckets).
 
 -spec observe_histogram(Hist::metric(), Value::number()) -> ok | {error, not_found}.
 observe_histogram(Hist, Value) ->
-  instrument_histogram:observe(Hist, Value).
+  instrument_histogram:with_histogram(Hist, observe_histogram, Value).
 
 -spec get_histogram(Hist :: metric()) -> Value :: term().
 get_histogram(Hist) ->
-  instrument_histogram:get(Hist).
+  instrument_histogram:with_histogram(Hist, get_histogram).
 
 %% VECTOR
 
@@ -171,14 +168,15 @@ new_vector(Labels, MetricType, Name, Help, Buckets) ->
 with_label(Vector, Label, Fun) ->
   instrument_vector:with_label(Vector, Label, Fun).
 
+-spec with_label(
+    Vector :: metric(), Label :: label_value(), Fun :: mfa(), Val :: number()
+) -> Result :: term().
+with_label(Vector, Label, Fun, V) ->
+  instrument_vector:with_label(Vector, Label, Fun, V).
 
 -spec get_vector_with(Vector :: metric(), Fun :: mfa()) -> Result :: term().
 get_vector_with(Vector, Fun) ->
-  instrument_vector:with(Vector, fun(Metric) -> Fun(Metric) end).
-
-get_vector_with(Vector, Fun, V) ->
-  instrument_vector:with(Vector, fun(Metric) -> Fun(Metric, V) end).
-
+  instrument_vector:with(Vector, Fun).
 
 -spec remove_label(Vector :: metric(), Label :: label_value()) -> Result :: term().
 remove_label(Vector, Label) ->
@@ -189,31 +187,13 @@ clear_labels(Vector) ->
   instrument_vector:clear_labels(Vector).
 
 
+%% REGISTRY API
 
-%% SHARED API
+register(Metric) ->
+  instrument_registry:register(Metric).
 
-new_shared_counter(Name, Help) ->
-  Metric = new_counter(Name, Help),
-  instrument_shared:reg(Metric).
+unregister(Name) ->
+  instrument_registry:unregister(Name).
 
-
-with_shared(Name, Fun) ->
-  instrument_shared:with(Name, fun(Metric) -> ?MODULE:Fun(Metric) end).
-
-with_shared(Name, Fun, V) ->
-  instrument_shared:with(Name, fun(Metric) -> ?MODULE:Fun(Metric, V) end).
-
-get_shared_vector_with(Name, Fun) ->
-  instrument_shared:with_vector(Name, {?MODULE, Fun}).
-
-get_shared_vector_with(Name, Fun, V) ->
-  instrument_shared:with_vector(Name, {?MODULE, Fun, V}).
-
-shared_with_label(Name, Label, Fun) ->
-  instrument_shared:with_label(Name, Label, {?MODULE, Fun}).
-
-shared_with_label(Name, Label, Fun, V) ->
-  instrument_shared:with_label(Name, Label, {?MODULE, Fun, V}).
-
-unreg(Name) ->
-  instrument_shared:unreg(Name).
+unregister_all() ->
+  instrument_registry:unregister_all().

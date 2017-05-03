@@ -22,7 +22,8 @@
 -export([
   starts_with_zero/1,
   increment_correctly/1,
-  is_concurrent/1
+  is_concurrent/1,
+  counter_with_name/1
 ]).
 
 
@@ -30,21 +31,26 @@ all() ->
   [
     starts_with_zero,
     increment_correctly,
-    is_concurrent
+    is_concurrent,
+    counter_with_name
   ].
 
 
 init_per_suite(Config) ->
+  ok = application:start(instrument),
   Config.
 
 end_per_suite(Config) ->
+  ok = application:stop(instrument),
   Config.
 
 
 init_per_testcase(_, Config) ->
+  _ = instrument:unregister_all(),
   Config.
 
 end_per_testcase(_Config) ->
+  
   ok.
 
 
@@ -53,22 +59,29 @@ end_per_testcase(_Config) ->
 %% ==============
 
 starts_with_zero(_Config) ->
-  M = instrument_counter:new(c, "no help"),
-  0.0 = instrument_counter:get(M).
+  M = instrument:new_counter(c, "no help"),
+  0.0 = instrument:get_counter(M).
 
 increment_correctly(_Config) ->
-  M = instrument_counter:new(c, "no help"),
-  ok = instrument_counter:inc(M),
-  1.0 = instrument_counter:get(M),
-  ok = instrument_counter:inc(M, 41),
-  42.0 = instrument_counter:get(M).
+  M = instrument:new_counter(c, "no help"),
+  ok = instrument:inc_counter(M),
+  1.0 = instrument:get_counter(M),
+  ok = instrument:inc_counter(M, 41),
+  42.0 = instrument:get_counter(M).
 
 is_concurrent(_Config) ->
-  M = instrument_counter:new(test, ""),
+  M = instrument:new_counter(test, ""),
   In = lists:seq(1, 1000),
-  Out = pmap(fun(I) -> ok = instrument_counter:inc(M), I end, In),
+  Out = pmap(fun(I) -> ok = instrument:inc_counter(M), I end, In),
   In = [I || {ok, I} <- Out],
-  1000.0 = instrument_counter:get(M).
+  1000.0 = instrument:get_counter(M).
+
+counter_with_name(_Config) ->
+  _ = instrument:new_counter(c, "no help"),
+  ok = instrument:inc_counter(c),
+  1.0 = instrument:get_counter(c),
+  ok = instrument:inc_counter(c, 41),
+  42.0 = instrument:get_counter(c).
 
 
 
