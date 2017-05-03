@@ -7,19 +7,20 @@
 
 %% public api
 -export([
-  new/2,
-  inc/1, inc/2,
-  dec/1, dec/2,
-  set/2,
-  set_to_current_time/1,
-  get/1,
-  collect/2
+  new_gauge/2,
+  inc_gauge/1, inc_gauge/2,
+  dec_gauge/1, dec_gauge/2,
+  set_gauge/2,
+  set_gauge_to_current_time/1,
+  get_gauge/1,
+  collect/2,
+  with_gauge/2, with_gauge/3
 ]).
 
 -include("instrument.hrl").
 
 
-new(Name, Help) ->
+new_gauge(Name, Help) ->
   {ok, Ref} = instrument_nif:new_gauge(),
   Info = instrument_lib:mk_info(Name, Help),
   #metric{
@@ -29,24 +30,30 @@ new(Name, Help) ->
   }.
 
 
-inc(#metric{handle=Ref}) -> instrument_nif:inc_gauge(Ref).
+inc_gauge(#metric{handle=Ref}) -> instrument_nif:inc_gauge(Ref).
 
-inc(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
-inc(_, _) -> erlang:error(badarg).
+inc_gauge(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
+inc_gauge(_, _) -> erlang:error(badarg).
 
-dec(#metric{handle=Ref}) -> instrument_nif:dec_gauge(Ref).
+dec_gauge(#metric{handle=Ref}) -> instrument_nif:dec_gauge(Ref).
 
-dec(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:dec_gauge(Ref, float(Val));
-dec(_, _) -> erlang:error(badarg).
+dec_gauge(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:dec_gauge(Ref, float(Val));
+dec_gauge(_, _) -> erlang:error(badarg).
 
-set(#metric{handle=Ref}, Val) -> instrument_nif:set_gauge(Ref, float(Val));
-set(_, _) -> erlang:error(badarg).
+set_gauge(#metric{handle=Ref}, Val) -> instrument_nif:set_gauge(Ref, float(Val));
+set_gauge(_, _) -> erlang:error(badarg).
 
-set_to_current_time(M) ->
+set_gauge_to_current_time(M) ->
   Time = erlang:monotonic_time(second),
-  set(M, Time).
+  set_gauge(M, Time).
  
-get(#metric{handle=Ref}) -> instrument_nif:get_gauge(Ref).
+get_gauge(#metric{handle=Ref}) -> instrument_nif:get_gauge(Ref).
+
+with_gauge(Gauge, F) -> with_gauge_1(Gauge, F, []).
+with_gauge(Gauge, F, V) -> with_gauge_1(Gauge, F, [V]).
+with_gauge_1(Gauge, F, A) ->
+  instrument_registry:with(Gauge, fun(M) -> erlang:apply(?MODULE, F, [M|A]) end).
+
 
 collect(Info, Ref) ->
   #metric_info{name=Name, help=Help} = Info,

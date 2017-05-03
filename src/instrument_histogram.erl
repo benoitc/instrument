@@ -11,14 +11,15 @@
 
 %% API
 -export([
-  new/2, new/3,
-  observe/2,
-  get/1,
+  new_histogram/2, new_histogram/3,
+  observe_histogram/2,
+  get_histogram/1,
   collect/2,
   default_buckets/0,
   linear_buckets/3,
   exponential_buckets/3,
-  validate_buckets/1
+  validate_buckets/1,
+  with_histogram/2, with_histogram/3
 ]).
 
 -include("instrument.hrl").
@@ -31,9 +32,9 @@
   sum = 0.0
 }).
 
-new(Name, Help) -> new(Name, Help, ?DEFAULT_BUCKETS).
+new_histogram(Name, Help) -> new_histogram(Name, Help, ?DEFAULT_BUCKETS).
 
-new(Name, Help, Buckets) ->
+new_histogram(Name, Help, Buckets) ->
   Info = instrument_lib:mk_info(Name, Help),
   Hist = mk_histogram(Buckets),
   #metric{
@@ -72,7 +73,7 @@ validate_buckets([Boundary | _], Prev) ->
 validate_buckets([], _) ->
   ok.
 
-observe(#metric{handle=Hist}, Value) ->
+observe_histogram(#metric{handle=Hist}, Value) ->
   #histogram{bucket_boundaries = Boundaries,
     bucket_counts = Counts,
     sum = Sum} = Hist,
@@ -91,7 +92,7 @@ find([_ | Rest], Value, I) -> find(Rest, Value, I + 1);
 find([], _Value, _I) -> -1.
 
 
-get(#metric{handle=Hist}) ->
+get_histogram(#metric{handle=Hist}) ->
   #histogram{
     bucket_boundaries = Boundaries,
     bucket_counts = Counts,
@@ -104,6 +105,7 @@ get(#metric{handle=Hist}) ->
   #{count => SampleCount,
     sum => SumValue,
     buckets => Buckets }.
+
 
 cumulative_count([Count | RestCounts], [Boundary | RestBoundaries], Acc, Buckets) ->
   Acc2 = Acc + Count,
@@ -133,6 +135,11 @@ exponential_buckets(Start, Factor, Count) when Count > 1, Start > 0, Factor > 1 
       {Acc2, Buckets2}
     end, {Start, []}, lists:seq(1, Count)),
   lists:reverse(Buckets).
+
+with_histogram(Hist, F) -> with_histogram_1(Hist, F, []).
+with_histogram(Hist, F, V) -> with_histogram_1(Hist, F, [V]).
+with_histogram_1(Hist, F, A) ->
+  instrument_registry:with(Hist, fun(M) -> erlang:apply(?MODULE, F, [M|A]) end).
 
 collect(Info, Hist) ->
   #metric_info{name=Name, help=Help} = Info,

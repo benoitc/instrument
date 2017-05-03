@@ -6,8 +6,6 @@
 -author("benoitc").
 
 %% API
-
-%% API
 -export([
   all/0,
   init_per_suite/1,
@@ -33,13 +31,16 @@ all() ->
 
 
 init_per_suite(Config) ->
+  ok = application:start(instrument),
   Config.
 
 end_per_suite(Config) ->
+  ok = application:stop(instrument),
   Config.
 
 
 init_per_testcase(_, Config) ->
+  ok = instrument:unregister_all(),
   Config.
 
 end_per_testcase(_Config) ->
@@ -64,13 +65,13 @@ concurrent_histogram(_Config) ->
   Mutations = 1000,
   ConcLevel = 5,
   Total = float(Mutations * ConcLevel),
-  M = instrument_histogram:new(test_histogram, "", TestBuckets),
+  M = instrument_histogram:new_histogram(test_histogram, "", TestBuckets),
   All = pmap(
     fun(_) ->
       Vars= lists:foldl(
         fun(_, Vars1) ->
           V = quickrand:strong_float(),
-          ok = instrument_histogram:observe(M, V),
+          ok = instrument_histogram:observe_histogram(M, V),
           [float(V) | Vars1]
         end,
         [],
@@ -81,7 +82,7 @@ concurrent_histogram(_Config) ->
   
   AllVars = lists:flatten([Vars || {ok, Vars} <- All]),
   Sum = lists:sum(AllVars),
-  Hist = instrument_histogram:get(M),
+  Hist = instrument_histogram:get_histogram(M),
   io:format("total = ~p, all sums ~p~nhist: ~p~n", [Total, lists:sum(AllVars), Hist]),
   #{ count := HistTotal, sum := HistSum, buckets := HistBuckets } = Hist,
   HistTotal = Total,
