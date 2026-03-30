@@ -10,7 +10,6 @@
 -export([
   mk_info/2,
   table/0,
-  table/1,
   tables/0
 ]).
 

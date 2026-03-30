@@ -11,7 +11,6 @@
   inc_gauge/1, inc_gauge/2,
   dec_gauge/1, dec_gauge/2,
   set_gauge/2,
-  set_gauge_to_current_time/1,
   get_gauge/1,
   collect/2,
   with_gauge/2, with_gauge/3
@@ -43,10 +42,6 @@ dec_gauge(_, _) -> erlang:error(badarg).
 set_gauge(#metric{handle=Ref}, Val) -> instrument_nif:set_gauge(Ref, float(Val));
 set_gauge(_, _) -> erlang:error(badarg).
 
-set_gauge_to_current_time(M) ->
-  Time = erlang:monotonic_time(second),
-  set_gauge(M, Time).
- 
 get_gauge(#metric{handle=Ref}) -> instrument_nif:get_gauge(Ref).
 
 with_gauge(Gauge, F) -> with_gauge_1(Gauge, F, []).

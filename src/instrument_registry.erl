@@ -12,7 +12,7 @@
   register/1,
   unregister/1,
   unregister_all/0,
-  with/2, with/3, with/4, with/5
+  with/2
 ]).
 
 -export([
@@ -50,9 +50,6 @@ unregister_all() ->
 
 
 with(Metric, Fun) -> with_1(Metric, Fun, []).
-with(Metric, Fun, A) -> with_1(Metric, Fun, [A]).
-with(Metric, Fun, A1, A2) -> with_1(Metric, Fun, [A1, A2]).
-with(Metric, Fun, A1, A2, A3) -> with_1(Metric, Fun, [A1, A2, A3]).
 
 
 with_1(#metric{name=Name, handle=#vector{}}, Fun, Args) ->

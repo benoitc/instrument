@@ -10,8 +10,7 @@
   inc_gauge/1, inc_gauge/2,
   dec_gauge/1, dec_gauge/2,
   set_gauge/2,
-  get_gauge/1,
-  destroy_gauge/1
+  get_gauge/1
 ]).
 
 -on_load(init/0).
@@ -49,7 +48,4 @@ set_gauge(_Gauge, _V) ->
   erlang:nif_error({error, not_loaded}).
 
 get_gauge(_Gauge) ->
-  erlang:nif_error({error, not_loaded}).
-
-destroy_gauge(_Gauge) ->
   erlang:nif_error({error, not_loaded}).
