@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Benoit Chesneau <bchesneau@gmail.com>.
+%% Copyright (c) 2017-2026, Benoit Chesneau <bchesneau@gmail.com>.
 %%
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
@@ -200,15 +200,19 @@ tables() -> instrument_lib:tables().
 
 %% persistent_term based lookup API
 
+-spec lookup(term()) -> #metric{} | undefined.
 lookup(Name) ->
   persistent_term:get({instrument_metric, Name}, undefined).
 
+-spec lookup_label(term(), list()) -> #metric{} | undefined.
 lookup_label(Name, LabelValues) ->
   persistent_term:get({instrument_label, Name, LabelValues}, undefined).
 
+-spec cache_label(term(), list(), #metric{}) -> ok.
 cache_label(Name, LabelValues, Metric) ->
   persistent_term:put({instrument_label, Name, LabelValues}, Metric).
 
+-spec collect_all() -> [map()].
 collect_all() ->
   Names = persistent_term:get(instrument_metrics, []),
   lists:filtermap(fun(Name) ->

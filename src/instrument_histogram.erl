@@ -1,6 +1,6 @@
 %%%-------------------------------------------------------------------
 %%% @author benoitc
-%%% @copyright (C) 2017, <COMPANY>
+%%% @copyright (C) 2017-2026, Benoit Chesneau
 %%% @doc
 %%%
 %%% @end

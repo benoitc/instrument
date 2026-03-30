@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Benoit Chesneau <bchesneau@gmail.com>.
+%% Copyright (c) 2017-2026, Benoit Chesneau <bchesneau@gmail.com>.
 %%
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
@@ -19,12 +19,16 @@
 
 -include("instrument.hrl").
 
+-type metric_name() :: atom() | binary() | string().
+-type label_values() :: list().
 
+-spec new(list(), atom(), metric_name(), binary() | string()) -> #metric{}.
 new(Labels, histogram, Name, Help) ->
   new(Labels, histogram, Name, Help, instrument_histogram:default_buckets());
 new(Labels, MetricType, Name, Help) ->
   new(Labels, MetricType, Name, Help, []).
 
+-spec new(list(), atom(), metric_name(), binary() | string(), list()) -> #metric{}.
 new(Labels, MetricType, Name, Help, Buckets) ->
   ok = validate_metric_type(MetricType),
   Vector = #vector{
@@ -126,6 +130,7 @@ find_label(_, _) ->
   {error, bad_labels}.
 
 %% collect/1 - collect all labeled metrics for Prometheus export
+-spec collect(metric_name()) -> map().
 collect(Name) ->
   case instrument_registry:lookup(Name) of
     undefined ->
@@ -155,6 +160,7 @@ collect_metric_value(histogram, Metric) ->
   instrument_histogram:get_histogram(Metric).
 
 %% get_or_create_label/2 - get or create labeled metric instance
+-spec get_or_create_label(metric_name(), label_values()) -> {ok, #metric{}} | {error, term()}.
 get_or_create_label(Name, LabelValues) ->
   case instrument_registry:lookup_label(Name, LabelValues) of
     undefined ->

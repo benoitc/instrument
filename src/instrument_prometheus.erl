@@ -1,4 +1,4 @@
-%% Copyright (c) 2017, Benoit Chesneau <bchesneau@gmail.com>.
+%% Copyright (c) 2017-2026, Benoit Chesneau <bchesneau@gmail.com>.
 %%
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
@@ -21,6 +21,7 @@ format() ->
   Metrics = instrument_registry:collect_all(),
   iolist_to_binary([format_metric(M) || M <- Metrics]).
 
+-spec format_metric(map()) -> iolist().
 format_metric(#{type := counter} = M) ->
   format_counter(M);
 format_metric(#{type := gauge} = M) ->
@@ -30,6 +31,7 @@ format_metric(#{type := histogram} = M) ->
 format_metric(_) ->
   [].
 
+-spec format_counter(map()) -> iolist().
 %% Simple counter without labels
 format_counter(#{name := Name, help := Help, val := Val}) ->
   NameBin = format_name(Name),
@@ -50,6 +52,7 @@ format_counter(#{name := Name, help := Help, labels := Labels, data := Data}) ->
      || {_LabelNames, LabelVals, Val} <- Data]
   ].
 
+-spec format_gauge(map()) -> iolist().
 %% Simple gauge without labels
 format_gauge(#{name := Name, help := Help, val := Val}) ->
   NameBin = format_name(Name),
@@ -68,6 +71,7 @@ format_gauge(#{name := Name, help := Help, labels := Labels, data := Data}) ->
      || {_LabelNames, LabelVals, Val} <- Data]
   ].
 
+-spec format_histogram(map()) -> iolist().
 %% Simple histogram without labels
 format_histogram(#{name := Name, help := Help, count := Count, sum := Sum, buckets := Buckets}) ->
   NameBin = format_name(Name),
@@ -89,6 +93,7 @@ format_histogram(#{name := Name, help := Help, labels := Labels, data := Data}) 
      || {_LabelNames, LabelVals, Val} <- Data]
   ].
 
+-spec format_histogram_data(binary(), list(), list(), map()) -> iolist().
 format_histogram_data(Name, Labels, LabelVals, #{count := Count, sum := Sum, buckets := Buckets}) ->
   [
     format_histogram_buckets(Name, lists:zip(Labels, LabelVals), Buckets),
@@ -97,9 +102,11 @@ format_histogram_data(Name, Labels, LabelVals, #{count := Count, sum := Sum, buc
     format_labeled_value(<<Name/binary, "_count">>, Labels, LabelVals, Count)
   ].
 
+-spec format_histogram_buckets(binary(), list(), list()) -> iolist().
 format_histogram_buckets(Name, LabelPairs, Buckets) ->
   [format_bucket(Name, LabelPairs, B) || B <- Buckets].
 
+-spec format_bucket(binary(), list(), map()) -> iolist().
 format_bucket(Name, LabelPairs, #{upper_bound := Le, cumulative_count := Count}) ->
   BucketLabels = LabelPairs ++ [{le, format_bucket_le(Le)}],
   [
@@ -107,6 +114,7 @@ format_bucket(Name, LabelPairs, #{upper_bound := Le, cumulative_count := Count})
     format_value(Count), <<"\n">>
   ].
 
+-spec format_histogram_bucket_inf(binary(), list(), number()) -> iolist().
 format_histogram_bucket_inf(Name, LabelPairs, Count) ->
   BucketLabels = LabelPairs ++ [{le, <<"+Inf">>}],
   [
@@ -114,26 +122,31 @@ format_histogram_bucket_inf(Name, LabelPairs, Count) ->
     format_value(Count), <<"\n">>
   ].
 
+-spec format_bucket_le(number()) -> binary().
 format_bucket_le(Le) when is_float(Le) ->
   float_to_binary(Le, [{decimals, 10}, compact]);
 format_bucket_le(Le) when is_integer(Le) ->
   integer_to_binary(Le).
 
+-spec format_labeled_value(binary(), list(), list(), number()) -> iolist().
 format_labeled_value(Name, Labels, LabelVals, Val) ->
   LabelPairs = lists:zip(Labels, LabelVals),
   [Name, format_labels(LabelPairs), <<" ">>, format_value(Val), <<"\n">>].
 
+-spec format_labels(list()) -> iolist() | binary().
 format_labels([]) ->
   <<>>;
 format_labels(LabelPairs) ->
   Labels = lists:join(<<",">>, [format_label_pair(K, V) || {K, V} <- LabelPairs]),
   [<<"{">>, Labels, <<"}">>].
 
+-spec format_label_pair(term(), term()) -> iolist().
 format_label_pair(Key, Value) ->
   KeyBin = format_label_name(Key),
   ValBin = escape_label_value(Value),
   [KeyBin, <<"=\"">>, ValBin, <<"\"">>].
 
+-spec format_name(atom() | list() | binary()) -> binary().
 format_name(Name) when is_atom(Name) ->
   atom_to_binary(Name, utf8);
 format_name(Name) when is_list(Name) ->
@@ -141,6 +154,7 @@ format_name(Name) when is_list(Name) ->
 format_name(Name) when is_binary(Name) ->
   Name.
 
+-spec format_label_name(atom() | list() | binary()) -> binary().
 format_label_name(Name) when is_atom(Name) ->
   atom_to_binary(Name, utf8);
 format_label_name(Name) when is_list(Name) ->
@@ -148,21 +162,25 @@ format_label_name(Name) when is_list(Name) ->
 format_label_name(Name) when is_binary(Name) ->
   Name.
 
+-spec format_value(number()) -> binary().
 format_value(Val) when is_float(Val) ->
   float_to_binary(Val, [{decimals, 10}, compact]);
 format_value(Val) when is_integer(Val) ->
   integer_to_binary(Val).
 
+-spec escape_help(binary() | list()) -> binary().
 escape_help(Help) when is_binary(Help) ->
   escape_help_chars(Help);
 escape_help(Help) when is_list(Help) ->
   escape_help_chars(list_to_binary(Help)).
 
+-spec escape_help_chars(binary()) -> binary().
 escape_help_chars(Bin) ->
   binary:replace(
     binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
     <<"\n">>, <<"\\n">>, [global]).
 
+-spec escape_label_value(binary() | list() | atom()) -> binary().
 escape_label_value(Val) when is_binary(Val) ->
   escape_label_chars(Val);
 escape_label_value(Val) when is_list(Val) ->
@@ -170,6 +188,7 @@ escape_label_value(Val) when is_list(Val) ->
 escape_label_value(Val) when is_atom(Val) ->
   escape_label_chars(atom_to_binary(Val, utf8)).
 
+-spec escape_label_chars(binary()) -> binary().
 escape_label_chars(Bin) ->
   B1 = binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
   B2 = binary:replace(B1, <<"\"">>, <<"\\\"">>, [global]),

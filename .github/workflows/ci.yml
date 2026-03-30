@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  build:
+    name: OTP ${{ matrix.otp }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            otp: '26'
+          - os: ubuntu-latest
+            otp: '27'
+          - os: macos-latest
+            otp: '26'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/OTP (Ubuntu)
+        if: runner.os == 'Linux'
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.24'
+
+      - name: Install Erlang/OTP (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install erlang@${{ matrix.otp }}
+          brew link --force erlang@${{ matrix.otp }}
+          brew install rebar3
+
+      - name: Install CMake (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Install CMake (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Run tests
+        run: rebar3 ct
+
+  dialyzer:
+    name: Dialyzer
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '26'
+          rebar3-version: '3.24'
+
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Restore PLT cache
+        uses: actions/cache@v4
+        with:
+          path: _build/default/*_plt
+          key: plt-${{ runner.os }}-otp26-${{ hashFiles('rebar.config') }}
+          restore-keys: |
+            plt-${{ runner.os }}-otp26-
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Run dialyzer
+        run: rebar3 dialyzer
