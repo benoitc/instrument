@@ -58,7 +58,7 @@ end_per_testcase(_Config) ->
 
 starts_with_zero(_Config) ->
   M = instrument_gauge:new_gauge(c, "no help"),
-  0.0 = instrument_gauge:get_gauge(M).
+  +0.0 = instrument_gauge:get_gauge(M).
 
 add_correctly(_Config) ->
   M = instrument_gauge:new_gauge(c, "no help"),

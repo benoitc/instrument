@@ -60,7 +60,7 @@ end_per_testcase(_Config) ->
 
 starts_with_zero(_Config) ->
   M = instrument:new_counter(c, "no help"),
-  0.0 = instrument:get_counter(M).
+  +0.0 = instrument:get_counter(M).
 
 increment_correctly(_Config) ->
   M = instrument:new_counter(c, "no help"),

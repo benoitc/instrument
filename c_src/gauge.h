@@ -6,25 +6,14 @@
 
 #pragma once
 
-#include <atomic>
+#include <stdatomic.h>
 
-namespace instrument {
+typedef struct {
+    _Atomic double value;
+} instrument_gauge_t;
 
-class Gauge  {
- public:
-  Gauge();
-  Gauge(double);
-
-  void Increment();
-  void Increment(double);
-  void Decrement();
-  void Decrement(double);
-  void Set(double);
-  double Value() const;
-
- private:
-  void Change(double);
-  mutable std::atomic<double> value_;
-};
-
-}
+void instrument_gauge_init(instrument_gauge_t *g, double value);
+void instrument_gauge_inc(instrument_gauge_t *g, double value);
+void instrument_gauge_dec(instrument_gauge_t *g, double value);
+void instrument_gauge_set(instrument_gauge_t *g, double value);
+double instrument_gauge_value(const instrument_gauge_t *g);
