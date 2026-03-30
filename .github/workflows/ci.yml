@@ -16,28 +16,20 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            otp: '26'
-          - os: ubuntu-latest
             otp: '27'
+          - os: ubuntu-latest
+            otp: '28'
           - os: macos-latest
-            otp: '26'
+            otp: '27'
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Erlang/OTP (Ubuntu)
-        if: runner.os == 'Linux'
+      - name: Install Erlang/OTP
         uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.otp }}
           rebar3-version: '3.24'
-
-      - name: Install Erlang/OTP (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install erlang@${{ matrix.otp }}
-          brew link --force erlang@${{ matrix.otp }}
-          brew install rebar3
 
       - name: Install CMake (Ubuntu)
         if: runner.os == 'Linux'
@@ -63,7 +55,7 @@ jobs:
       - name: Install Erlang/OTP
         uses: erlef/setup-beam@v1
         with:
-          otp-version: '26'
+          otp-version: '27'
           rebar3-version: '3.24'
 
       - name: Install CMake
@@ -73,9 +65,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: _build/default/*_plt
-          key: plt-${{ runner.os }}-otp26-${{ hashFiles('rebar.config') }}
+          key: plt-${{ runner.os }}-otp27-${{ hashFiles('rebar.config') }}
           restore-keys: |
-            plt-${{ runner.os }}-otp26-
+            plt-${{ runner.os }}-otp27-
 
       - name: Compile
         run: rebar3 compile
