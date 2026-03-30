@@ -12,7 +12,9 @@
   with_label/3, with_label/4,
   with/2,
   remove_label/2,
-  clear_labels/1
+  clear_labels/1,
+  collect/1,
+  get_or_create_label/2
 ]).
 
 -include("instrument.hrl").
@@ -59,8 +61,7 @@ module(_) -> undefined.
 with_label_1(VectorMetric, Label, Mod, Fun, Args) ->
   instrument_registry:with(
     VectorMetric,
-    fun(#metric{ name=Name, handle = Vector }=_M) ->
-      io:format("got metric ~p~n", [_M]),
+    fun(#metric{ name=Name, handle = Vector }) ->
       case find_label(Label, Vector) of
         {ok, Metric} ->
           case Mod of
@@ -99,7 +100,7 @@ clear_labels(Name) ->
   instrument_registry:clear_labels(Name).
 
 validate_metric_type(counter) -> ok;
-validate_metric_type({gauge}) -> ok;
+validate_metric_type(gauge) -> ok;
 validate_metric_type(histogram) -> ok;
 validate_metric_type(_) -> erlang:error(bad_metric).
 
@@ -123,3 +124,63 @@ find_label(LabelMap, #vector{}=Vector) when is_map(LabelMap) ->
   end;
 find_label(_, _) ->
   {error, bad_labels}.
+
+%% collect/1 - collect all labeled metrics for Prometheus export
+collect(Name) ->
+  case instrument_registry:lookup(Name) of
+    undefined ->
+      #{name => Name, type => unknown, data => []};
+    #metric{handle = #vector{} = Vector} ->
+      #vector{help = Help, metric = Type, labels = LabelNames, labels_map = LabelsMap} = Vector,
+      Data = maps:fold(
+        fun(LabelValues, Metric, Acc) ->
+          Val = collect_metric_value(Type, Metric),
+          [{LabelNames, LabelValues, Val} | Acc]
+        end,
+        [],
+        LabelsMap
+      ),
+      #{name => Name,
+        help => Help,
+        type => Type,
+        labels => LabelNames,
+        data => Data}
+  end.
+
+collect_metric_value(counter, Metric) ->
+  instrument_counter:get_counter(Metric);
+collect_metric_value(gauge, Metric) ->
+  instrument_gauge:get_gauge(Metric);
+collect_metric_value(histogram, Metric) ->
+  instrument_histogram:get_histogram(Metric).
+
+%% get_or_create_label/2 - get or create labeled metric instance
+get_or_create_label(Name, LabelValues) ->
+  case instrument_registry:lookup_label(Name, LabelValues) of
+    undefined ->
+      %% Create the labeled metric
+      case instrument_registry:lookup(Name) of
+        undefined ->
+          {error, not_found};
+        #metric{handle = #vector{} = Vector} ->
+          #vector{labels = LabelNames} = Vector,
+          case length(LabelValues) =:= length(LabelNames) of
+            false -> {error, invalid_labels};
+            true ->
+              ok = instrument_registry:create_vector_metric(Name, LabelValues),
+              case instrument_registry:lookup(Name) of
+                #metric{handle = #vector{labels_map = Map}} ->
+                  case maps:find(LabelValues, Map) of
+                    {ok, Metric} ->
+                      instrument_registry:cache_label(Name, LabelValues, Metric),
+                      {ok, Metric};
+                    error ->
+                      {error, not_found}
+                  end;
+                _ -> {error, not_found}
+              end
+          end
+      end;
+    Metric ->
+      {ok, Metric}
+  end.

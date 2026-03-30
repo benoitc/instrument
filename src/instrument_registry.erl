@@ -21,6 +21,14 @@
   create_vector_metric/2
 ]).
 
+%% persistent_term based lookup API
+-export([
+  lookup/1,
+  lookup_label/2,
+  cache_label/3,
+  collect_all/0
+]).
+
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, code_change/3, terminate/2]).
 
@@ -147,18 +155,71 @@ code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
 do_reg(Metric) ->
-  [ets:insert(T, Metric) || T <- tables()].
+  #metric{name = Name} = Metric,
+  %% Store in ETS tables
+  [ets:insert(T, Metric) || T <- tables()],
+  %% Store in persistent_term for fast lookup
+  persistent_term:put({instrument_metric, Name}, Metric),
+  %% Update metrics index
+  Names = persistent_term:get(instrument_metrics, []),
+  case lists:member(Name, Names) of
+    true -> ok;
+    false -> persistent_term:put(instrument_metrics, [Name | Names])
+  end.
 
 do_unreg(Name) ->
   _ = ets:delete(?MODULE, Name),
+  %% Remove from persistent_term
+  catch persistent_term:erase({instrument_metric, Name}),
+  %% Remove from index
+  Names = persistent_term:get(instrument_metrics, []),
+  persistent_term:put(instrument_metrics, lists:delete(Name, Names)),
+  %% Erase cached labels for this metric
+  _ = erase_cached_labels(Name),
   ok.
 
+erase_cached_labels(Name) ->
+  Keys = persistent_term:get(),
+  [persistent_term:erase(K) || {K, _} <- Keys,
+   is_tuple(K), tuple_size(K) =:= 3,
+   element(1, K) =:= instrument_label,
+   element(2, K) =:= Name].
+
 do_delete_all() ->
-  [ets:delete_all_objects(T) || T <- instrument_lib:tables()].
+  [ets:delete_all_objects(T) || T <- instrument_lib:tables()],
+  %% Clear all persistent_term entries
+  Keys = persistent_term:get(),
+  [persistent_term:erase(K) || {K, _} <- Keys,
+   is_tuple(K), tuple_size(K) >= 2,
+   element(1, K) =:= instrument_metric orelse
+   element(1, K) =:= instrument_label],
+  persistent_term:put(instrument_metrics, []).
 
 
 tables() -> instrument_lib:tables().
 
+%% persistent_term based lookup API
+
+lookup(Name) ->
+  persistent_term:get({instrument_metric, Name}, undefined).
+
+lookup_label(Name, LabelValues) ->
+  persistent_term:get({instrument_label, Name, LabelValues}, undefined).
+
+cache_label(Name, LabelValues, Metric) ->
+  persistent_term:put({instrument_label, Name, LabelValues}, Metric).
+
+collect_all() ->
+  Names = persistent_term:get(instrument_metrics, []),
+  lists:filtermap(fun(Name) ->
+    case lookup(Name) of
+      undefined -> false;
+      #metric{collect = {Mod, Fun, Args}} ->
+        {true, erlang:apply(Mod, Fun, Args)}
+    end
+  end, Names).
+
+%% Internal vector functions
 
 do_create_metric(Metric, Label) ->
   #metric{ handle = Vector } = Metric,

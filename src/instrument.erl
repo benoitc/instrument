@@ -29,13 +29,33 @@
   get_histogram/1
 ]).
 
-%% VECTOR API
+%% VECTOR API (legacy)
 -export([
   new_vector/4, new_vector/5,
   get_vector_with/2,
   with_label/3, with_label/4,
   remove_label/2,
   clear_labels/1
+]).
+
+%% VEC API (prometheus-cpp style)
+-export([
+  new_counter_vec/3,
+  new_gauge_vec/3,
+  new_histogram_vec/3, new_histogram_vec/4,
+  labels/2
+]).
+
+%% Vec operations by name + labels
+-export([
+  inc_counter_vec/2, inc_counter_vec/3,
+  get_counter_vec/2,
+  inc_gauge_vec/2, inc_gauge_vec/3,
+  dec_gauge_vec/2, dec_gauge_vec/3,
+  set_gauge_vec/3,
+  get_gauge_vec/2,
+  observe_histogram_vec/3,
+  get_histogram_vec/2
 ]).
 
 %% REGISTRY API
@@ -134,13 +154,15 @@ get_gauge(Gauge) ->
 
 -spec new_histogram(Name :: metric_name(), Help :: help()) -> Hist::metric().
 new_histogram(Name, Help) ->
-  Metric = new_histogram:new(Name, Help),
+  Metric = instrument_histogram:new_histogram(Name, Help),
   ok = register(Metric),
   Metric.
 
 -spec new_histogram(Name :: metric_name(), Help :: help(), Buckets::list()) -> Hist::metric().
 new_histogram(Name, Help, Buckets) ->
-  instrument_histogram:new_histogram(Name, Help, Buckets).
+  Metric = instrument_histogram:new_histogram(Name, Help, Buckets),
+  ok = register(Metric),
+  Metric.
 
 -spec observe_histogram(Hist::metric(), Value::number()) -> ok | {error, not_found}.
 observe_histogram(Hist, Value) ->
@@ -197,3 +219,86 @@ unregister(Name) ->
 
 unregister_all() ->
   instrument_registry:unregister_all().
+
+
+%% VEC API (prometheus-cpp style)
+
+-spec new_counter_vec(Name :: metric_name(), Help :: help(), Labels :: labels()) -> ok.
+new_counter_vec(Name, Help, Labels) ->
+  _ = instrument_vector:new(Labels, counter, Name, Help),
+  ok.
+
+-spec new_gauge_vec(Name :: metric_name(), Help :: help(), Labels :: labels()) -> ok.
+new_gauge_vec(Name, Help, Labels) ->
+  _ = instrument_vector:new(Labels, gauge, Name, Help),
+  ok.
+
+-spec new_histogram_vec(Name :: metric_name(), Help :: help(), Labels :: labels()) -> ok.
+new_histogram_vec(Name, Help, Labels) ->
+  _ = instrument_vector:new(Labels, histogram, Name, Help),
+  ok.
+
+-spec new_histogram_vec(Name :: metric_name(), Help :: help(), Labels :: labels(), Buckets :: list()) -> ok.
+new_histogram_vec(Name, Help, Labels, Buckets) ->
+  _ = instrument_vector:new(Labels, histogram, Name, Help, Buckets),
+  ok.
+
+-spec labels(Name :: metric_name(), LabelValues :: list()) -> metric() | {error, term()}.
+labels(Name, LabelValues) ->
+  case instrument_vector:get_or_create_label(Name, LabelValues) of
+    {ok, Metric} -> Metric;
+    Error -> Error
+  end.
+
+%% Vec operations by name + labels
+
+-spec inc_counter_vec(Name :: metric_name(), LabelValues :: list()) -> ok | {error, term()}.
+inc_counter_vec(Name, LabelValues) ->
+  with_labeled_metric(Name, LabelValues, fun instrument_counter:inc_counter/1).
+
+-spec inc_counter_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
+inc_counter_vec(Name, LabelValues, Value) ->
+  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_counter:inc_counter(M, Value) end).
+
+-spec get_counter_vec(Name :: metric_name(), LabelValues :: list()) -> float() | {error, term()}.
+get_counter_vec(Name, LabelValues) ->
+  with_labeled_metric(Name, LabelValues, fun instrument_counter:get_counter/1).
+
+-spec inc_gauge_vec(Name :: metric_name(), LabelValues :: list()) -> ok | {error, term()}.
+inc_gauge_vec(Name, LabelValues) ->
+  with_labeled_metric(Name, LabelValues, fun instrument_gauge:inc_gauge/1).
+
+-spec inc_gauge_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
+inc_gauge_vec(Name, LabelValues, Value) ->
+  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_gauge:inc_gauge(M, Value) end).
+
+-spec dec_gauge_vec(Name :: metric_name(), LabelValues :: list()) -> ok | {error, term()}.
+dec_gauge_vec(Name, LabelValues) ->
+  with_labeled_metric(Name, LabelValues, fun instrument_gauge:dec_gauge/1).
+
+-spec dec_gauge_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
+dec_gauge_vec(Name, LabelValues, Value) ->
+  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_gauge:dec_gauge(M, Value) end).
+
+-spec set_gauge_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
+set_gauge_vec(Name, LabelValues, Value) ->
+  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_gauge:set_gauge(M, Value) end).
+
+-spec get_gauge_vec(Name :: metric_name(), LabelValues :: list()) -> float() | {error, term()}.
+get_gauge_vec(Name, LabelValues) ->
+  with_labeled_metric(Name, LabelValues, fun instrument_gauge:get_gauge/1).
+
+-spec observe_histogram_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
+observe_histogram_vec(Name, LabelValues, Value) ->
+  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_histogram:observe_histogram(M, Value) end).
+
+-spec get_histogram_vec(Name :: metric_name(), LabelValues :: list()) -> map() | {error, term()}.
+get_histogram_vec(Name, LabelValues) ->
+  with_labeled_metric(Name, LabelValues, fun instrument_histogram:get_histogram/1).
+
+%% Internal helper for vec operations
+with_labeled_metric(Name, LabelValues, Fun) ->
+  case instrument_vector:get_or_create_label(Name, LabelValues) of
+    {ok, Metric} -> Fun(Metric);
+    Error -> Error
+  end.
