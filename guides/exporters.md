@@ -18,6 +18,11 @@ This guide covers exporting telemetry data (spans, metrics, logs) to various bac
 5. [Custom Exporters](#custom-exporters)
 6. [Batch Processing](#batch-processing)
 7. [Configuration](#configuration)
+8. [Sending to External Collectors](#sending-to-external-collectors)
+   - [OpenTelemetry Collector](#opentelemetry-collector)
+   - [Jaeger](#jaeger)
+   - [Grafana Tempo](#grafana-tempo)
+   - [Cloud Backends](#cloud-backends)
 
 ## Overview
 
@@ -655,6 +660,209 @@ ok = instrument_exporter:unregister(instrument_exporter_console).
        instrument_exporter:flush(),
        ok.
    ```
+
+## Sending to External Collectors
+
+The OTLP exporter can send telemetry to any OTLP-compatible backend. Here are common configurations.
+
+### OpenTelemetry Collector
+
+The OpenTelemetry Collector is a vendor-agnostic proxy that receives, processes, and exports telemetry data.
+
+**Docker Setup:**
+
+```bash
+# Run the collector
+docker run -p 4317:4317 -p 4318:4318 \
+  -v $(pwd)/otel-collector-config.yaml:/etc/otelcol/config.yaml \
+  otel/opentelemetry-collector:latest
+```
+
+**Minimal collector config (`otel-collector-config.yaml`):**
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+```
+
+**Erlang configuration:**
+
+```erlang
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "http://localhost:4318"
+})),
+instrument_metrics_exporter:register(instrument_metrics_exporter_otlp:new(#{
+    endpoint => "http://localhost:4318"
+})),
+instrument_log_exporter:register(instrument_log_exporter_otlp:new(#{
+    endpoint => "http://localhost:4318"
+})).
+```
+
+### Jaeger
+
+Jaeger natively supports OTLP. Send traces directly to Jaeger's OTLP endpoint.
+
+**Docker Setup:**
+
+```bash
+docker run -d --name jaeger \
+  -p 4317:4317 \
+  -p 4318:4318 \
+  -p 16686:16686 \
+  jaegertracing/all-in-one:latest
+```
+
+**Erlang configuration:**
+
+```erlang
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "http://localhost:4318"
+})).
+```
+
+Access the Jaeger UI at `http://localhost:16686`.
+
+### Grafana Tempo
+
+Tempo is Grafana's distributed tracing backend with native OTLP support.
+
+**Docker Compose Setup:**
+
+```yaml
+version: "3"
+services:
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "4318:4318"   # OTLP HTTP
+      - "3200:3200"   # Tempo API
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+```
+
+**Tempo config (`tempo.yaml`):**
+
+```yaml
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tmp/tempo/blocks
+```
+
+**Erlang configuration:**
+
+```erlang
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "http://localhost:4318"
+})).
+```
+
+### Cloud Backends
+
+Most cloud observability platforms support OTLP. The pattern is similar: provide the endpoint URL and authentication headers.
+
+**Generic OTLP Pattern:**
+
+```erlang
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "https://otlp.your-provider.com:4318",
+    headers => #{
+        <<"Authorization">> => <<"Bearer your-api-key">>,
+        <<"X-Custom-Header">> => <<"value">>
+    },
+    compression => gzip
+})).
+```
+
+**Datadog (via OTLP):**
+
+```erlang
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "https://trace.agent.datadoghq.com:4318",
+    headers => #{
+        <<"DD-API-KEY">> => <<"your-datadog-api-key">>
+    }
+})).
+```
+
+**Honeycomb:**
+
+```erlang
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "https://api.honeycomb.io:443",
+    headers => #{
+        <<"x-honeycomb-team">> => <<"your-api-key">>,
+        <<"x-honeycomb-dataset">> => <<"your-dataset">>
+    }
+})).
+```
+
+**New Relic:**
+
+```erlang
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "https://otlp.nr-data.net:4318",
+    headers => #{
+        <<"api-key">> => <<"your-license-key">>
+    }
+})).
+```
+
+### Environment Variable Configuration
+
+Configure endpoints via environment variables for flexibility across environments:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4318"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer token"
+```
+
+```erlang
+%% Initialize from environment
+instrument_config:init().
+
+%% Get configured endpoint
+Endpoint = instrument_config:get_otlp_endpoint().
+```
 
 ## Span Data Structure
 

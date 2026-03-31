@@ -236,6 +236,7 @@ end).
 - [Getting Started Guide](guides/getting_started.md)
 - [Instrumentation Guide](guides/instrumentation_guide.md)
 - [Context Propagation Guide](guides/context_propagation.md)
+- [Sampling and Processing Guide](guides/sampling_and_processing.md)
 - [Exporters Guide](guides/exporters.md)
 - [Features Reference](guides/features.md)
 
