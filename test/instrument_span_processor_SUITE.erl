@@ -31,7 +31,11 @@
   batch_queue_overflow_test/1,
   processor_shutdown_test/1,
   concurrent_span_recording_test/1,
-  exporter_error_handling_test/1
+  exporter_error_handling_test/1,
+  %% High concurrency tests
+  high_concurrency_span_recording_test/1,
+  sustained_load_test/1,
+  memory_stability_test/1
 ]).
 
 all() ->
@@ -48,7 +52,11 @@ all() ->
     batch_queue_overflow_test,
     processor_shutdown_test,
     concurrent_span_recording_test,
-    exporter_error_handling_test
+    exporter_error_handling_test,
+    %% High concurrency tests
+    high_concurrency_span_recording_test,
+    sustained_load_test,
+    memory_stability_test
   ].
 
 init_per_suite(Config) ->
@@ -476,4 +484,140 @@ exporter_error_handling_test(_Config) ->
   %% Cleanup
   instrument_span_processor:unregister(instrument_span_processor_simple),
   meck:unload(error_exporter),
+  ok.
+
+%% ============================================================================
+%% High Concurrency Tests
+%% ============================================================================
+
+high_concurrency_span_recording_test(_Config) ->
+  %% 500+ concurrent processes creating spans
+  NumProcesses = 500,
+  SpansPerProcess = 20,
+  Parent = self(),
+
+  %% Spawn processes that create spans concurrently
+  Pids = [spawn_link(fun() ->
+    lists:foreach(fun(I) ->
+      Name = iolist_to_binary([<<"high_conc_span_">>, integer_to_binary(I)]),
+      Span = instrument_tracer:start_span(Name),
+      %% Add some attributes to increase work
+      ok = instrument_tracer:set_attribute(<<"process_id">>, erlang:unique_integer()),
+      ok = instrument_tracer:set_attribute(<<"iteration">>, I),
+      ok = instrument_tracer:add_event(<<"test_event">>),
+      instrument_tracer:end_span(Span)
+    end, lists:seq(1, SpansPerProcess)),
+    Parent ! {done, self()}
+  end) || _ <- lists:seq(1, NumProcesses)],
+
+  %% Wait for all processes to complete
+  lists:foreach(fun(Pid) ->
+    receive {done, Pid} -> ok
+    after 60000 -> ct:fail({timeout_waiting_for, Pid})
+    end
+  end, Pids),
+
+  %% All processes completed without error
+  ok.
+
+sustained_load_test(_Config) ->
+  %% Sustained load for a duration with concurrent span creation
+  Self = self(),
+  DurationMs = 3000,
+  NumProcesses = 50,
+
+  %% Create a counting exporter
+  meck:new(counting_exporter, [non_strict]),
+  meck:expect(counting_exporter, init, fun(_) -> {ok, #{count => 0}} end),
+  meck:expect(counting_exporter, export, fun(Spans, State) ->
+    #{count := C} = State,
+    {ok, State#{count => C + length(Spans)}}
+  end),
+  meck:expect(counting_exporter, shutdown, fun(_) -> ok end),
+
+  ok = instrument_span_processor:register(instrument_span_processor_batch, #{
+    exporter => counting_exporter,
+    schedule_delay_millis => 100,
+    max_export_batch_size => 100
+  }),
+
+  %% Start load generators
+  StopRef = make_ref(),
+  Pids = [spawn_link(fun() ->
+    sustained_load_loop(Self, StopRef)
+  end) || _ <- lists:seq(1, NumProcesses)],
+
+  %% Run for duration
+  timer:sleep(DurationMs),
+
+  %% Stop all generators
+  lists:foreach(fun(Pid) -> Pid ! {stop, StopRef} end, Pids),
+
+  %% Collect results
+  TotalSpans = lists:sum([receive {span_count, Pid, Count} -> Count end || Pid <- Pids]),
+
+  ct:pal("Sustained load test: ~p spans created in ~pms (~.2f spans/sec)",
+         [TotalSpans, DurationMs, TotalSpans / (DurationMs / 1000)]),
+
+  %% Should have created a significant number of spans
+  ?assert(TotalSpans > 0),
+
+  %% Cleanup
+  instrument_span_processor:unregister(instrument_span_processor_batch),
+  meck:unload(counting_exporter),
+  ok.
+
+sustained_load_loop(Parent, StopRef) ->
+  sustained_load_loop(Parent, StopRef, 0).
+
+sustained_load_loop(Parent, StopRef, Count) ->
+  receive
+    {stop, StopRef} ->
+      Parent ! {span_count, self(), Count}
+  after 0 ->
+    Name = iolist_to_binary([<<"sustained_">>, integer_to_binary(Count)]),
+    Span = instrument_tracer:start_span(Name),
+    instrument_tracer:end_span(Span),
+    sustained_load_loop(Parent, StopRef, Count + 1)
+  end.
+
+memory_stability_test(_Config) ->
+  %% Test that memory doesn't grow unboundedly under load
+  NumIterations = 5,
+  SpansPerIteration = 1000,
+  NumProcesses = 20,
+
+  %% Get initial memory
+  erlang:garbage_collect(),
+  {memory, InitialMem} = erlang:process_info(self(), memory),
+
+  %% Run multiple iterations
+  lists:foreach(fun(Iter) ->
+    ct:pal("Memory test iteration ~p", [Iter]),
+
+    Parent = self(),
+    Pids = [spawn_link(fun() ->
+      lists:foreach(fun(I) ->
+        Name = iolist_to_binary([<<"mem_test_">>, integer_to_binary(I)]),
+        Span = instrument_tracer:start_span(Name),
+        instrument_tracer:set_attribute(<<"data">>, <<"some test data for memory">>),
+        instrument_tracer:end_span(Span)
+      end, lists:seq(1, SpansPerIteration)),
+      Parent ! {done, self()}
+    end) || _ <- lists:seq(1, NumProcesses)],
+
+    %% Wait for iteration to complete
+    lists:foreach(fun(Pid) ->
+      receive {done, Pid} -> ok after 30000 -> ct:fail(timeout) end
+    end, Pids),
+
+    %% Force GC and check memory
+    erlang:garbage_collect(),
+    {memory, CurrentMem} = erlang:process_info(self(), memory),
+
+    %% Memory should not grow excessively (allow 10x growth max)
+    ?assert(CurrentMem < InitialMem * 10,
+            io_lib:format("Memory grew from ~p to ~p", [InitialMem, CurrentMem]))
+  end, lists:seq(1, NumIterations)),
+
   ok.

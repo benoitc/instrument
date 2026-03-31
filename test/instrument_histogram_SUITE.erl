@@ -19,14 +19,18 @@
 -export([
   can_generate_buckets/1,
   validate_buckets/1,
-  concurrent_histogram/1
+  concurrent_histogram/1,
+  histogram_concurrent_observe/1,
+  histogram_consistency/1
 ]).
 
 all() ->
   [
     can_generate_buckets,
     validate_buckets,
-    concurrent_histogram
+    concurrent_histogram,
+    histogram_concurrent_observe,
+    histogram_consistency
   ].
 
 
@@ -130,3 +134,82 @@ fold_buckets_counts([_ | Rest], Counts, Value, I) ->
   fold_buckets_counts(Rest, Counts, Value, I + 1);
 fold_buckets_counts([], Counts, _Value, _I) ->
   Counts.
+
+%% ============================================================================
+%% Extended Concurrency Tests
+%% ============================================================================
+
+histogram_concurrent_observe(_Config) ->
+  %% Many concurrent observations from multiple processes
+  TestBuckets = [0.0, 1.0, 5.0, 10.0, 50.0, 100.0],
+  NumProcesses = 50,
+  ObservationsPerProcess = 200,
+  ExpectedCount = float(NumProcesses * ObservationsPerProcess),
+
+  M = instrument_histogram:new_histogram(conc_observe_hist, "concurrent observe test", TestBuckets),
+
+  Parent = self(),
+  Pids = [spawn_link(fun() ->
+    lists:foreach(fun(_) ->
+      Value = rand:uniform() * 100,
+      ok = instrument_histogram:observe_histogram(M, Value)
+    end, lists:seq(1, ObservationsPerProcess)),
+    Parent ! {self(), done}
+  end) || _ <- lists:seq(1, NumProcesses)],
+
+  %% Wait for all processes
+  lists:foreach(fun(Pid) ->
+    receive {Pid, done} -> ok after 10000 -> exit(timeout) end
+  end, Pids),
+
+  %% Verify count
+  #{count := Count} = instrument_histogram:get_histogram(M),
+  ExpectedCount = Count.
+
+histogram_consistency(_Config) ->
+  %% Verify that count equals sum of bucket counts after concurrent operations
+  TestBuckets = [0.0, 0.25, 0.5, 0.75, 1.0],
+  NumProcesses = 100,
+  ObservationsPerProcess = 100,
+  ExpectedCount = float(NumProcesses * ObservationsPerProcess),
+
+  M = instrument_histogram:new_histogram(consistency_hist, "consistency test", TestBuckets),
+
+  %% Concurrent observations
+  Results = pmap(
+    fun(_) ->
+      lists:foreach(fun(_) ->
+        %% Values between 0 and 1 to hit all buckets
+        ok = instrument_histogram:observe_histogram(M, rand:uniform())
+      end, lists:seq(1, ObservationsPerProcess)),
+      ok
+    end,
+    lists:seq(1, NumProcesses)
+  ),
+
+  %% All processes should succeed
+  NumProcesses = length([ok || {ok, ok} <- Results]),
+
+  %% Verify consistency
+  #{count := Count, buckets := Buckets} = instrument_histogram:get_histogram(M),
+
+  %% Count should match expected
+  ExpectedCount = Count,
+
+  %% Sum of cumulative bucket counts verification
+  %% The last bucket (le=+Inf) should equal total count
+  LastBucket = lists:last(Buckets),
+  #{cumulative_count := LastCumulative} = LastBucket,
+  true = (LastCumulative == ExpectedCount),
+
+  %% Cumulative counts should be monotonically increasing
+  CumulativeCounts = [C || #{cumulative_count := C} <- Buckets],
+  true = is_monotonic(CumulativeCounts),
+  ok.
+
+is_monotonic([]) -> true;
+is_monotonic([_]) -> true;
+is_monotonic([A, B | Rest]) when A =< B ->
+  is_monotonic([B | Rest]);
+is_monotonic(_) ->
+  false.
