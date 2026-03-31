@@ -26,7 +26,8 @@
   span_context/1,
   trace_id_generation/1,
   span_exporter/1,
-  propagation_across_processes/1
+  propagation_across_processes/1,
+  spans_no_context_leak/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -44,7 +45,8 @@ all() ->
     span_context,
     trace_id_generation,
     span_exporter,
-    propagation_across_processes
+    propagation_across_processes,
+    spans_no_context_leak
   ].
 
 init_per_suite(Config) ->
@@ -299,3 +301,51 @@ propagation_across_processes(_Config) ->
     end
   end),
   ok.
+
+spans_no_context_leak(_Config) ->
+  %% Count context entries before
+  BeforeCount = count_context_entries(),
+
+  %% Create and end many spans - should NOT leak context entries
+  lists:foreach(fun(N) ->
+    instrument_tracer:with_span(list_to_binary("span_" ++ integer_to_list(N)), fun() ->
+      %% Do some operations that update context
+      ok = instrument_tracer:set_attribute(<<"iteration">>, N),
+      ok = instrument_tracer:add_event(<<"test_event">>),
+      ok = instrument_tracer:set_status(ok)
+    end)
+  end, lists:seq(1, 100)),
+
+  %% Count context entries after
+  AfterCount = count_context_entries(),
+
+  %% Should have at most 1 entry (the main context key)
+  %% With the leak, each span would leave behind a token entry
+  ct:pal("Context entries before: ~p, after: ~p", [BeforeCount, AfterCount]),
+  true = AfterCount =< 1,
+
+  %% Also test nested spans don't leak
+  BeforeNested = count_context_entries(),
+
+  instrument_tracer:with_span(<<"outer">>, fun() ->
+    instrument_tracer:with_span(<<"middle">>, fun() ->
+      instrument_tracer:with_span(<<"inner">>, fun() ->
+        ok = instrument_tracer:set_attribute(<<"level">>, 3)
+      end),
+      ok = instrument_tracer:set_attribute(<<"level">>, 2)
+    end),
+    ok = instrument_tracer:set_attribute(<<"level">>, 1)
+  end),
+
+  AfterNested = count_context_entries(),
+  ct:pal("Nested context entries before: ~p, after: ~p", [BeforeNested, AfterNested]),
+  true = AfterNested =< 1,
+  ok.
+
+count_context_entries() ->
+  Dict = erlang:get(),
+  length([K || {K, _} <- Dict, is_context_key(K)]).
+
+is_context_key('$instrument_context') -> true;
+is_context_key({'$instrument_context', _}) -> true;
+is_context_key(_) -> false.

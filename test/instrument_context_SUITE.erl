@@ -21,6 +21,8 @@
   with_context/1,
   spawn_with_context/1,
   nested_attach_detach/1,
+  set_current_no_leak/1,
+  spawn_helpers_no_leak/1,
   baggage_operations/1,
   baggage_encode_decode/1,
   propagation_spawn/1,
@@ -35,6 +37,8 @@ all() ->
     with_context,
     spawn_with_context,
     nested_attach_detach,
+    set_current_no_leak,
+    spawn_helpers_no_leak,
     baggage_operations,
     baggage_encode_decode,
     propagation_spawn,
@@ -139,6 +143,61 @@ nested_attach_detach(_Config) ->
   ok = instrument_context:detach(Token1),
   undefined = instrument_context:get_value(instrument_context:current(), level),
   ok.
+
+set_current_no_leak(_Config) ->
+  %% Count process dictionary entries before
+  BeforeCount = count_context_entries(),
+
+  %% Call set_current multiple times - should NOT create new entries
+  Ctx1 = instrument_context:set_value(instrument_context:new(), key, value1),
+  ok = instrument_context:set_current(Ctx1),
+  value1 = instrument_context:get_value(instrument_context:current(), key),
+
+  Ctx2 = instrument_context:set_value(instrument_context:new(), key, value2),
+  ok = instrument_context:set_current(Ctx2),
+  value2 = instrument_context:get_value(instrument_context:current(), key),
+
+  Ctx3 = instrument_context:set_value(instrument_context:new(), key, value3),
+  ok = instrument_context:set_current(Ctx3),
+  value3 = instrument_context:get_value(instrument_context:current(), key),
+
+  %% Count after - should only have 1 entry (the main context key)
+  AfterCount = count_context_entries(),
+
+  %% Should have at most 1 more entry than before (the main context)
+  true = (AfterCount - BeforeCount) =< 1,
+  ok.
+
+spawn_helpers_no_leak(_Config) ->
+  Parent = self(),
+  Ctx = instrument_context:set_value(instrument_context:new(), spawn_key, spawn_value),
+  ok = instrument_context:set_current(Ctx),
+
+  %% Spawn process that checks for leaks
+  Pid = instrument_context:spawn_with_context(fun() ->
+    %% Should have the context
+    spawn_value = instrument_context:get_value(instrument_context:current(), spawn_key),
+
+    %% Should not have extra context history entries
+    Count = count_context_entries(),
+    Parent ! {self(), context_count, Count}
+  end),
+
+  receive
+    {Pid, context_count, Count} ->
+      %% Should have at most 1 entry (the main context key, no history tokens)
+      true = Count =< 1
+  after 1000 ->
+    ct:fail(timeout)
+  end.
+
+count_context_entries() ->
+  Dict = erlang:get(),
+  length([K || {K, _} <- Dict, is_context_key(K)]).
+
+is_context_key('$instrument_context') -> true;
+is_context_key({'$instrument_context', _}) -> true;
+is_context_key(_) -> false.
 
 %% ============================================================================
 %% Baggage Tests

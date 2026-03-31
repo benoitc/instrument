@@ -165,7 +165,8 @@ do_reg(Metric) ->
   end.
 
 do_unreg(Name) ->
-  _ = ets:delete(?MODULE, Name),
+  %% Delete from all ETS tables (they're partitioned by scheduler)
+  [ets:delete(T, Name) || T <- tables()],
   %% Remove from persistent_term
   catch persistent_term:erase({instrument_metric, Name}),
   %% Remove from index

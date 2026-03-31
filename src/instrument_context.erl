@@ -18,6 +18,7 @@
   current/0,
   attach/1,
   detach/1,
+  set_current/1,
   get_value/2,
   get_value/3,
   set_value/3,
@@ -30,6 +31,7 @@
 ]).
 
 -define(CONTEXT_KEY, '$instrument_context').
+-define(CONTEXT_TOKEN_KEY, '$instrument_context_token').
 
 -type context() :: #{term() => term()}.
 -type token() :: reference().
@@ -73,6 +75,15 @@ detach(Token) when is_reference(Token) ->
       ok
   end.
 
+%% @doc Sets the current context without storing history.
+%% Use this for processes that don't need to restore previous context,
+%% such as spawned processes that inherit context from their parent.
+%% This avoids memory leaks from accumulating context history entries.
+-spec set_current(context()) -> ok.
+set_current(Ctx) when is_map(Ctx) ->
+  erlang:put(?CONTEXT_KEY, Ctx),
+  ok.
+
 %% @doc Gets a value from the context.
 %% Returns `undefined' if the key is not found.
 -spec get_value(context(), term()) -> term() | undefined.
@@ -112,7 +123,7 @@ with_context(Ctx, Fun) when is_map(Ctx), is_function(Fun, 0) ->
 spawn_with_context(Fun) when is_function(Fun, 0) ->
   Ctx = current(),
   spawn(fun() ->
-    _ = attach(Ctx),
+    set_current(Ctx),
     Fun()
   end).
 
@@ -121,7 +132,7 @@ spawn_with_context(Fun) when is_function(Fun, 0) ->
 spawn_with_context(Module, Function) ->
   Ctx = current(),
   spawn(fun() ->
-    _ = attach(Ctx),
+    set_current(Ctx),
     Module:Function()
   end).
 
@@ -130,7 +141,7 @@ spawn_with_context(Module, Function) ->
 spawn_link_with_context(Fun) when is_function(Fun, 0) ->
   Ctx = current(),
   spawn_link(fun() ->
-    _ = attach(Ctx),
+    set_current(Ctx),
     Fun()
   end).
 
@@ -139,6 +150,6 @@ spawn_link_with_context(Fun) when is_function(Fun, 0) ->
 spawn_link_with_context(Module, Function) ->
   Ctx = current(),
   spawn_link(fun() ->
-    _ = attach(Ctx),
+    set_current(Ctx),
     Module:Function()
   end).

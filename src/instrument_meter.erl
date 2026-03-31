@@ -57,7 +57,9 @@
 -export([
   get_instrument/1,
   list_instruments/0,
-  collect_observables/0
+  collect_observables/0,
+  unregister_instrument/1,
+  unregister_all_instruments/0
 ]).
 
 -include("instrument.hrl").
@@ -260,6 +262,44 @@ collect_observable(#otel_instrument{kind = Kind, handle = {observable, Handle, C
     _:_ -> ok
   end;
 collect_observable(_) ->
+  ok.
+
+%% @doc Unregisters an instrument by name.
+%% This removes the instrument from persistent_term and unregisters the underlying metric.
+-spec unregister_instrument(binary() | atom()) -> ok | {error, not_found}.
+unregister_instrument(Name) when is_atom(Name) ->
+  unregister_instrument(atom_to_binary(Name, utf8));
+unregister_instrument(Name) when is_binary(Name) ->
+  Key = {otel_instrument, Name},
+  case persistent_term:get(Key, undefined) of
+    undefined ->
+      {error, not_found};
+    #otel_instrument{handle = Handle} ->
+      %% Unregister underlying metric
+      _ = unregister_underlying_metric(Handle),
+      %% Remove from persistent_term
+      _ = persistent_term:erase(Key),
+      %% Remove from names list
+      Names = persistent_term:get(otel_instruments, []),
+      NewNames = lists:delete(Name, Names),
+      persistent_term:put(otel_instruments, NewNames),
+      ok
+  end.
+
+%% @doc Unregisters all OTel instruments.
+-spec unregister_all_instruments() -> ok.
+unregister_all_instruments() ->
+  Names = persistent_term:get(otel_instruments, []),
+  lists:foreach(fun(Name) ->
+    _ = unregister_instrument(Name)
+  end, Names),
+  ok.
+
+unregister_underlying_metric(#metric{name = MetricName}) ->
+  instrument:unregister(MetricName);
+unregister_underlying_metric({observable, #metric{name = MetricName}, _Callback}) ->
+  instrument:unregister(MetricName);
+unregister_underlying_metric(_) ->
   ok.
 
 %% ============================================================================

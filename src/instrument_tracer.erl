@@ -442,7 +442,9 @@ attach_span(Span) ->
   Ctx = instrument_context:current(),
   NewCtx = instrument_context:set_value(Ctx, ?SPAN_KEY, Span),
   NewCtx2 = instrument_context:set_value(NewCtx, span_ctx, Span#span.ctx),
-  instrument_context:attach(NewCtx2).
+  %% Use set_current to avoid leaking process dictionary entries.
+  %% The tracer manages its own span stack via parent_ctx field.
+  instrument_context:set_current(NewCtx2).
 
 detach_span() ->
   Ctx = instrument_context:current(),
@@ -451,11 +453,11 @@ detach_span() ->
     #span{parent_ctx = undefined} ->
       NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
       NewCtx2 = instrument_context:remove_value(NewCtx, span_ctx),
-      instrument_context:attach(NewCtx2);
+      instrument_context:set_current(NewCtx2);
     #span{parent_ctx = ParentCtx} ->
       NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
       NewCtx2 = instrument_context:set_value(NewCtx, span_ctx, ParentCtx),
-      instrument_context:attach(NewCtx2);
+      instrument_context:set_current(NewCtx2);
     undefined ->
       ok
   end.
@@ -468,7 +470,7 @@ update_current_span(UpdateFun) ->
       NewSpan = UpdateFun(Span),
       Ctx = instrument_context:current(),
       NewCtx = instrument_context:set_value(Ctx, ?SPAN_KEY, NewSpan),
-      instrument_context:attach(NewCtx),
+      instrument_context:set_current(NewCtx),
       ok
   end.
 

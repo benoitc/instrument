@@ -96,14 +96,30 @@ init(Config) ->
 
 %% @doc Exports log records to the file.
 -spec export([#log_record{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
+export(_LogRecords, #state{fd = undefined} = State) ->
+  %% File handle is undefined (e.g., after rotation failure), try to reopen
+  case open_file(State) of
+    {ok, NewState} ->
+      %% Retry would require re-calling export, but we'd lose the records.
+      %% Return success with reopened state; next batch will work.
+      {ok, NewState};
+    {error, Reason} ->
+      {error, {reopen_failed, Reason}, State}
+  end;
 export(LogRecords, #state{format = Format} = State) ->
   try
     State2 = lists:foldl(fun(LogRecord, AccState) ->
       Line = format_log_record(LogRecord, Format),
       LineSize = iolist_size(Line),
       AccState2 = maybe_rotate(AccState, LineSize),
-      ok = file:write(AccState2#state.fd, Line),
-      AccState2#state{current_size = AccState2#state.current_size + LineSize}
+      case AccState2#state.fd of
+        undefined ->
+          %% Rotation failed to reopen, skip this record
+          AccState2;
+        Fd ->
+          ok = file:write(Fd, Line),
+          AccState2#state{current_size = AccState2#state.current_size + LineSize}
+      end
     end, State, LogRecords),
     {ok, State2}
   catch

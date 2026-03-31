@@ -28,7 +28,9 @@
   counter_with_attributes_test/1,
   gauge_with_attributes_test/1,
   histogram_with_attributes_test/1,
-  attribute_cardinality_test/1
+  attribute_cardinality_test/1,
+  unregister_instrument_test/1,
+  unregister_all_instruments_test/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -48,7 +50,9 @@ all() ->
     counter_with_attributes_test,
     gauge_with_attributes_test,
     histogram_with_attributes_test,
-    attribute_cardinality_test
+    attribute_cardinality_test,
+    unregister_instrument_test,
+    unregister_all_instruments_test
   ].
 
 init_per_suite(Config) ->
@@ -60,6 +64,7 @@ end_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
+  _ = instrument_meter:unregister_all_instruments(),
   _ = instrument:unregister_all(),
   Config.
 
@@ -295,4 +300,63 @@ attribute_cardinality_test(_Config) ->
   end, lists:seq(1, 50)),
 
   %% Should handle high cardinality without error
+  ok.
+
+unregister_instrument_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"unregister_test">>),
+
+  %% Create instruments
+  Counter = instrument_meter:create_counter(Meter, <<"unreg_counter">>),
+  Gauge = instrument_meter:create_gauge(Meter, <<"unreg_gauge">>),
+
+  %% Verify they exist
+  #otel_instrument{} = instrument_meter:get_instrument(<<"unreg_counter">>),
+  #otel_instrument{} = instrument_meter:get_instrument(<<"unreg_gauge">>),
+
+  %% Use them
+  ok = instrument_meter:add(Counter, 10),
+  ok = instrument_meter:set(Gauge, 42.0),
+
+  %% Unregister one
+  ok = instrument_meter:unregister_instrument(<<"unreg_counter">>),
+
+  %% Counter should be gone
+  undefined = instrument_meter:get_instrument(<<"unreg_counter">>),
+
+  %% Gauge should still exist
+  #otel_instrument{} = instrument_meter:get_instrument(<<"unreg_gauge">>),
+
+  %% Unregister non-existent returns error
+  {error, not_found} = instrument_meter:unregister_instrument(<<"non_existent">>),
+
+  %% Can re-create after unregister
+  NewCounter = instrument_meter:create_counter(Meter, <<"unreg_counter">>),
+  #otel_instrument{} = NewCounter,
+  ok = instrument_meter:add(NewCounter, 5),
+
+  ok.
+
+unregister_all_instruments_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"unreg_all_test">>),
+
+  %% Create multiple instruments
+  _ = instrument_meter:create_counter(Meter, <<"bulk_counter1">>),
+  _ = instrument_meter:create_counter(Meter, <<"bulk_counter2">>),
+  _ = instrument_meter:create_gauge(Meter, <<"bulk_gauge">>),
+  _ = instrument_meter:create_histogram(Meter, <<"bulk_histogram">>),
+
+  %% Verify they exist
+  Instruments = instrument_meter:list_instruments(),
+  true = length(Instruments) >= 4,
+
+  %% Unregister all
+  ok = instrument_meter:unregister_all_instruments(),
+
+  %% All should be gone
+  [] = instrument_meter:list_instruments(),
+  undefined = instrument_meter:get_instrument(<<"bulk_counter1">>),
+  undefined = instrument_meter:get_instrument(<<"bulk_counter2">>),
+  undefined = instrument_meter:get_instrument(<<"bulk_gauge">>),
+  undefined = instrument_meter:get_instrument(<<"bulk_histogram">>),
+
   ok.
