@@ -129,17 +129,28 @@ instrument_tracer:with_span(<<"process_order">>, fun() ->
 end).
 ```
 
-### Adding Context to Spans
+### Adding Indexable Attributes to Spans
+
+Attributes are key-value pairs that get indexed by your observability backend, enabling filtering and querying:
 
 ```erlang
 instrument_tracer:with_span(<<"process_order">>, fun() ->
-    %% Add attributes
+    %% Add indexable attributes - these can be queried in Jaeger, Tempo, etc.
     instrument_tracer:set_attributes(#{
+        %% String attributes
         <<"order.id">> => OrderId,
-        <<"customer.id">> => CustomerId
+        <<"customer.id">> => CustomerId,
+        <<"customer.tier">> => <<"premium">>,
+
+        %% Numeric attributes (can filter by range)
+        <<"order.total">> => 149.99,
+        <<"order.item_count">> => 5,
+
+        %% Boolean attributes
+        <<"order.express">> => true
     }),
 
-    %% Add events
+    %% Add timestamped events
     instrument_tracer:add_event(<<"order_validated">>),
 
     Result = process_order(Order),
@@ -149,6 +160,11 @@ instrument_tracer:with_span(<<"process_order">>, fun() ->
     Result
 end).
 ```
+
+Now you can query traces in your backend:
+- Find all orders from premium customers: `customer.tier = "premium"`
+- Find expensive orders: `order.total > 100`
+- Find failed express orders: `order.express = true AND status = error`
 
 ### Nested Spans
 

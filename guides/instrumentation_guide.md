@@ -205,17 +205,17 @@ instrument_tracer:with_span(<<"process_message">>, #{kind => consumer}, fun() ->
 end).
 ```
 
-### Adding Semantic Attributes
+### Adding Indexable Attributes
 
-Use semantic conventions for consistent attributes:
+Span attributes are **indexed metadata** that observability backends use for filtering, grouping, and querying. Use semantic conventions for consistent attributes:
 
 ```erlang
 instrument_tracer:with_span(<<"http.request">>, #{kind => server}, fun() ->
-    %% HTTP attributes
+    %% HTTP attributes - indexed for filtering/querying
     instrument_tracer:set_attributes(#{
-        <<"http.method">> => Method,
+        <<"http.method">> => Method,          %% Filter by GET/POST/etc.
         <<"http.url">> => Url,
-        <<"http.target">> => Path,
+        <<"http.target">> => Path,            %% Group latencies by endpoint
         <<"http.host">> => Host,
         <<"http.scheme">> => <<"https">>,
         <<"http.user_agent">> => UserAgent
@@ -223,7 +223,7 @@ instrument_tracer:with_span(<<"http.request">>, #{kind => server}, fun() ->
 
     Response = handle(Req),
 
-    %% Add response attributes
+    %% Add response attributes - enables status code filtering
     instrument_tracer:set_attributes(#{
         <<"http.status_code">> => StatusCode,
         <<"http.response_content_length">> => ContentLength
@@ -232,6 +232,31 @@ instrument_tracer:with_span(<<"http.request">>, #{kind => server}, fun() ->
     Response
 end).
 ```
+
+### Attribute Types and Indexing
+
+Backends index attributes by type, enabling different query operations:
+
+```erlang
+instrument_tracer:set_attributes(#{
+    %% String attributes - exact match, contains, regex
+    <<"user.id">> => <<"user-12345">>,
+    <<"customer.tier">> => <<"enterprise">>,
+
+    %% Numeric attributes - range queries, aggregations
+    <<"order.total">> => 299.99,
+    <<"retry.count">> => 3,
+
+    %% Boolean attributes - binary filtering
+    <<"cache.hit">> => true,
+    <<"auth.mfa_used">> => false
+}).
+```
+
+Example queries in observability backends:
+- `customer.tier = "enterprise" AND order.total > 100`
+- `http.status_code >= 500`
+- `cache.hit = false AND duration > 1s`
 
 ### Recording Errors
 

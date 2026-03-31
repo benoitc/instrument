@@ -9,6 +9,9 @@ All notable changes to this project will be documented in this file.
 - Context propagation via `instrument_context` module
 - W3C TraceContext format support in `instrument_propagation`
 - W3C Baggage propagation via `instrument_baggage` module
+- B3 single-header propagator (`instrument_propagator_b3`) for Zipkin compatibility
+- B3 multi-header propagator (`instrument_propagator_b3_multi`) for X-B3-* headers
+- Support for `b3` and `b3multi` in `OTEL_PROPAGATORS` environment variable
 - Native span implementation via `instrument_tracer` with full lifecycle management
 - OTel-compatible MeterProvider/Meter API via `instrument_meter`
 - Attribute handling via `instrument_attributes`

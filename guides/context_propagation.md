@@ -314,14 +314,53 @@ handle_call(Request, From, State) ->
 
 ## Cross-Service Propagation
 
-### W3C TraceContext Format
+### Propagation Formats
 
-The library uses W3C TraceContext for HTTP propagation:
+The library supports multiple propagation formats:
+
+#### W3C TraceContext (Default)
 
 ```
 traceparent: 00-{trace_id}-{span_id}-{flags}
 tracestate: vendor1=value1,vendor2=value2
 baggage: key1=value1,key2=value2
+```
+
+#### B3 Single Header (Zipkin)
+
+```
+b3: {trace_id}-{span_id}-{sampling_state}-{parent_span_id}
+```
+
+Configure via environment or code:
+
+```erlang
+%% Environment variable
+os:putenv("OTEL_PROPAGATORS", "b3"),
+instrument_config:init().
+
+%% Or programmatically
+instrument_propagator:set_propagators([instrument_propagator_b3]).
+```
+
+#### B3 Multi Header (Zipkin)
+
+```
+X-B3-TraceId: {trace_id}
+X-B3-SpanId: {span_id}
+X-B3-ParentSpanId: {parent_span_id}
+X-B3-Sampled: 0 or 1
+X-B3-Flags: 1 (debug)
+```
+
+Configure:
+
+```erlang
+os:putenv("OTEL_PROPAGATORS", "b3multi"),
+instrument_config:init().
+
+%% Or programmatically
+instrument_propagator:set_propagators([instrument_propagator_b3_multi]).
 ```
 
 ### Manual Header Injection
