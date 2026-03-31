@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-04-01
+
+### Added
+- E2E tests with Docker (Prometheus + Jaeger)
+- Stress tests and race condition tests
+- OpenTelemetry compatibility info to README
+- Sampling and processing guide, external collectors documentation
+
+### Fixed
+- Context/memory leaks with instrument cleanup
+
+### Changed
+- Documentation updates for B3 propagation and OTel clarity
+
 ## [0.3.0] - 2026-03-31
 
 ### Added

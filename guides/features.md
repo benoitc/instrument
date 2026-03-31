@@ -199,7 +199,7 @@ instrument:inc_counter_vec(name, [<<"GET">>, <<"200">>]).
     %% Span processor configuration
     {span_processor, {instrument_span_processor_batch, #{
       max_queue_size => 2048,
-      scheduled_delay_ms => 5000,
+      schedule_delay_millis => 5000,
       max_export_batch_size => 512
     }}},
 

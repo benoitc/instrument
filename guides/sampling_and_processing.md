@@ -326,7 +326,7 @@ Configure via `sys.config`:
     }}},
     {span_processor, {instrument_span_processor_batch, #{
         max_queue_size => 4096,
-        scheduled_delay_ms => 2000,
+        schedule_delay_millis => 2000,
         max_export_batch_size => 512
     }}},
     {span_exporter, {instrument_exporter_otlp, #{
