@@ -6,7 +6,12 @@
 -record(metric, {
   name,
   handle :: term(),
-  collect :: tuple()
+  collect :: tuple(),
+  %% OTel fields (optional)
+  description :: binary() | undefined,
+  unit :: binary() | undefined,
+  meter :: binary() | undefined,
+  attributes = #{} :: map()
 }).
 
 -record(metric_info, {

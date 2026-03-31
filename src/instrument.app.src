@@ -4,8 +4,8 @@
 %% See the NOTICE for more information.
 
 {application, instrument,
- [{description, "Fast metrics library for Erlang with Prometheus export"},
-  {vsn, "0.2.0"},
+ [{description, "Fast metrics library for Erlang with Prometheus export and OpenTelemetry support"},
+  {vsn, "0.3.0"},
   {registered, []},
   {mod, {instrument_app, []}},
   {applications, [kernel, stdlib]},

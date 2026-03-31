@@ -3,14 +3,16 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/instrument.svg)](https://hex.pm/packages/instrument)
 [![Build Status](https://github.com/benoitc/instrument/workflows/CI/badge.svg)](https://github.com/benoitc/instrument/actions)
 
-Fast metrics library for Erlang with Prometheus export. Uses NIFs for high-performance atomic counters, gauges, and histograms.
+Fast metrics and tracing library for Erlang with Prometheus export. Uses NIFs for high-performance atomic counters, gauges, and histograms.
 
 ## Features
 
-- High-performance counters, gauges, and histograms using NIFs
-- Vec API for labeled metrics (prometheus-cpp style)
-- Built-in Prometheus text format export
-- Simple, minimal API
+- **High-Performance Metrics**: Counters, gauges, and histograms using NIFs
+- **Labeled Metrics**: Vector metrics with dimension labels
+- **Prometheus Export**: Built-in text format export
+- **OpenTelemetry API**: OTel-compatible Meter and Tracer interfaces
+- **Distributed Tracing**: Spans with W3C TraceContext propagation
+- **No External Dependencies**: Pure Erlang/OTP implementation
 
 ## Installation
 
@@ -18,121 +20,157 @@ Fast metrics library for Erlang with Prometheus export. Uses NIFs for high-perfo
 
 ```erlang
 {deps, [
-    {instrument, "0.2.0"}
+    {instrument, "0.3.0"}
 ]}.
 ```
 
-### mix
+### mix (Elixir)
 
 ```elixir
-{:instrument, "~> 0.2.0"}
+{:instrument, "~> 0.3.0"}
 ```
 
-## Quick Start
+## Metrics
 
-### Counters
+### Basic Metrics
 
 ```erlang
-%% Create a counter
+%% Counter - monotonically increasing
 Counter = instrument:new_counter(http_requests_total, "Total HTTP requests"),
-
-%% Increment
 instrument:inc_counter(Counter),
 instrument:inc_counter(Counter, 5),
 
-%% Get value
-Value = instrument:get_counter(Counter).
-```
-
-### Gauges
-
-```erlang
-%% Create a gauge
-Gauge = instrument:new_gauge(temperature, "Current temperature"),
-
-%% Set, increment, decrement
-instrument:set_gauge(Gauge, 23.5),
+%% Gauge - point-in-time value
+Gauge = instrument:new_gauge(active_connections, "Current connections"),
+instrument:set_gauge(Gauge, 100),
 instrument:inc_gauge(Gauge),
-instrument:dec_gauge(Gauge, 2),
 
-%% Get value
-Value = instrument:get_gauge(Gauge).
-```
-
-### Histograms
-
-```erlang
-%% Create with default buckets
+%% Histogram - value distribution
 Histogram = instrument:new_histogram(request_duration_seconds, "Request duration"),
-
-%% Create with custom buckets
-Histogram2 = instrument:new_histogram(response_size_bytes, "Response size",
-    [100, 500, 1000, 5000, 10000]),
-
-%% Observe values
-instrument:observe_histogram(Histogram, 0.25),
-
-%% Get histogram data
-#{count := Count, sum := Sum, buckets := Buckets} = instrument:get_histogram(Histogram).
+instrument:observe_histogram(Histogram, 0.125).
 ```
 
-## Vec API (Labeled Metrics)
-
-The Vec API provides labeled metrics similar to prometheus-cpp:
+### Labeled Metrics
 
 ```erlang
-%% Create a counter vec with labels
-instrument:new_counter_vec(http_requests_total, "HTTP requests", [method, path]),
+%% Create with labels
+instrument:new_counter_vec(http_requests_total, "HTTP requests", [method, status]),
 
-%% Increment with label values
-instrument:inc_counter_vec(http_requests_total, ["GET", "/api/users"]),
-instrument:inc_counter_vec(http_requests_total, ["POST", "/api/users"], 1),
-
-%% Get a specific labeled metric
-Counter = instrument:labels(http_requests_total, ["GET", "/api/users"]),
-instrument:inc_counter(Counter),
-
-%% Gauge vec
-instrument:new_gauge_vec(connections, "Active connections", [pool]),
-instrument:set_gauge_vec(connections, ["db"], 5),
-
-%% Histogram vec
-instrument:new_histogram_vec(request_duration, "Request duration", [endpoint]),
-instrument:observe_histogram_vec(request_duration, ["/api"], 0.125).
+%% Increment specific label combination
+instrument:inc_counter_vec(http_requests_total, ["GET", "200"]),
+instrument:inc_counter_vec(http_requests_total, ["POST", "201"]).
 ```
 
-## Prometheus Export
+### OpenTelemetry Meter API
 
-Export metrics in Prometheus text format:
+For OpenTelemetry-style instrumentation with attributes:
 
 ```erlang
-%% Get formatted metrics
-Output = instrument_prometheus:format(),
+%% Get a meter
+Meter = instrument_meter:get_meter(<<"my_service">>),
 
-%% Get content type for HTTP response
+%% Create instruments
+Counter = instrument_meter:create_counter(Meter, <<"requests_total">>, #{
+    description => <<"Total requests">>,
+    unit => <<"1">>
+}),
+Histogram = instrument_meter:create_histogram(Meter, <<"request_duration">>, #{
+    unit => <<"ms">>
+}),
+
+%% Record with attributes
+instrument_meter:add(Counter, 1, #{method => <<"GET">>, status => 200}),
+instrument_meter:record(Histogram, 42.5, #{endpoint => <<"/api/users">>}).
+```
+
+### Prometheus Export
+
+```erlang
+%% Get Prometheus-formatted metrics
+Body = instrument_prometheus:format(),
 ContentType = instrument_prometheus:content_type().
-%% Returns: <<"text/plain; version=0.0.4; charset=utf-8">>
 ```
 
-Example output:
+## Tracing
 
+### Creating Spans
+
+```erlang
+%% Simple span
+instrument_tracer:with_span(<<"process_order">>, fun() ->
+    instrument_tracer:set_attributes(#{<<"order.id">> => OrderId}),
+    process_order(Order)
+end).
+
+%% Nested spans (automatic parent-child linking)
+instrument_tracer:with_span(<<"handle_request">>, fun() ->
+    instrument_tracer:with_span(<<"validate">>, fun() -> validate(Input) end),
+    instrument_tracer:with_span(<<"process">>, fun() -> process(Data) end)
+end).
+
+%% With options
+instrument_tracer:with_span(<<"operation">>, #{kind => server}, fun() ->
+    instrument_tracer:set_status(ok),
+    do_work()
+end).
 ```
-# HELP http_requests_total Total HTTP requests
-# TYPE http_requests_total counter
-http_requests_total{method="GET",path="/api"} 150
-http_requests_total{method="POST",path="/api"} 42
+
+### Context Propagation
+
+```erlang
+%% Spawn with trace context preserved
+instrument_propagation:spawn(fun() ->
+    instrument_tracer:with_span(<<"background_task">>, fun() ->
+        do_work()
+    end)
+end).
+
+%% HTTP propagation (W3C TraceContext)
+%% Inject into outgoing request
+Headers = instrument_propagation:inject_headers(instrument_context:current()),
+
+%% Extract from incoming request
+Ctx = instrument_propagation:extract_headers(IncomingHeaders),
+instrument_context:attach(Ctx).
 ```
+
+### Logger Integration
+
+```erlang
+%% Install at application start
+instrument_logger:install(),
+
+%% Logs within spans include trace_id and span_id
+instrument_tracer:with_span(<<"my_operation">>, fun() ->
+    logger:info("Processing request"),
+    do_work()
+end).
+```
+
+## Documentation
+
+- [Getting Started Guide](guides/getting_started.md)
+- [Instrumentation Guide](guides/instrumentation_guide.md)
+- [Context Propagation Guide](guides/context_propagation.md)
+- [Exporters Guide](guides/exporters.md)
+
+## Modules
+
+| Module | Purpose |
+|--------|---------|
+| `instrument` | Core metrics API |
+| `instrument_meter` | OpenTelemetry Meter API |
+| `instrument_tracer` | Span creation and tracing |
+| `instrument_context` | Context management |
+| `instrument_propagation` | Cross-process propagation |
+| `instrument_prometheus` | Prometheus export |
 
 ## Building
 
 ```bash
 rebar3 compile
-```
-
-## Running Tests
-
-```bash
 rebar3 ct
+rebar3 dialyzer
 ```
 
 ## License

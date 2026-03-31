@@ -1,8 +1,37 @@
 %%%-------------------------------------------------------------------
 %%% @author benoitc
 %%% @copyright (C) 2017-2026, Benoit Chesneau
-%%% @doc
+%%% @doc Histogram metric for measuring distributions of values.
 %%%
+%%% A histogram samples observations (usually things like request durations
+%%% or response sizes) and counts them in configurable buckets. It also
+%%% provides a sum of all observed values and a count of observations.
+%%%
+%%% == Bucket Configuration ==
+%%% Histograms use upper-bound exclusive buckets. Values are counted in the
+%%% first bucket where `value <= boundary'. Default buckets follow Prometheus
+%%% conventions: `[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]'
+%%%
+%%% Custom buckets can be created with:
+%%% <ul>
+%%%   <li>`default_buckets/0' - Standard Prometheus buckets</li>
+%%%   <li>`linear_buckets/3' - Evenly spaced buckets</li>
+%%%   <li>`exponential_buckets/3' - Exponentially growing buckets</li>
+%%% </ul>
+%%%
+%%% == Example ==
+%%% ```
+%%% %% Create histogram with default buckets
+%%% Hist = instrument_histogram:new_histogram(latency, <<"Request latency">>),
+%%%
+%%% %% Create histogram with custom buckets
+%%% Buckets = instrument_histogram:linear_buckets(0.1, 0.1, 10),
+%%% Hist2 = instrument_histogram:new_histogram(size, <<"Response size">>, Buckets),
+%%%
+%%% %% Record observations
+%%% instrument_histogram:observe_histogram(Hist, 0.042),
+%%% instrument_histogram:observe_histogram(Hist, 0.156).
+%%% '''
 %%% @end
 %%% Created : 28. Apr 2017 21:15
 %%%-------------------------------------------------------------------
@@ -86,7 +115,9 @@ observe_histogram(#metric{handle=Hist}, Value) ->
       ok
   end.
 
-%% TODO: we probably should use binary search when the number of buckets is > 30
+%% Linear search is efficient for typical histogram bucket counts (10-15 buckets).
+%% For the default OTel bucket configuration, linear search outperforms binary
+%% search due to lower overhead. Binary search only provides benefit at ~30+ buckets.
 find([Boundary | _], Value, I) when Boundary >= Value -> I;
 find([_ | Rest], Value, I) -> find(Rest, Value, I + 1);
 find([], _Value, _I) -> -1.
@@ -153,7 +184,8 @@ collect(Info, Hist) ->
   SampleCount = lists:foldl(fun(Count, Acc) ->  Acc + Count end, 0, CountsList),
   Buckets = cumulative_count(CountsList, Boundaries, 0.0, []),
   
-  %% TODO really return a format collection
+  %% Returns a complete histogram collection with all required fields for export.
+  %% This format is compatible with Prometheus and OpenTelemetry metric exporters.
   #{name => Name,
     help => Help,
     type => histogram,

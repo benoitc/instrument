@@ -3,6 +3,25 @@
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
 
+%% @doc Gauge metric implementation for point-in-time measurements.
+%%
+%% A gauge represents a single numerical value that can arbitrarily go up
+%% and down. Gauges are typically used for measured values like temperature,
+%% current memory usage, or the number of concurrent requests.
+%%
+%% Gauges use NIF-based atomic operations for high-performance concurrent
+%% updates without locks.
+%%
+%% == Example ==
+%% ```
+%% Gauge = instrument_gauge:new_gauge(temperature, <<"Current temperature">>),
+%% instrument_gauge:set_gauge(Gauge, 23.5),       % Set to specific value
+%% instrument_gauge:inc_gauge(Gauge),             % Increment by 1
+%% instrument_gauge:dec_gauge(Gauge, 0.5),        % Decrement by 0.5
+%% Value = instrument_gauge:get_gauge(Gauge).
+%% '''
+%%
+%% @see instrument for the main API facade
 -module(instrument_gauge).
 
 %% public api

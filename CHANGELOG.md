@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-03-31
+
+### Added
+- OpenTelemetry-compatible API with native implementation
+- Context propagation via `instrument_context` module
+- W3C TraceContext format support in `instrument_propagation`
+- W3C Baggage propagation via `instrument_baggage` module
+- Native span implementation via `instrument_tracer` with full lifecycle management
+- OTel-compatible MeterProvider/Meter API via `instrument_meter`
+- Attribute handling via `instrument_attributes`
+- Erlang logger integration via `instrument_logger` with automatic trace correlation
+- Trace/Span ID generation per W3C spec via `instrument_id`
+- Span exporter system via `instrument_exporter` with batch processing
+- Console exporter (`instrument_exporter_console`) with text and JSON formats
+- OTLP HTTP exporter (`instrument_exporter_otlp`) for OpenTelemetry collectors
+- Cross-process context propagation helpers
+- New test suites for context, tracer, meter, and exporter modules
+- New `instrument_otel.hrl` header with OTel record definitions
+- Documentation guides: getting started, instrumentation, context propagation, exporters
+
+### Changed
+- Extended `metric` record with OTel fields (description, unit, meter, attributes)
+- Updated application description to mention OpenTelemetry support
+- Added hackney 3.2.1 as dependency for OTLP HTTP export
+
 ## [0.2.0] - 2026-03-31
 
 ### Added

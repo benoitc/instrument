@@ -29,7 +29,11 @@ start_link() ->
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
   Registry = child_spec(worker, registry, instrument_registry, permanent, []),
-  {ok, { {one_for_all, 0, 1}, [Registry]} }.
+  Exporter = child_spec(worker, exporter, instrument_exporter, permanent, []),
+  MetricsExporter = child_spec(worker, metrics_exporter, instrument_metrics_exporter, permanent, []),
+  LogExporter = child_spec(worker, log_exporter, instrument_log_exporter, permanent, []),
+  SpanProcessor = child_spec(worker, span_processor, instrument_span_processor, permanent, []),
+  {ok, { {one_for_all, 0, 1}, [Registry, Exporter, MetricsExporter, LogExporter, SpanProcessor]} }.
 
 %%====================================================================
 %% Internal functions

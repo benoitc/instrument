@@ -2,6 +2,27 @@
 %%
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
+
+%% @doc Main API facade for metrics instrumentation.
+%%
+%% This module provides a unified interface for creating and manipulating
+%% metrics including counters, gauges, and histograms. It supports both
+%% simple metrics and vector metrics (metrics with labels).
+%%
+%% == Simple Metrics ==
+%% ```
+%% Counter = instrument:new_counter(requests_total, <<"Total HTTP requests">>),
+%% instrument:inc_counter(Counter),
+%% instrument:inc_counter(Counter, 5).
+%% '''
+%%
+%% == Vector Metrics (Labeled) ==
+%% ```
+%% instrument:new_counter_vec(http_requests, <<"Requests">>, [method, status]),
+%% instrument:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]).
+%% '''
+%%
+%% For OpenTelemetry-compatible metrics, see {@link instrument_meter}.
 -module(instrument).
 -author("benoitc").
 

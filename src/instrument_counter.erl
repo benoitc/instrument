@@ -3,6 +3,23 @@
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
 
+%% @doc Counter metric implementation with monotonically increasing semantics.
+%%
+%% A counter is a cumulative metric that can only increase. It is typically
+%% used to count requests served, tasks completed, or errors occurred.
+%%
+%% Counters use NIF-based atomic operations for high-performance concurrent
+%% updates without locks.
+%%
+%% == Example ==
+%% ```
+%% Counter = instrument_counter:new_counter(requests, <<"Total requests">>),
+%% instrument_counter:inc_counter(Counter),      % Increment by 1
+%% instrument_counter:inc_counter(Counter, 10),  % Increment by 10
+%% Value = instrument_counter:get_counter(Counter).
+%% '''
+%%
+%% @see instrument for the main API facade
 -module(instrument_counter).
 
 %% public api

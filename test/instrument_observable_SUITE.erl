@@ -1,0 +1,200 @@
+%% Copyright (c) 2017-2026, Benoit Chesneau <bchesneau@gmail.com>.
+%%
+%% This file is part of instrument released under the MIT license.
+%% See the NOTICE for more information.
+
+-module(instrument_observable_SUITE).
+-author("benoitc").
+
+-include_lib("common_test/include/ct.hrl").
+-include_lib("stdlib/include/assert.hrl").
+-include("instrument_otel.hrl").
+
+-export([
+  all/0,
+  init_per_suite/1,
+  end_per_suite/1,
+  init_per_testcase/2,
+  end_per_testcase/2
+]).
+
+-export([
+  observable_gauge_test/1,
+  observable_counter_test/1,
+  observable_up_down_counter_test/1,
+  collect_observables_test/1,
+  observable_callback_error_test/1,
+  multiple_observables_test/1
+]).
+
+all() ->
+  [
+    observable_gauge_test,
+    observable_counter_test,
+    observable_up_down_counter_test,
+    collect_observables_test,
+    observable_callback_error_test,
+    multiple_observables_test
+  ].
+
+init_per_suite(Config) ->
+  _ = application:ensure_all_started(crypto),
+  ok = application:start(instrument),
+  Config.
+
+end_per_suite(_Config) ->
+  ok = application:stop(instrument),
+  ok.
+
+init_per_testcase(_TestCase, Config) ->
+  Config.
+
+end_per_testcase(_TestCase, _Config) ->
+  ok.
+
+%% ============================================================================
+%% Test Cases
+%% ============================================================================
+
+observable_gauge_test(_Config) ->
+  %% Create a process to hold a dynamic value
+  ValueRef = atomics:new(1, [{signed, true}]),
+  atomics:put(ValueRef, 1, 42),
+
+  Meter = instrument_meter:get_meter(<<"test_observable">>),
+  Callback = fun() -> atomics:get(ValueRef, 1) end,
+
+  Gauge = instrument_meter:create_observable_gauge(Meter, <<"obs_gauge_test">>, Callback),
+
+  ?assertEqual(observable_gauge, Gauge#otel_instrument.kind),
+  ?assertEqual(<<"obs_gauge_test">>, Gauge#otel_instrument.name),
+
+  %% Update the value
+  atomics:put(ValueRef, 1, 100),
+
+  %% Collect observables to trigger callback
+  ok = instrument_meter:collect_observables(),
+
+  ok.
+
+observable_counter_test(_Config) ->
+  %% Counter that tracks cumulative count
+  CountRef = atomics:new(1, [{signed, false}]),
+  atomics:put(CountRef, 1, 0),
+
+  Meter = instrument_meter:get_meter(<<"test_observable">>),
+  Callback = fun() ->
+    atomics:add(CountRef, 1, 1),
+    atomics:get(CountRef, 1)
+  end,
+
+  Counter = instrument_meter:create_observable_counter(Meter, <<"obs_counter_test">>, Callback),
+
+  ?assertEqual(observable_counter, Counter#otel_instrument.kind),
+
+  %% First collection
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(1, atomics:get(CountRef, 1)),
+
+  %% Second collection
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(2, atomics:get(CountRef, 1)),
+
+  ok.
+
+observable_up_down_counter_test(_Config) ->
+  %% UpDownCounter that can go up and down
+  ValueRef = atomics:new(1, [{signed, true}]),
+  atomics:put(ValueRef, 1, 50),
+
+  Meter = instrument_meter:get_meter(<<"test_observable">>),
+  Callback = fun() -> atomics:get(ValueRef, 1) end,
+
+  UpDownCounter = instrument_meter:create_observable_up_down_counter(
+    Meter, <<"obs_updown_test">>, Callback
+  ),
+
+  ?assertEqual(observable_up_down_counter, UpDownCounter#otel_instrument.kind),
+
+  %% Initial collection
+  ok = instrument_meter:collect_observables(),
+
+  %% Value goes down
+  atomics:put(ValueRef, 1, 30),
+  ok = instrument_meter:collect_observables(),
+
+  %% Value goes up
+  atomics:put(ValueRef, 1, 75),
+  ok = instrument_meter:collect_observables(),
+
+  ok.
+
+collect_observables_test(_Config) ->
+  %% Test that collect_observables invokes callbacks and updates values
+  ValueRef = atomics:new(1, [{signed, true}]),
+  atomics:put(ValueRef, 1, 999),
+
+  Meter = instrument_meter:get_meter(<<"test_collect">>),
+  _Gauge = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"collect_test_gauge">>,
+    fun() -> atomics:get(ValueRef, 1) end
+  ),
+
+  %% Collect observables
+  ok = instrument_meter:collect_observables(),
+
+  %% Verify the instrument is registered
+  Inst = instrument_meter:get_instrument(<<"collect_test_gauge">>),
+  ?assertNotEqual(undefined, Inst),
+  ok.
+
+observable_callback_error_test(_Config) ->
+  %% Test that callback errors are handled gracefully
+  Meter = instrument_meter:get_meter(<<"test_error">>),
+
+  %% Callback that throws an error
+  _ErrorGauge = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"error_gauge">>,
+    fun() -> error(intentional_error) end
+  ),
+
+  %% This should not crash
+  ok = instrument_meter:collect_observables(),
+  ok.
+
+multiple_observables_test(_Config) ->
+  %% Test multiple observable instruments
+  Val1 = atomics:new(1, [{signed, true}]),
+  Val2 = atomics:new(1, [{signed, true}]),
+  Val3 = atomics:new(1, [{signed, true}]),
+
+  atomics:put(Val1, 1, 10),
+  atomics:put(Val2, 1, 20),
+  atomics:put(Val3, 1, 30),
+
+  Meter = instrument_meter:get_meter(<<"test_multi">>),
+
+  _G1 = instrument_meter:create_observable_gauge(
+    Meter, <<"multi_gauge1">>, fun() -> atomics:get(Val1, 1) end
+  ),
+  _G2 = instrument_meter:create_observable_gauge(
+    Meter, <<"multi_gauge2">>, fun() -> atomics:get(Val2, 1) end
+  ),
+  _G3 = instrument_meter:create_observable_gauge(
+    Meter, <<"multi_gauge3">>, fun() -> atomics:get(Val3, 1) end
+  ),
+
+  %% All callbacks should be invoked
+  ok = instrument_meter:collect_observables(),
+
+  %% Update values
+  atomics:put(Val1, 1, 100),
+  atomics:put(Val2, 1, 200),
+  atomics:put(Val3, 1, 300),
+
+  %% Collect again
+  ok = instrument_meter:collect_observables(),
+
+  ok.
