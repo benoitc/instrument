@@ -5,6 +5,21 @@
 
 OpenTelemetry-compatible observability library for Erlang with high-performance NIF-based metrics.
 
+## OpenTelemetry Compatibility
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| OTLP Protocol | 1.0+ | HTTP/JSON encoding for traces, metrics, logs |
+| Trace API | 1.0+ | Spans, attributes, events, links, status |
+| Metrics API | 1.0+ | Counter, Gauge, Histogram with attributes |
+| Context/Propagation | 1.0+ | W3C TraceContext, W3C Baggage, B3/B3Multi |
+| Resource | 1.0+ | Service name, SDK info, environment detection |
+| Sampling | 1.0+ | always_on, always_off, traceidratio, parentbased |
+
+Tested with:
+- Jaeger 1.50+ (OTLP receiver)
+- Prometheus 2.40+ (scraping /metrics endpoint)
+
 ## Features
 
 - **OpenTelemetry API**: Full OTel-compatible Meter and Tracer interfaces
