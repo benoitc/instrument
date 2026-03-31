@@ -183,9 +183,8 @@ read_propagators() ->
 
 parse_propagator("tracecontext") -> {true, instrument_propagator_tracecontext};
 parse_propagator("baggage") -> {true, instrument_propagator_baggage};
-%% b3 and b3multi propagators are not yet implemented
-parse_propagator("b3") -> false;
-parse_propagator("b3multi") -> false;
+parse_propagator("b3") -> {true, instrument_propagator_b3};
+parse_propagator("b3multi") -> {true, instrument_propagator_b3_multi};
 parse_propagator(_) -> false.
 
 read_batch_processor_config() ->
