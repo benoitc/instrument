@@ -163,7 +163,7 @@ encode_span(#span{
   status = Status
 }) ->
   ParentSpanId = case ParentCtx of
-    #span_ctx{span_id = PSpanId} -> base64:encode(PSpanId);
+    #span_ctx{span_id = PSpanId} -> binary:encode_hex(PSpanId, lowercase);
     undefined -> <<>>
   end,
 
@@ -173,8 +173,8 @@ encode_span(#span{
   end,
 
   #{
-    <<"traceId">> => base64:encode(TraceId),
-    <<"spanId">> => base64:encode(SpanId),
+    <<"traceId">> => binary:encode_hex(TraceId, lowercase),
+    <<"spanId">> => binary:encode_hex(SpanId, lowercase),
     <<"parentSpanId">> => ParentSpanId,
     <<"name">> => Name,
     <<"kind">> => encode_span_kind(Kind),
@@ -236,8 +236,8 @@ encode_links(Links) ->
 
 encode_link(#span_link{ctx = #span_ctx{trace_id = TId, span_id = SId}, attributes = Attrs}) ->
   #{
-    <<"traceId">> => base64:encode(TId),
-    <<"spanId">> => base64:encode(SId),
+    <<"traceId">> => binary:encode_hex(TId, lowercase),
+    <<"spanId">> => binary:encode_hex(SId, lowercase),
     <<"attributes">> => encode_attributes(Attrs)
   }.
 

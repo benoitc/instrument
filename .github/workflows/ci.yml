@@ -77,3 +77,26 @@ jobs:
 
       - name: Run dialyzer
         run: rebar3 dialyzer
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Erlang/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          rebar3-version: '3.24'
+
+      - name: Install CMake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Run E2E tests
+        run: rebar3 ct --suite=instrument_e2e_SUITE
