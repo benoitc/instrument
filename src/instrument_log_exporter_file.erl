@@ -37,7 +37,7 @@
 -export([new/1]).
 
 %% Exporter callbacks
--export([init/1, export/2, shutdown/1, force_flush/1]).
+-export([exporter_init/1, exporter_export/2, exporter_shutdown/1, exporter_force_flush/1]).
 
 -include("instrument_otel.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -66,8 +66,8 @@ new(Config) when is_map(Config) ->
 %% ============================================================================
 
 %% @doc Initializes the exporter.
--spec init(map()) -> {ok, #state{}} | {error, term()}.
-init(Config) ->
+-spec exporter_init(map()) -> {ok, #state{}} | {error, term()}.
+exporter_init(Config) ->
   case maps:get(path, Config, undefined) of
     undefined ->
       {error, missing_path};
@@ -95,8 +95,8 @@ init(Config) ->
   end.
 
 %% @doc Exports log records to the file.
--spec export([#log_record{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
-export(_LogRecords, #state{fd = undefined} = State) ->
+-spec exporter_export([#log_record{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
+exporter_export(_LogRecords, #state{fd = undefined} = State) ->
   %% File handle is undefined (e.g., after rotation failure), try to reopen
   case open_file(State) of
     {ok, NewState} ->
@@ -106,7 +106,7 @@ export(_LogRecords, #state{fd = undefined} = State) ->
     {error, Reason} ->
       {error, {reopen_failed, Reason}, State}
   end;
-export(LogRecords, #state{format = Format} = State) ->
+exporter_export(LogRecords, #state{format = Format} = State) ->
   try
     State2 = lists:foldl(fun(LogRecord, AccState) ->
       Line = format_log_record(LogRecord, Format),
@@ -128,18 +128,18 @@ export(LogRecords, #state{format = Format} = State) ->
   end.
 
 %% @doc Shuts down the exporter.
--spec shutdown(#state{}) -> ok.
-shutdown(#state{fd = undefined}) ->
+-spec exporter_shutdown(#state{}) -> ok.
+exporter_shutdown(#state{fd = undefined}) ->
   ok;
-shutdown(#state{fd = Fd}) ->
+exporter_shutdown(#state{fd = Fd}) ->
   file:close(Fd),
   ok.
 
 %% @doc Forces a flush.
--spec force_flush(#state{}) -> {ok, #state{}}.
-force_flush(#state{fd = undefined} = State) ->
+-spec exporter_force_flush(#state{}) -> {ok, #state{}}.
+exporter_force_flush(#state{fd = undefined} = State) ->
   {ok, State};
-force_flush(#state{fd = Fd} = State) ->
+exporter_force_flush(#state{fd = Fd} = State) ->
   file:sync(Fd),
   {ok, State}.
 

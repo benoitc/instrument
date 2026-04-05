@@ -314,7 +314,7 @@ file_exporter_recovery_after_failure(_Config) ->
   file:delete("/tmp/recovery_test.log"),
 
   %% Initialize exporter
-  {ok, State} = instrument_log_exporter_file:init(#{path => Path, format => text}),
+  {ok, State} = instrument_log_exporter_file:exporter_init(#{path => Path, format => text}),
 
   %% Export should work
   LogRecord1 = #log_record{
@@ -325,7 +325,7 @@ file_exporter_recovery_after_failure(_Config) ->
     body = <<"First message">>,
     attributes = #{}
   },
-  {ok, State2} = instrument_log_exporter_file:export([LogRecord1], State),
+  {ok, State2} = instrument_log_exporter_file:exporter_export([LogRecord1], State),
 
   %% Simulate fd becoming undefined (like after rotation failure)
   %% We do this by creating a state record with fd = undefined
@@ -356,7 +356,7 @@ file_exporter_recovery_after_failure(_Config) ->
   true = binary:match(Content, <<"Recovery test message">>) =/= nomatch,
 
   %% Cleanup
-  ok = instrument_log_exporter_file:shutdown(State2),
+  ok = instrument_log_exporter_file:exporter_shutdown(State2),
   file:delete("/tmp/recovery_test.log"),
   file:delete("/tmp/recovery_test2.log"),
   ok.
@@ -369,17 +369,17 @@ otlp_exporter_init(_Config) ->
   <<"http://localhost:4318">> = maps:get(endpoint, Cfg),
 
   %% Test initialization with options
-  {ok, State} = instrument_log_exporter_otlp:init(#{
+  {ok, State} = instrument_log_exporter_otlp:exporter_init(#{
     endpoint => "http://localhost:4318",
     compression => gzip,
     timeout => 5000
   }),
 
   %% Force flush returns ok
-  {ok, _} = instrument_log_exporter_otlp:force_flush(State),
+  {ok, _} = instrument_log_exporter_otlp:exporter_force_flush(State),
 
   %% Shutdown returns ok
-  ok = instrument_log_exporter_otlp:shutdown(State),
+  ok = instrument_log_exporter_otlp:exporter_shutdown(State),
   ok.
 
 batch_export(_Config) ->

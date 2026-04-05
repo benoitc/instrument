@@ -75,10 +75,10 @@
 %% @doc Behaviour callbacks for log exporters
 behaviour_info(callbacks) ->
   [
-    {init, 1},        %% init(Config) -> {ok, State} | {error, Reason}
-    {export, 2},      %% export(LogRecords, State) -> {ok, NewState} | {error, Reason, NewState}
-    {shutdown, 1},    %% shutdown(State) -> ok
-    {force_flush, 1}  %% force_flush(State) -> {ok, NewState}
+    {exporter_init, 1},        %% exporter_init(Config) -> {ok, State} | {error, Reason}
+    {exporter_export, 2},      %% exporter_export(LogRecords, State) -> {ok, NewState} | {error, Reason, NewState}
+    {exporter_shutdown, 1},    %% exporter_shutdown(State) -> ok
+    {exporter_force_flush, 1}  %% exporter_force_flush(State) -> {ok, NewState}
   ];
 behaviour_info(_) ->
   undefined.
@@ -136,7 +136,7 @@ init([]) ->
   {ok, #state{}}.
 
 handle_call({register, Module, Config}, _From, State) ->
-  case Module:init(Config) of
+  case Module:exporter_init(Config) of
     {ok, ExporterState} ->
       Exporter = #{module => Module, config => Config, state => ExporterState},
       NewExporters = [Exporter | State#state.exporters],
@@ -152,7 +152,7 @@ handle_call({unregister, Module}, _From, State) ->
   ),
   %% Shutdown removed exporters
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    catch M:exporter_shutdown(S)
   end, Removed),
   {reply, ok, State#state{exporters = Remaining}};
 
@@ -168,7 +168,7 @@ handle_call(flush, _From, State) ->
 handle_call(shutdown, _From, State) ->
   State2 = do_flush(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    catch M:exporter_shutdown(S)
   end, State2#state.exporters),
   {reply, ok, State2#state{exporters = []}};
 
@@ -201,7 +201,7 @@ terminate(_Reason, State) ->
   %% Final flush and shutdown
   State2 = do_flush(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    catch M:exporter_shutdown(S)
   end, State2#state.exporters),
   ok.
 
@@ -228,7 +228,7 @@ do_flush(#state{batch = []} = State) ->
 do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
   %% Export to all registered exporters
   NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    case catch M:export(Batch, S) of
+    case catch M:exporter_export(Batch, S) of
       {ok, NewState} ->
         Exporter#{state => NewState};
       {error, _Reason, NewState} ->
@@ -242,7 +242,7 @@ do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
 do_force_flush(#state{exporters = Exporters} = State) ->
   %% Force flush all registered exporters
   NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    case catch M:force_flush(S) of
+    case catch M:exporter_force_flush(S) of
       {ok, NewState} ->
         Exporter#{state => NewState};
       _ ->

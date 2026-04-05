@@ -25,7 +25,7 @@
 -export([new/0, new/1]).
 
 %% Exporter callbacks
--export([init/1, export/2, shutdown/1, force_flush/1]).
+-export([exporter_init/1, exporter_export/2, exporter_shutdown/1]).
 
 -record(state, {
   format = text :: text | json,
@@ -51,8 +51,8 @@ new(Config) when is_map(Config) ->
 %% ============================================================================
 
 %% @doc Initializes the exporter.
--spec init(map()) -> {ok, #state{}} | {error, term()}.
-init(Config) ->
+-spec exporter_init(map()) -> {ok, #state{}} | {error, term()}.
+exporter_init(Config) ->
   Format = maps:get(format, Config, text),
   OutputSpec = maps:get(output, Config, standard_io),
   case open_output(OutputSpec) of
@@ -63,8 +63,8 @@ init(Config) ->
   end.
 
 %% @doc Exports metrics to the console.
--spec export([map()], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
-export(Metrics, #state{format = Format, output = Output} = State) ->
+-spec exporter_export([map()], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
+exporter_export(Metrics, #state{format = Format, output = Output} = State) ->
   try
     lists:foreach(fun(Metric) ->
       Line = format_metric(Metric, Format),
@@ -77,17 +77,12 @@ export(Metrics, #state{format = Format, output = Output} = State) ->
   end.
 
 %% @doc Shuts down the exporter.
--spec shutdown(#state{}) -> ok.
-shutdown(#state{output = {file, Fd}}) ->
+-spec exporter_shutdown(#state{}) -> ok.
+exporter_shutdown(#state{output = {file, Fd}}) ->
   file:close(Fd),
   ok;
-shutdown(_State) ->
+exporter_shutdown(_State) ->
   ok.
-
-%% @doc Forces a flush (no-op for console).
--spec force_flush(#state{}) -> {ok, #state{}}.
-force_flush(State) ->
-  {ok, State}.
 
 %% ============================================================================
 %% Internal functions

@@ -204,17 +204,14 @@ otlp_exporter_init(_Config) ->
   <<"http://localhost:4318">> = maps:get(endpoint, Cfg),
 
   %% Test initialization with options
-  {ok, State} = instrument_metrics_exporter_otlp:init(#{
+  {ok, State} = instrument_metrics_exporter_otlp:exporter_init(#{
     endpoint => "http://localhost:4318",
     compression => gzip,
     timeout => 5000
   }),
 
-  %% Force flush returns ok
-  {ok, _} = instrument_metrics_exporter_otlp:force_flush(State),
-
   %% Shutdown returns ok
-  ok = instrument_metrics_exporter_otlp:shutdown(State),
+  ok = instrument_metrics_exporter_otlp:exporter_shutdown(State),
   ok.
 
 flush(_Config) ->

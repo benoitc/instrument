@@ -39,7 +39,7 @@
 -export([new/1]).
 
 %% Exporter callbacks
--export([init/1, export/2, shutdown/1, force_flush/1]).
+-export([exporter_init/1, exporter_export/2, exporter_shutdown/1]).
 
 -record(state, {
   endpoint :: binary(),
@@ -66,8 +66,8 @@ new(Config) when is_map(Config) ->
 %% ============================================================================
 
 %% @doc Initializes the exporter.
--spec init(map()) -> {ok, #state{}} | {error, term()}.
-init(Config) ->
+-spec exporter_init(map()) -> {ok, #state{}} | {error, term()}.
+exporter_init(Config) ->
   case maps:get(endpoint, Config, undefined) of
     undefined ->
       {error, missing_endpoint};
@@ -88,10 +88,10 @@ init(Config) ->
   end.
 
 %% @doc Exports metrics to the OTLP endpoint.
--spec export([map()], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
-export([], State) ->
+-spec exporter_export([map()], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
+exporter_export([], State) ->
   {ok, State};
-export(Metrics, #state{} = State) ->
+exporter_export(Metrics, #state{} = State) ->
   Payload = encode_metrics(Metrics),
   case send_request(Payload, State) of
     ok ->
@@ -101,14 +101,9 @@ export(Metrics, #state{} = State) ->
   end.
 
 %% @doc Shuts down the exporter.
--spec shutdown(#state{}) -> ok.
-shutdown(_State) ->
+-spec exporter_shutdown(#state{}) -> ok.
+exporter_shutdown(_State) ->
   ok.
-
-%% @doc Forces a flush (handled by exporter manager).
--spec force_flush(#state{}) -> {ok, #state{}}.
-force_flush(State) ->
-  {ok, State}.
 
 %% ============================================================================
 %% Internal functions

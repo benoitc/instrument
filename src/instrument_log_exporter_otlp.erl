@@ -13,26 +13,29 @@
 %% %% Export to local collector
 %% instrument_log_exporter:register(instrument_log_exporter_otlp:new(#{
 %%     endpoint => "http://localhost:4318"
-%% })),
+%% })).
 %%
 %% %% Export to remote collector with authentication
 %% instrument_log_exporter:register(instrument_log_exporter_otlp:new(#{
-%%     endpoint => "https://otel-collector.example.com:4318",
+%%     endpoint => "https://collector.example.com:4318",
 %%     headers => #{
 %%         <<"Authorization">> => <<"Bearer token123">>
 %%     },
 %%     compression => gzip
-%% })),
+%% })).
 %% '''
 %%
 %% == Configuration Options ==
-%% <ul>
-%%   <li>`endpoint' - Base URL of the OTLP receiver (required)</li>
-%%   <li>`headers' - Additional HTTP headers (default: #{})</li>
-%%   <li>`compression' - Compression: none | gzip (default: none)</li>
-%%   <li>`timeout' - Request timeout in ms (default: 10000)</li>
-%%   <li>`logs_path' - API path (default: <<"/v1/logs">>)</li>
-%% </ul>
+%%
+%% `endpoint' - Base URL of the OTLP receiver (required)
+%%
+%% `headers' - Additional HTTP headers (default: #{})
+%%
+%% `compression' - Compression: none | gzip (default: none)
+%%
+%% `timeout' - Request timeout in ms (default: 10000)
+%%
+%% `logs_path' - API path (default: "/v1/logs")
 -module(instrument_log_exporter_otlp).
 -author("benoitc").
 
@@ -40,7 +43,7 @@
 -export([new/1]).
 
 %% Exporter callbacks
--export([init/1, export/2, shutdown/1, force_flush/1]).
+-export([exporter_init/1, exporter_export/2, exporter_shutdown/1, exporter_force_flush/1]).
 
 -include("instrument_otel.hrl").
 
@@ -69,8 +72,8 @@ new(Config) when is_map(Config) ->
 %% ============================================================================
 
 %% @doc Initializes the exporter.
--spec init(map()) -> {ok, #state{}} | {error, term()}.
-init(Config) ->
+-spec exporter_init(map()) -> {ok, #state{}} | {error, term()}.
+exporter_init(Config) ->
   case maps:get(endpoint, Config, undefined) of
     undefined ->
       {error, missing_endpoint};
@@ -91,10 +94,10 @@ init(Config) ->
   end.
 
 %% @doc Exports log records to the OTLP endpoint.
--spec export([#log_record{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
-export([], State) ->
+-spec exporter_export([#log_record{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
+exporter_export([], State) ->
   {ok, State};
-export(LogRecords, #state{} = State) ->
+exporter_export(LogRecords, #state{} = State) ->
   Payload = encode_log_records(LogRecords),
   case send_request(Payload, State) of
     ok ->
@@ -104,13 +107,13 @@ export(LogRecords, #state{} = State) ->
   end.
 
 %% @doc Shuts down the exporter.
--spec shutdown(#state{}) -> ok.
-shutdown(_State) ->
+-spec exporter_shutdown(#state{}) -> ok.
+exporter_shutdown(_State) ->
   ok.
 
 %% @doc Forces a flush (handled by exporter manager).
--spec force_flush(#state{}) -> {ok, #state{}}.
-force_flush(State) ->
+-spec exporter_force_flush(#state{}) -> {ok, #state{}}.
+exporter_force_flush(State) ->
   {ok, State}.
 
 %% ============================================================================

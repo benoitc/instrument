@@ -37,6 +37,11 @@
   shutdown/0
 ]).
 
+%% Exporter behaviour callbacks
+-export([
+  behaviour_info/1
+]).
+
 %% gen_server callbacks
 -export([
   init/1,
@@ -83,6 +88,16 @@
 }.
 
 -export_type([exporter/0, metric_data/0, data_point/0]).
+
+%% @doc Behaviour callbacks for metrics exporters
+behaviour_info(callbacks) ->
+  [
+    {exporter_init, 1},        %% exporter_init(Config) -> {ok, State} | {error, Reason}
+    {exporter_export, 2},      %% exporter_export(Metrics, State) -> {ok, NewState} | {error, Reason, NewState}
+    {exporter_shutdown, 1}     %% exporter_shutdown(State) -> ok
+  ];
+behaviour_info(_) ->
+  undefined.
 
 %% ============================================================================
 %% API
@@ -139,7 +154,7 @@ init([]) ->
   {ok, schedule_export(State)}.
 
 handle_call({register, Module, Config}, _From, State) ->
-  case Module:init(Config) of
+  case Module:exporter_init(Config) of
     {ok, ExporterState} ->
       Exporter = #{module => Module, config => Config, state => ExporterState},
       NewExporters = [Exporter | State#state.exporters],
@@ -154,7 +169,7 @@ handle_call({unregister, Module}, _From, State) ->
     State#state.exporters
   ),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    catch M:exporter_shutdown(S)
   end, Removed),
   {reply, ok, State#state{exporters = Remaining}};
 
@@ -169,7 +184,7 @@ handle_call(flush, _From, State) ->
 handle_call(shutdown, _From, State) ->
   State2 = do_export(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    catch M:exporter_shutdown(S)
   end, State2#state.exporters),
   cancel_timer(State2),
   {reply, ok, State2#state{exporters = []}};
@@ -194,7 +209,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, State) ->
   do_export(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    catch M:exporter_shutdown(S)
   end, State#state.exporters),
   ok.
 
@@ -222,7 +237,7 @@ do_export(#state{exporters = Exporters} = State) ->
   %% Apply metric views for transformation
   TransformedMetrics = instrument_metric_view:apply_views(Metrics),
   NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    case catch M:export(TransformedMetrics, S) of
+    case catch M:exporter_export(TransformedMetrics, S) of
       {ok, NewState} ->
         Exporter#{state => NewState};
       {error, _Reason, NewState} ->
