@@ -228,15 +228,27 @@ end_span() ->
   end.
 
 %% @doc Ends a specific span.
+%% The span parameter is used to identify which span to end via its span_id.
+%% The actual span data is retrieved from context to capture any modifications.
 -spec end_span(span()) -> ok.
-end_span(#span{is_recording = false}) ->
+end_span(#span{is_recording = false} = Span) ->
   %% Non-recording spans still need to be detached from context
-  detach_span(),
+  detach_span(Span),
   ok;
-end_span(#span{} = Span) ->
+end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
+  %% Get the current span from context (may have been modified)
+  %% Use the span_id to verify we're ending the right span
+  SpanToEnd = case current_span() of
+    #span{ctx = #span_ctx{span_id = SpanId}} = CurrentSpan ->
+      %% Current span matches, use it (has modifications)
+      CurrentSpan;
+    _ ->
+      %% Fallback to original span if context doesn't match
+      OriginalSpan
+  end,
   EndTime = erlang:system_time(nanosecond),
   %% Call on_end while span still shows is_recording = true
-  SpanWithEndTime = Span#span{end_time = EndTime},
+  SpanWithEndTime = SpanToEnd#span{end_time = EndTime},
   try
     instrument_span_processor:on_end(SpanWithEndTime)
   catch
@@ -246,8 +258,8 @@ end_span(#span{} = Span) ->
   FinalSpan = SpanWithEndTime#span{is_recording = false},
   %% Export the span
   export_span(FinalSpan),
-  %% Detach from context
-  detach_span(),
+  %% Detach from context using the span we're ending
+  detach_span(SpanToEnd),
   ok.
 
 %% @doc Gets the current span.
@@ -446,21 +458,21 @@ attach_span(Span) ->
   %% The tracer manages its own span stack via parent_ctx field.
   instrument_context:set_current(NewCtx2).
 
-detach_span() ->
+detach_span(undefined) ->
+  %% No span to detach, but still clean up span_ctx if present
   Ctx = instrument_context:current(),
-  %% Restore parent context if available
-  case current_span() of
-    #span{parent_ctx = undefined} ->
-      NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
-      NewCtx2 = instrument_context:remove_value(NewCtx, span_ctx),
-      instrument_context:set_current(NewCtx2);
-    #span{parent_ctx = ParentCtx} ->
-      NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
-      NewCtx2 = instrument_context:set_value(NewCtx, span_ctx, ParentCtx),
-      instrument_context:set_current(NewCtx2);
-    undefined ->
-      ok
-  end.
+  NewCtx = instrument_context:remove_value(Ctx, span_ctx),
+  instrument_context:set_current(NewCtx);
+detach_span(#span{parent_ctx = undefined}) ->
+  Ctx = instrument_context:current(),
+  NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
+  NewCtx2 = instrument_context:remove_value(NewCtx, span_ctx),
+  instrument_context:set_current(NewCtx2);
+detach_span(#span{parent_ctx = ParentCtx}) ->
+  Ctx = instrument_context:current(),
+  NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
+  NewCtx2 = instrument_context:set_value(NewCtx, span_ctx, ParentCtx),
+  instrument_context:set_current(NewCtx2).
 
 update_current_span(UpdateFun) ->
   case current_span() of

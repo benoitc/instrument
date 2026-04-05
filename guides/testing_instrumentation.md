@@ -1,378 +1,362 @@
 # Testing Instrumentation
 
-Patterns and practices for testing instrumented code.
+Patterns and practices for testing instrumented code using the `instrument_test` module.
 
-## Overview
+## Quick Start with instrument_test
 
-Testing instrumented code requires:
+The `instrument_test` module provides collectors and assertions for testing spans, metrics, and logs.
 
-- Verifying correct span creation and attributes
-- Testing metric values
-- Ensuring context propagation works
-- Avoiding interference between tests
-
-## Test Setup
-
-### Starting the Application
+### EUnit Example
 
 ```erlang
--module(my_test).
+-module(my_instrumented_module_test).
 -include_lib("eunit/include/eunit.hrl").
-
-setup() ->
-    application:ensure_all_started(instrument),
-    ok.
-
-cleanup(_) ->
-    %% Clean up metrics
-    instrument:unregister_all(),
-    instrument_meter:unregister_all_instruments(),
-    ok.
+-include("instrument_otel.hrl").
 
 my_test_() ->
-    {setup, fun setup/0, fun cleanup/1, [
-        fun test_counter/0,
-        fun test_span/0
-    ]}.
+    {setup,
+        fun() -> instrument_test:setup() end,
+        fun(_) -> instrument_test:cleanup() end,
+        [
+            fun test_span_creation/0,
+            fun test_metric_increment/0
+        ]
+    }.
+
+test_span_creation() ->
+    instrument_test:reset(),
+
+    %% Call your instrumented function
+    my_module:process_request(#{id => 123}),
+
+    %% Assert span was created with correct attributes
+    instrument_test:assert_span_exists(<<"process_request">>),
+    instrument_test:assert_span_attribute(<<"process_request">>, <<"request.id">>, 123),
+    instrument_test:assert_span_status(<<"process_request">>, ok).
+
+test_metric_increment() ->
+    instrument_test:reset(),
+
+    my_module:handle_event(success),
+
+    instrument_test:assert_counter(events_total, 1.0).
 ```
 
-### Isolating Tests
-
-Clear state between tests to prevent interference:
+### Common Test Example
 
 ```erlang
-per_test_setup() ->
-    %% Clear all metrics
-    instrument:unregister_all(),
-    instrument_meter:unregister_all_instruments(),
+-module(my_instrumented_module_SUITE).
+-include("instrument_otel.hrl").
 
-    %% Clear span exporters
-    %% (depends on your exporter setup)
+-export([all/0, init_per_suite/1, end_per_suite/1,
+         init_per_testcase/2, end_per_testcase/2]).
+-export([test_span_creation/1, test_nested_spans/1]).
+
+all() -> [test_span_creation, test_nested_spans].
+
+init_per_suite(Config) ->
+    instrument_test:setup(),
+    Config.
+
+end_per_suite(_Config) ->
+    instrument_test:cleanup(),
     ok.
+
+init_per_testcase(_TestCase, Config) ->
+    instrument_test:reset(),
+    Config.
+
+end_per_testcase(_TestCase, _Config) ->
+    ok.
+
+test_span_creation(_Config) ->
+    %% Call instrumented code
+    my_module:process_request(#{id => 123}),
+
+    %% Assertions
+    instrument_test:assert_span_exists(<<"process_request">>),
+    instrument_test:assert_span(<<"process_request">>, #{
+        kind => server,
+        status => ok,
+        attributes => #{<<"request.id">> => 123}
+    }),
+    ok.
+
+test_nested_spans(_Config) ->
+    my_module:complex_operation(),
+
+    %% Verify parent-child relationship
+    instrument_test:assert_span_exists(<<"outer_operation">>),
+    instrument_test:assert_span_exists(<<"inner_operation">>),
+    instrument_test:assert_parent_child(<<"outer_operation">>, <<"inner_operation">>),
+    ok.
+```
+
+## Testing Spans
+
+### Capturing Spans
+
+Spans are automatically captured after calling `instrument_test:setup()`:
+
+```erlang
+%% Your instrumented code
+instrument_tracer:with_span(<<"my_operation">>, fun() ->
+    instrument_tracer:set_attribute(<<"user.id">>, UserId),
+    do_work()
+end),
+
+%% Get all captured spans
+Spans = instrument_test:get_spans(),
+
+%% Get a specific span by name
+{ok, Span} = instrument_test:get_span(<<"my_operation">>),
+```
+
+### Span Assertions
+
+```erlang
+%% Assert span exists
+instrument_test:assert_span_exists(<<"my_operation">>),
+
+%% Assert span does not exist
+instrument_test:assert_no_span(<<"unexpected_span">>),
+
+%% Assert specific attribute
+instrument_test:assert_span_attribute(<<"my_operation">>, <<"user.id">>, 42),
+
+%% Assert span has an event
+instrument_test:assert_span_event(<<"my_operation">>, <<"cache_miss">>),
+
+%% Assert span status
+instrument_test:assert_span_status(<<"my_operation">>, ok),
+instrument_test:assert_span_status(<<"failed_op">>, error),
+instrument_test:assert_span_status(<<"failed_op">>, {error, <<"timeout">>}),
+
+%% Assert multiple properties at once
+instrument_test:assert_span(<<"my_operation">>, #{
+    kind => server,
+    status => ok,
+    attributes => #{
+        <<"http.method">> => <<"GET">>,
+        <<"http.status_code">> => 200
+    }
+}),
+```
+
+### Testing Nested Spans
+
+```erlang
+test_nested_spans(_Config) ->
+    instrument_tracer:with_span(<<"parent">>, fun() ->
+        instrument_tracer:with_span(<<"child">>, fun() ->
+            ok
+        end)
+    end),
+
+    %% Verify parent-child relationship
+    instrument_test:assert_parent_child(<<"parent">>, <<"child">>),
+
+    %% Both spans should exist
+    instrument_test:assert_span_exists(<<"parent">>),
+    instrument_test:assert_span_exists(<<"child">>),
+
+    %% Get spans to verify trace IDs match
+    {ok, Parent} = instrument_test:get_span(<<"parent">>),
+    {ok, Child} = instrument_test:get_span(<<"child">>),
+    Parent#span.ctx#span_ctx.trace_id = Child#span.ctx#span_ctx.trace_id.
+```
+
+### Testing Exception Handling
+
+```erlang
+test_exception_span(_Config) ->
+    try
+        instrument_tracer:with_span(<<"failing_op">>, fun() ->
+            error(something_bad)
+        end)
+    catch
+        error:something_bad -> ok
+    end,
+
+    %% Span should have error status
+    instrument_test:assert_span_status(<<"failing_op">>, error),
+
+    %% Should have exception event
+    instrument_test:assert_span_event(<<"failing_op">>, <<"exception">>),
+
+    %% Can check exception attributes
+    {ok, Span} = instrument_test:get_span(<<"failing_op">>),
+    [Event] = Span#span.events,
+    <<"exception">> = Event#span_event.name,
+    true = maps:is_key(<<"exception.type">>, Event#span_event.attributes).
+```
+
+### Testing Cross-Process Propagation
+
+```erlang
+test_cross_process_propagation(_Config) ->
+    Parent = self(),
+
+    instrument_tracer:with_span(<<"parent_process">>, fun() ->
+        ParentTraceId = instrument_tracer:trace_id(),
+
+        %% Spawn with context propagation
+        Pid = instrument_propagation:spawn(fun() ->
+            instrument_tracer:with_span(<<"child_process">>, fun() ->
+                ChildTraceId = instrument_tracer:trace_id(),
+                Parent ! {trace_id, ChildTraceId}
+            end)
+        end),
+
+        receive
+            {trace_id, ParentTraceId} ->
+                %% Same trace ID means context was propagated
+                _ = Pid,
+                ok
+        after 1000 ->
+            ct:fail(timeout)
+        end
+    end),
+
+    %% Both spans should be captured
+    ok = instrument_test:wait_for_spans(2, 1000),
+    instrument_test:assert_span_exists(<<"parent_process">>),
+    instrument_test:assert_span_exists(<<"child_process">>).
+```
+
+### Waiting for Async Spans
+
+```erlang
+test_async_operation(_Config) ->
+    %% Start async operation that creates spans
+    start_background_job(),
+
+    %% Wait for expected spans
+    ok = instrument_test:wait_for_spans(3, 5000),
+
+    %% Now assert
+    instrument_test:assert_span_exists(<<"job_start">>),
+    instrument_test:assert_span_exists(<<"job_process">>),
+    instrument_test:assert_span_exists(<<"job_complete">>).
 ```
 
 ## Testing Metrics
 
-### Counter Tests
+### Counter Assertions
 
 ```erlang
-counter_test() ->
-    %% Create counter
-    Counter = instrument:new_counter(test_counter, <<"Test">>),
-
-    %% Initial value
-    ?assertEqual(0.0, instrument:get_counter(Counter)),
-
-    %% Increment
-    instrument:inc_counter(Counter),
-    ?assertEqual(1.0, instrument:get_counter(Counter)),
-
-    %% Increment by value
+test_counter(_Config) ->
+    Counter = instrument:new_counter(requests_total, <<"Total requests">>),
     instrument:inc_counter(Counter, 5),
-    ?assertEqual(6.0, instrument:get_counter(Counter)),
 
-    %% Cleanup
-    instrument:unregister(test_counter).
+    instrument_test:assert_counter(requests_total, 5.0).
 ```
 
-### Gauge Tests
+### Gauge Assertions
 
 ```erlang
-gauge_test() ->
-    Gauge = instrument:new_gauge(test_gauge, <<"Test">>),
+test_gauge(_Config) ->
+    Gauge = instrument:new_gauge(active_connections, <<"Active connections">>),
+    instrument:set_gauge(Gauge, 42),
 
-    instrument:set_gauge(Gauge, 100),
-    ?assertEqual(100.0, instrument:get_gauge(Gauge)),
-
-    instrument:inc_gauge(Gauge, 10),
-    ?assertEqual(110.0, instrument:get_gauge(Gauge)),
-
-    instrument:dec_gauge(Gauge, 5),
-    ?assertEqual(105.0, instrument:get_gauge(Gauge)),
-
-    instrument:unregister(test_gauge).
+    instrument_test:assert_gauge(active_connections, 42.0).
 ```
 
-### Histogram Tests
+### Histogram Assertions
 
 ```erlang
-histogram_test() ->
-    Hist = instrument:new_histogram(test_hist, <<"Test">>, [1, 5, 10]),
+test_histogram(_Config) ->
+    Hist = instrument:new_histogram(request_duration, <<"Request duration">>, [0.1, 0.5, 1.0]),
 
-    instrument:observe_histogram(Hist, 0.5),
-    instrument:observe_histogram(Hist, 3),
-    instrument:observe_histogram(Hist, 7),
+    instrument:observe_histogram(Hist, 0.2),
+    instrument:observe_histogram(Hist, 0.3),
+    instrument:observe_histogram(Hist, 0.8),
 
-    #{count := Count, sum := Sum, buckets := Buckets} =
-        instrument:get_histogram(Hist),
+    %% Assert observation count
+    instrument_test:assert_histogram_count(request_duration, 3),
 
-    ?assertEqual(3, Count),
-    ?assert(abs(Sum - 10.5) < 0.001),
-
-    %% Verify bucket counts
-    ?assertEqual([{1.0, 1}, {5.0, 2}, {10.0, 3}],
-        [{B, C} || {B, C} <- Buckets, B =< 10]),
-
-    instrument:unregister(test_hist).
+    %% Assert sum of observations
+    instrument_test:assert_histogram_sum(request_duration, 1.3).
 ```
 
-### Vector Metric Tests
+### OTel Meter API Metrics
 
 ```erlang
-counter_vec_test() ->
-    instrument:new_counter_vec(test_vec, <<"Test">>, [method, status]),
+test_otel_counter(_Config) ->
+    Meter = instrument_meter:get_meter(<<"my_service">>),
+    Counter = instrument_meter:create_counter(Meter, <<"otel_requests">>, #{
+        description => <<"Total requests">>
+    }),
+    instrument_meter:add(Counter, 10),
 
-    instrument:inc_counter_vec(test_vec, [<<"GET">>, <<"200">>]),
-    instrument:inc_counter_vec(test_vec, [<<"POST">>, <<"201">>]),
-    instrument:inc_counter_vec(test_vec, [<<"GET">>, <<"200">>], 5),
-
-    ?assertEqual(6.0, instrument:get_counter_vec(test_vec, [<<"GET">>, <<"200">>])),
-    ?assertEqual(1.0, instrument:get_counter_vec(test_vec, [<<"POST">>, <<"201">>])),
-
-    instrument:unregister(test_vec).
+    instrument_test:assert_counter(<<"otel_requests">>, 10.0).
 ```
 
-## Testing Traces
+## Testing Logs
 
-### Capturing Spans
-
-Create a test exporter to capture spans:
+### Log Assertions
 
 ```erlang
--module(test_span_collector).
--export([new/0, get_spans/1, clear/1, export/2]).
+test_log_with_trace_context(_Config) ->
+    %% Create log within a span
+    instrument_tracer:with_span(<<"operation">>, fun() ->
+        %% Your logging code that uses instrument_logger
+        instrument_logger:info("Processing item", #{item_id => 123})
+    end),
 
-new() ->
-    ets:new(?MODULE, [public, bag]).
+    %% Flush logs
+    instrument_log_exporter:flush(),
 
-get_spans(Tab) ->
-    ets:tab2list(Tab).
+    %% Assert log exists and has trace context
+    instrument_test:assert_log_exists(<<"Processing item">>),
+    instrument_test:assert_log_trace_context(<<"Processing item">>),
 
-clear(Tab) ->
-    ets:delete_all_objects(Tab).
+    %% Assert log properties
+    instrument_test:assert_log(<<"Processing item">>, #{
+        severity_text => <<"INFO">>,
+        attributes => #{<<"item_id">> => 123}
+    }).
+```
 
-export(Tab, Span) ->
-    ets:insert(Tab, {span, Span}),
+## Test Isolation
+
+### Using reset/0 Between Tests
+
+The `reset/0` function clears all collected data without stopping collectors:
+
+```erlang
+init_per_testcase(_TestCase, Config) ->
+    instrument_test:reset(),
+    Config.
+```
+
+### Full Cleanup
+
+Use `cleanup/0` for complete teardown:
+
+```erlang
+end_per_suite(_Config) ->
+    instrument_test:cleanup(),
     ok.
 ```
 
-### Span Creation Tests
+### Unique Metric Names
+
+To avoid collisions between tests, use unique metric names:
 
 ```erlang
-span_test() ->
-    %% Setup collector
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
+test_counter_1(_Config) ->
+    Counter = instrument:new_counter(test1_counter, <<"Test 1 counter">>),
+    %% ...
 
-    %% Create span
-    instrument_tracer:with_span(<<"test_operation">>, fun() ->
-        instrument_tracer:set_attribute(<<"key">>, <<"value">>),
-        ok
-    end),
-
-    %% Get captured spans
-    [{span, Span}] = test_span_collector:get_spans(Collector),
-
-    %% Verify span properties
-    ?assertEqual(<<"test_operation">>, Span#span.name),
-    ?assertEqual(<<"value">>, maps:get(<<"key">>, Span#span.attributes)),
-    ?assertEqual(ok, Span#span.status),
-
-    %% Cleanup
-    test_span_collector:clear(Collector).
+test_counter_2(_Config) ->
+    Counter = instrument:new_counter(test2_counter, <<"Test 2 counter">>),
+    %% ...
 ```
 
-### Span Hierarchy Tests
+## Advanced Patterns
 
-```erlang
-nested_spans_test() ->
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
-
-    instrument_tracer:with_span(<<"parent">>, fun() ->
-        ParentCtx = instrument_tracer:span_ctx(),
-
-        instrument_tracer:with_span(<<"child">>, fun() ->
-            ChildCtx = instrument_tracer:span_ctx(),
-
-            %% Same trace ID
-            ?assertEqual(ParentCtx#span_ctx.trace_id, ChildCtx#span_ctx.trace_id),
-
-            %% Different span IDs
-            ?assertNotEqual(ParentCtx#span_ctx.span_id, ChildCtx#span_ctx.span_id)
-        end)
-    end),
-
-    %% Verify both spans captured
-    Spans = test_span_collector:get_spans(Collector),
-    ?assertEqual(2, length(Spans)).
-```
-
-### Attribute Tests
-
-```erlang
-attributes_test() ->
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
-
-    instrument_tracer:with_span(<<"test">>, fun() ->
-        instrument_tracer:set_attributes(#{
-            <<"string">> => <<"value">>,
-            <<"number">> => 42,
-            <<"boolean">> => true
-        })
-    end),
-
-    [{span, Span}] = test_span_collector:get_spans(Collector),
-    Attrs = Span#span.attributes,
-
-    ?assertEqual(<<"value">>, maps:get(<<"string">>, Attrs)),
-    ?assertEqual(42, maps:get(<<"number">>, Attrs)),
-    ?assertEqual(true, maps:get(<<"boolean">>, Attrs)).
-```
-
-### Event Tests
-
-```erlang
-events_test() ->
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
-
-    instrument_tracer:with_span(<<"test">>, fun() ->
-        instrument_tracer:add_event(<<"event1">>),
-        instrument_tracer:add_event(<<"event2">>, #{<<"key">> => <<"value">>})
-    end),
-
-    [{span, Span}] = test_span_collector:get_spans(Collector),
-    ?assertEqual(2, length(Span#span.events)),
-
-    [Event1, Event2] = Span#span.events,
-    ?assertEqual(<<"event1">>, Event1#span_event.name),
-    ?assertEqual(<<"event2">>, Event2#span_event.name),
-    ?assertEqual(#{<<"key">> => <<"value">>}, Event2#span_event.attributes).
-```
-
-### Exception Tests
-
-```erlang
-exception_test() ->
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
-
-    ?assertError(test_error, instrument_tracer:with_span(<<"test">>, fun() ->
-        error(test_error)
-    end)),
-
-    [{span, Span}] = test_span_collector:get_spans(Collector),
-
-    %% Status should be error
-    ?assertMatch({error, _}, Span#span.status),
-
-    %% Should have exception event
-    [Event] = Span#span.events,
-    ?assertEqual(<<"exception">>, Event#span_event.name).
-```
-
-## Testing Context Propagation
-
-### Process Propagation
-
-```erlang
-propagation_test() ->
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
-
-    instrument_tracer:with_span(<<"parent">>, fun() ->
-        ParentTraceId = instrument_tracer:trace_id(),
-
-        %% Spawn with propagation
-        Pid = instrument_propagation:spawn(fun() ->
-            instrument_tracer:with_span(<<"child">>, fun() ->
-                ChildTraceId = instrument_tracer:trace_id(),
-                ?assertEqual(ParentTraceId, ChildTraceId)
-            end)
-        end),
-
-        %% Wait for child process
-        monitor(process, Pid),
-        receive {'DOWN', _, _, Pid, _} -> ok end
-    end).
-```
-
-### Header Propagation
-
-```erlang
-header_propagation_test() ->
-    instrument_tracer:with_span(<<"sender">>, fun() ->
-        OriginalTraceId = instrument_tracer:trace_id(),
-
-        %% Inject into headers
-        Ctx = instrument_context:current(),
-        Headers = instrument_propagation:inject_headers(Ctx),
-
-        %% Simulate receiving service
-        ReceivedCtx = instrument_propagation:extract_headers(Headers),
-        Token = instrument_context:attach(ReceivedCtx),
-
-        try
-            instrument_tracer:with_span(<<"receiver">>, fun() ->
-                ReceiverTraceId = instrument_tracer:trace_id(),
-                ?assertEqual(OriginalTraceId, ReceiverTraceId)
-            end)
-        after
-            instrument_context:detach(Token)
-        end
-    end).
-```
-
-## Testing with Mocks
-
-### Mocking External Calls
-
-```erlang
--include_lib("meck/include/meck.hrl").
-
-external_call_test() ->
-    meck:new(http_client, [passthrough]),
-    meck:expect(http_client, request, fun(_, _, _) ->
-        {ok, 200, [], <<"{\"id\": 123}">>}
-    end),
-
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
-
-    try
-        %% Call your instrumented function
-        Result = my_module:call_external_api(),
-
-        %% Verify result
-        ?assertEqual({ok, 123}, Result),
-
-        %% Verify span was created with correct attributes
-        Spans = test_span_collector:get_spans(Collector),
-        [{span, Span}] = [S || {span, S} <- Spans, S#span.name == <<"call_api">>],
-
-        ?assertEqual(200, maps:get(<<"http.status_code">>, Span#span.attributes))
-    after
-        meck:unload(http_client)
-    end.
-```
-
-## Property-Based Testing
+### Property-Based Testing
 
 Using PropEr for property-based tests:
 
@@ -382,107 +366,99 @@ Using PropEr for property-based tests:
 prop_counter_monotonic() ->
     ?FORALL(Increments, list(pos_integer()),
         begin
+            instrument_test:reset(),
             Counter = instrument:new_counter(prop_counter, <<"">>),
 
             lists:foreach(fun(Inc) ->
                 instrument:inc_counter(Counter, Inc)
             end, Increments),
 
-            Expected = lists:sum(Increments),
-            Actual = instrument:get_counter(Counter),
-
-            instrument:unregister(prop_counter),
-            abs(Actual - Expected) < 0.001
-        end).
-
-prop_histogram_count() ->
-    ?FORALL(Values, non_empty(list(float())),
-        begin
-            Hist = instrument:new_histogram(prop_hist, <<"">>),
-
-            lists:foreach(fun(V) ->
-                instrument:observe_histogram(Hist, abs(V))
-            end, Values),
-
-            #{count := Count} = instrument:get_histogram(Hist),
-            instrument:unregister(prop_hist),
-
-            Count == length(Values)
+            Expected = float(lists:sum(Increments)),
+            try
+                instrument_test:assert_counter(prop_counter, Expected),
+                true
+            catch
+                error:{assertion_failed, _} -> false
+            end
         end).
 ```
 
-## Integration Testing
-
-### Full Request Test
+### Integration Testing
 
 ```erlang
-integration_test() ->
-    %% Start application
+integration_test(_Config) ->
+    %% Start your application
     application:ensure_all_started(my_app),
+    instrument_test:reset(),
 
-    %% Setup span collector
-    Collector = test_span_collector:new(),
-    instrument_tracer:register_exporter(
-        fun(Span) -> test_span_collector:export(Collector, Span) end
-    ),
-
-    %% Make request
-    {ok, Status, _, Body} = hackney:request(
+    %% Make HTTP request
+    {ok, {{_, 200, _}, _, _}} = httpc:request(
         post,
-        "http://localhost:8080/orders",
-        [{<<"Content-Type">>, <<"application/json">>}],
-        jiffy:encode(#{items => [#{name => <<"Widget">>, price => 10}]}),
+        {"http://localhost:8080/api/orders", [], "application/json", "{}"},
+        [],
         []
     ),
 
-    %% Verify response
-    ?assertEqual(201, Status),
+    %% Wait for spans (may be exported asynchronously)
+    ok = instrument_test:wait_for_spans(1, 5000),
 
-    %% Wait for async span export
-    timer:sleep(100),
+    %% Verify instrumentation
+    instrument_test:assert_span_exists(<<"http_request">>),
+    instrument_test:assert_span(<<"http_request">>, #{
+        kind => server,
+        attributes => #{
+            <<"http.method">> => <<"POST">>,
+            <<"http.status_code">> => 200
+        }
+    }).
+```
 
-    %% Verify spans
-    Spans = [S || {span, S} <- test_span_collector:get_spans(Collector)],
+### Testing with Mocks
 
-    %% Should have HTTP span
-    HttpSpans = [S || S <- Spans, S#span.name == <<"http_request">>],
-    ?assertEqual(1, length(HttpSpans)),
+```erlang
+-include_lib("meck/include/meck.hrl").
 
-    %% Verify attributes
-    [HttpSpan] = HttpSpans,
-    ?assertEqual(201, maps:get(<<"http.status_code">>, HttpSpan#span.attributes)).
+mocked_external_call_test(_Config) ->
+    meck:new(http_client, [passthrough]),
+    meck:expect(http_client, request, fun(_, _, _) ->
+        {ok, 200, [], <<"{\"id\": 123}">>}
+    end),
+
+    try
+        my_module:call_external_api(),
+
+        %% Verify span was created with correct attributes
+        instrument_test:assert_span_exists(<<"external_api_call">>),
+        instrument_test:assert_span_attribute(<<"external_api_call">>,
+            <<"http.status_code">>, 200)
+    after
+        meck:unload(http_client)
+    end.
 ```
 
 ## Best Practices
 
 ### Test Isolation
 
-- Clear state between tests
+- Always call `reset/0` between tests
 - Use unique metric names per test
-- Unregister metrics after tests
+- Clean up metrics after tests
 
 ### Deterministic Testing
 
-- Mock time-based operations
-- Control sampling (use always_on for tests)
-- Use deterministic IDs when needed
+- Use `always_on` sampler for tests (default)
+- Control timing with `wait_for_spans/2`
+- Mock external dependencies
 
-### Performance Testing
+### Assertion Failures
+
+Assertion failures provide detailed context:
 
 ```erlang
-perf_test() ->
-    Counter = instrument:new_counter(perf_counter, <<"">>),
-
-    {Time, _} = timer:tc(fun() ->
-        lists:foreach(fun(_) ->
-            instrument:inc_counter(Counter)
-        end, lists:seq(1, 100000))
-    end),
-
-    %% Should complete in reasonable time
-    ?assert(Time < 1000000),  %% Less than 1 second
-
-    instrument:unregister(perf_counter).
+%% Example failure message:
+%% {assertion_failed, {span_not_found, <<"my_span">>, [<<"other_span">>]}}
+%%
+%% Shows: what was expected, what spans were actually captured
 ```
 
 ### Coverage
@@ -493,3 +469,4 @@ Ensure tests cover:
 - Error handling paths
 - Edge cases (empty data, large values)
 - Context propagation boundaries
+- Async operations
