@@ -306,7 +306,12 @@ export_span(Span, #state{exporter = Exporter, exporter_state = ExporterState}) -
   try
     Exporter:export([Span], ExporterState)
   catch
-    _:_ -> ok
+    Class:Reason:Stacktrace ->
+      logger:warning("Tail sampler export to ~p failed: ~p:~p",
+                    [Exporter, Class, Reason],
+                    #{error_logger => #{tag => warning_msg},
+                      mfa => {Exporter, export, 2},
+                      stacktrace => Stacktrace})
   end,
   ok.
 

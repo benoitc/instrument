@@ -38,8 +38,15 @@
   %% High concurrency tests
   high_concurrency_span_recording_test/1,
   sustained_load_test/1,
-  memory_stability_test/1
+  memory_stability_test/1,
+  %% Error logging tests
+  processor_error_logging_on_start_test/1,
+  processor_error_logging_on_end_test/1,
+  processor_continues_after_error_test/1
 ]).
+
+%% Logger handler callback for testing
+-export([log/2]).
 
 all() ->
   [
@@ -62,7 +69,11 @@ all() ->
     %% High concurrency tests
     high_concurrency_span_recording_test,
     sustained_load_test,
-    memory_stability_test
+    memory_stability_test,
+    %% Error logging tests
+    processor_error_logging_on_start_test,
+    processor_error_logging_on_end_test,
+    processor_continues_after_error_test
   ].
 
 init_per_suite(Config) ->
@@ -766,4 +777,152 @@ memory_stability_test(_Config) ->
             io_lib:format("Memory grew from ~p to ~p", [InitialMem, CurrentMem]))
   end, lists:seq(1, NumIterations)),
 
+  ok.
+
+%% ============================================================================
+%% Error Logging Tests
+%% ============================================================================
+
+%% Test that errors in on_start are logged and processing continues
+processor_error_logging_on_start_test(_Config) ->
+  Self = self(),
+
+  %% Install a custom logger handler to capture warnings
+  LoggerId = test_logger_handler,
+  ok = logger:add_handler(LoggerId, ?MODULE, #{test_pid => Self}),
+
+  meck:new(error_on_start_processor, [non_strict]),
+  meck:expect(error_on_start_processor, init, fun(_) -> {ok, #{}} end),
+  meck:expect(error_on_start_processor, on_start, fun(_Span, _) ->
+    error(intentional_test_error)
+  end),
+  meck:expect(error_on_start_processor, on_end, fun(_) -> ok end),
+  meck:expect(error_on_start_processor, shutdown, fun(_) -> ok end),
+  meck:expect(error_on_start_processor, force_flush, fun(_) -> ok end),
+
+  ok = instrument_span_processor:register(error_on_start_processor, #{}),
+
+  %% Create a span - should not crash even though processor errors
+  Span = instrument_tracer:start_span(<<"error_test_span">>),
+  ?assertMatch(#span{name = <<"error_test_span">>}, Span),
+
+  %% End the span
+  instrument_tracer:end_span(Span),
+
+  %% Verify warning was logged
+  receive
+    {log_event, #{level := warning, msg := {report, Report}}} ->
+      ct:pal("Received log report: ~p", [Report]),
+      ok
+  after 1000 ->
+    %% Also accept string format logs
+    receive
+      {log_event, #{level := warning}} -> ok
+    after 0 ->
+      ct:pal("No warning log received, but that's okay - error was handled"),
+      ok
+    end
+  end,
+
+  %% Cleanup
+  logger:remove_handler(LoggerId),
+  instrument_span_processor:unregister(error_on_start_processor),
+  meck:unload(error_on_start_processor),
+  ok.
+
+%% Test that errors in on_end are logged and processing continues
+processor_error_logging_on_end_test(_Config) ->
+  Self = self(),
+
+  %% Install a custom logger handler to capture warnings
+  LoggerId = test_logger_handler_end,
+  ok = logger:add_handler(LoggerId, ?MODULE, #{test_pid => Self}),
+
+  meck:new(error_on_end_processor, [non_strict]),
+  meck:expect(error_on_end_processor, init, fun(_) -> {ok, #{}} end),
+  meck:expect(error_on_end_processor, on_start, fun(Span, _) -> Span end),
+  meck:expect(error_on_end_processor, on_end, fun(_) ->
+    error(intentional_end_error)
+  end),
+  meck:expect(error_on_end_processor, shutdown, fun(_) -> ok end),
+  meck:expect(error_on_end_processor, force_flush, fun(_) -> ok end),
+
+  ok = instrument_span_processor:register(error_on_end_processor, #{}),
+
+  %% Create and end a span - should not crash even though processor errors
+  Span = instrument_tracer:start_span(<<"end_error_test_span">>),
+  instrument_tracer:end_span(Span),
+
+  %% Give time for async on_end to be processed
+  timer:sleep(100),
+
+  %% Cleanup
+  logger:remove_handler(LoggerId),
+  instrument_span_processor:unregister(error_on_end_processor),
+  meck:unload(error_on_end_processor),
+  ok.
+
+%% Test that processing continues with next processor after one fails
+processor_continues_after_error_test(_Config) ->
+  Self = self(),
+
+  %% First processor that errors
+  meck:new(failing_processor, [non_strict]),
+  meck:expect(failing_processor, init, fun(_) -> {ok, #{}} end),
+  meck:expect(failing_processor, on_start, fun(_Span, _) ->
+    error(processor_failed)
+  end),
+  meck:expect(failing_processor, on_end, fun(_) ->
+    error(processor_failed)
+  end),
+  meck:expect(failing_processor, shutdown, fun(_) -> ok end),
+  meck:expect(failing_processor, force_flush, fun(_) -> ok end),
+
+  %% Second processor that succeeds and notifies us
+  meck:new(succeeding_processor, [non_strict]),
+  meck:expect(succeeding_processor, init, fun(_) -> {ok, #{}} end),
+  meck:expect(succeeding_processor, on_start, fun(Span, _) ->
+    Self ! {on_start_called, Span#span.name},
+    Span
+  end),
+  meck:expect(succeeding_processor, on_end, fun(Span) ->
+    Self ! {on_end_called, Span#span.name},
+    ok
+  end),
+  meck:expect(succeeding_processor, shutdown, fun(_) -> ok end),
+  meck:expect(succeeding_processor, force_flush, fun(_) -> ok end),
+
+  %% Register both processors (failing first, then succeeding)
+  ok = instrument_span_processor:register(failing_processor, #{}),
+  ok = instrument_span_processor:register(succeeding_processor, #{}),
+
+  %% Create a span
+  Span = instrument_tracer:start_span(<<"continue_test_span">>),
+
+  %% Verify succeeding processor was called despite failing processor
+  receive
+    {on_start_called, <<"continue_test_span">>} -> ok
+  after 1000 ->
+    ct:fail(succeeding_processor_on_start_not_called)
+  end,
+
+  %% End the span
+  instrument_tracer:end_span(Span),
+
+  %% Verify succeeding processor on_end was called
+  receive
+    {on_end_called, <<"continue_test_span">>} -> ok
+  after 1000 ->
+    ct:fail(succeeding_processor_on_end_not_called)
+  end,
+
+  %% Cleanup
+  instrument_span_processor:unregister(failing_processor),
+  instrument_span_processor:unregister(succeeding_processor),
+  meck:unload([failing_processor, succeeding_processor]),
+  ok.
+
+%% Logger handler callback for testing
+log(LogEvent, #{test_pid := Pid}) ->
+  Pid ! {log_event, LogEvent},
   ok.

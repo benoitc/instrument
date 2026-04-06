@@ -164,7 +164,13 @@ handle_call({on_start, Span, ParentCtx}, _From, State) ->
       try
         Module:on_start(AccSpan, ParentCtx)
       catch
-        _:_ -> AccSpan
+        Class:Reason:Stacktrace ->
+          logger:warning("Span processor ~p on_start failed: ~p:~p",
+                        [Module, Class, Reason],
+                        #{error_logger => #{tag => warning_msg},
+                          mfa => {Module, on_start, 2},
+                          stacktrace => Stacktrace}),
+          AccSpan
       end
     end,
     Span,
@@ -205,7 +211,12 @@ handle_cast({on_end, Span}, State) ->
       try
         Module:on_end(Span)
       catch
-        _:_ -> ok
+        Class:Reason:Stacktrace ->
+          logger:warning("Span processor ~p on_end failed: ~p:~p",
+                        [Module, Class, Reason],
+                        #{error_logger => #{tag => warning_msg},
+                          mfa => {Module, on_end, 1},
+                          stacktrace => Stacktrace})
       end
     end,
     State#state.processors
