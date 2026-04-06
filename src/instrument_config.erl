@@ -37,10 +37,13 @@
   get_batch_processor_config/0,
   get_otlp_endpoint/0,
   get_otlp_endpoint/1,
-  get_log_level/0
+  get_log_level/0,
+  is_tracing_enabled/0,
+  set_tracing_enabled/1
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
+-define(TRACING_ENABLED_KEY, '$instrument_tracing_enabled').
 
 %% ============================================================================
 %% API
@@ -130,6 +133,18 @@ get_otlp_endpoint(logs) ->
 -spec get_log_level() -> debug | info | warning | error | undefined.
 get_log_level() ->
   get(log_level).
+
+%% @doc Checks if tracing is globally enabled.
+-spec is_tracing_enabled() -> boolean().
+is_tracing_enabled() ->
+  persistent_term:get(?TRACING_ENABLED_KEY, true).
+
+%% @doc Enables or disables tracing globally.
+%% When disabled, span creation is skipped entirely for maximum performance.
+-spec set_tracing_enabled(boolean()) -> ok.
+set_tracing_enabled(Enabled) when is_boolean(Enabled) ->
+  persistent_term:put(?TRACING_ENABLED_KEY, Enabled),
+  ok.
 
 %% ============================================================================
 %% Internal Functions

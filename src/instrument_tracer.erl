@@ -128,6 +128,18 @@ start_span(Name) ->
 start_span(Name, Opts) when is_atom(Name) ->
   start_span(atom_to_binary(Name, utf8), Opts);
 start_span(Name, Opts) when is_binary(Name), is_map(Opts) ->
+  %% Early exit when tracing is globally disabled
+  case instrument_config:is_tracing_enabled() of
+    false ->
+      Span = noop_span(Name),
+      attach_span(Span),
+      Span;
+    true ->
+      start_span_impl(Name, Opts)
+  end.
+
+%% @private
+start_span_impl(Name, Opts) ->
   Kind = maps:get(kind, Opts, internal),
   Attributes = maps:get(attributes, Opts, #{}),
   Links = maps:get(links, Opts, []),
@@ -195,16 +207,43 @@ start_span(Name, Opts) when is_binary(Name), is_map(Opts) ->
     is_recording = IsRecording
   },
 
-  %% Notify span processors of span start
-  FinalSpan = try
-    instrument_span_processor:on_start(Span, ParentSpanCtx)
-  catch
-    _:_ -> Span
+  %% Notify span processors of span start (skip for non-recording spans)
+  FinalSpan = case IsRecording of
+    true ->
+      try
+        instrument_span_processor:on_start(Span, ParentSpanCtx)
+      catch
+        _:_ -> Span
+      end;
+    false ->
+      Span
   end,
 
   %% Attach to context
   attach_span(FinalSpan),
   FinalSpan.
+
+%% @private Creates a minimal no-op span when tracing is disabled.
+noop_span(Name) ->
+  #span{
+    name = Name,
+    ctx = #span_ctx{
+      trace_id = <<0:128>>,
+      span_id = <<0:64>>,
+      trace_flags = 0,
+      trace_state = [],
+      is_remote = false
+    },
+    parent_ctx = undefined,
+    kind = internal,
+    start_time = 0,
+    end_time = undefined,
+    attributes = #{},
+    events = [],
+    links = [],
+    status = unset,
+    is_recording = false
+  }.
 
 %% @doc Executes a function within a span.
 -spec with_span(binary() | atom(), fun(() -> Result)) -> Result when Result :: term().
