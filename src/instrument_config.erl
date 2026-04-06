@@ -41,12 +41,23 @@
   is_tracing_enabled/0,
   set_tracing_enabled/1,
   is_flight_recorder_enabled/0,
-  set_flight_recorder_enabled/1
+  set_flight_recorder_enabled/1,
+  %% Runtime toggles
+  is_verbose_tracing/0,
+  set_verbose_tracing/1,
+  %% Exporter controls
+  auto_register_exporters/0,
+  enable_exporter/1,
+  disable_exporter/1,
+  is_exporter_enabled/1,
+  get_exporters/0
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
 -define(TRACING_ENABLED_KEY, '$instrument_tracing_enabled').
 -define(FLIGHT_RECORDER_KEY, '$instrument_flight_recorder_enabled').
+-define(VERBOSE_TRACING_KEY, '$instrument_verbose_tracing').
+-define(DISABLED_EXPORTERS_KEY, '$instrument_disabled_exporters').
 
 %% ============================================================================
 %% API
@@ -162,6 +173,67 @@ set_flight_recorder_enabled(true) ->
   instrument_flight_recorder:enable();
 set_flight_recorder_enabled(false) ->
   instrument_flight_recorder:disable().
+
+%% @doc Checks if verbose tracing is enabled.
+%% Verbose tracing captures additional attributes but has higher overhead.
+%% WARNING: Not recommended for high-throughput production use.
+-spec is_verbose_tracing() -> boolean().
+is_verbose_tracing() ->
+  persistent_term:get(?VERBOSE_TRACING_KEY, false).
+
+%% @doc Enables or disables verbose tracing.
+%% When enabled, more detailed attributes are captured.
+%% WARNING: Verbose tracing has significant performance overhead.
+-spec set_verbose_tracing(boolean()) -> ok.
+set_verbose_tracing(Enabled) when is_boolean(Enabled) ->
+  persistent_term:put(?VERBOSE_TRACING_KEY, Enabled),
+  ok.
+
+%% @doc Auto-registers exporters based on OTEL_EXPORTERS environment variable.
+%% Supported values: otlp, console (comma-separated).
+%% Example: OTEL_EXPORTERS=otlp,console
+-spec auto_register_exporters() -> ok.
+auto_register_exporters() ->
+  case os:getenv("OTEL_EXPORTERS") of
+    false -> ok;
+    Value ->
+      Names = string:tokens(Value, ","),
+      lists:foreach(fun register_exporter_by_name/1, Names)
+  end,
+  ok.
+
+%% @doc Enables a specific exporter.
+-spec enable_exporter(module()) -> ok.
+enable_exporter(Module) when is_atom(Module) ->
+  Disabled = persistent_term:get(?DISABLED_EXPORTERS_KEY, #{}),
+  NewDisabled = maps:remove(Module, Disabled),
+  persistent_term:put(?DISABLED_EXPORTERS_KEY, NewDisabled),
+  ok.
+
+%% @doc Disables a specific exporter.
+%% Disabled exporters will not receive spans for export.
+-spec disable_exporter(module()) -> ok.
+disable_exporter(Module) when is_atom(Module) ->
+  Disabled = persistent_term:get(?DISABLED_EXPORTERS_KEY, #{}),
+  NewDisabled = maps:put(Module, true, Disabled),
+  persistent_term:put(?DISABLED_EXPORTERS_KEY, NewDisabled),
+  ok.
+
+%% @doc Checks if an exporter is enabled.
+-spec is_exporter_enabled(module()) -> boolean().
+is_exporter_enabled(Module) when is_atom(Module) ->
+  Disabled = persistent_term:get(?DISABLED_EXPORTERS_KEY, #{}),
+  not maps:get(Module, Disabled, false).
+
+%% @doc Gets list of configured exporters from OTEL_EXPORTERS.
+-spec get_exporters() -> [atom()].
+get_exporters() ->
+  case os:getenv("OTEL_EXPORTERS") of
+    false -> [];
+    Value ->
+      Names = string:tokens(Value, ","),
+      lists:filtermap(fun parse_exporter_name/1, Names)
+  end.
 
 %% ============================================================================
 %% Internal Functions
@@ -294,3 +366,20 @@ apply_propagators(#{propagators := Propagators}) when is_list(Propagators), Prop
   instrument_propagator:set_propagators(Propagators);
 apply_propagators(_) ->
   ok.
+
+register_exporter_by_name("otlp") ->
+  case get_otlp_endpoint(traces) of
+    undefined -> ok;
+    Endpoint ->
+      Exporter = instrument_exporter_otlp:new(#{endpoint => Endpoint}),
+      instrument_exporter:register(Exporter)
+  end;
+register_exporter_by_name("console") ->
+  Exporter = instrument_exporter_console:new(#{}),
+  instrument_exporter:register(Exporter);
+register_exporter_by_name(_) ->
+  ok.
+
+parse_exporter_name("otlp") -> {true, instrument_exporter_otlp};
+parse_exporter_name("console") -> {true, instrument_exporter_console};
+parse_exporter_name(_) -> false.

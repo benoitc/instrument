@@ -93,6 +93,43 @@ instrument_tracer:with_span(<<"http_call">>, #{kind => client}, fun() ->
 end).
 ```
 
+## Client Span Conventions
+
+Client spans represent outbound calls from your service. The `instrument_client` module simplifies creating properly attributed client spans.
+
+### Generic Client Attributes
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `pool.name` | string | Resource pool name |
+| `pool.type` | string | Pool system type |
+
+### Using instrument_client
+
+The `instrument_client` module automatically sets semantic convention attributes based on the system type:
+
+```erlang
+%% Database client - automatically sets db.* attributes
+instrument_client:with_client_span(postgresql, <<"SELECT">>, #{
+    target => <<"users">>,
+    statement => <<"SELECT * FROM users">>,
+    sanitize => true
+}, fun() -> query(Conn, SQL) end).
+
+%% HTTP client - automatically sets http.* attributes
+instrument_client:with_client_span(http, <<"GET">>, #{
+    target => <<"/api/users">>,
+    attributes => #{<<"http.url">> => URL}
+}, fun() -> httpc:request(URL) end).
+
+%% Messaging - automatically sets messaging.* attributes
+instrument_client:with_client_span(kafka, <<"publish">>, #{
+    target => <<"orders-topic">>
+}, fun() -> brod:produce(Client, Topic, Msg) end).
+```
+
+See the [Client Tracing Guide](client_tracing.md) for detailed examples.
+
 ## Database Attributes
 
 | Attribute | Type | Description |
@@ -104,8 +141,34 @@ end).
 | `db.statement` | string | SQL statement or command |
 | `db.operation` | string | Operation type (SELECT, INSERT) |
 | `db.sql.table` | string | Table being operated on |
+| `db.rows_returned` | int | Number of rows returned |
+| `db.rows_affected` | int | Number of rows affected |
 
-**Example:**
+**Example with instrument_client:**
+
+```erlang
+instrument_client:with_client_span(postgresql, <<"SELECT">>, #{
+    target => <<"orders">>,
+    statement => <<"SELECT * FROM orders WHERE id = $1">>,
+    sanitize => true,
+    attributes => #{
+        <<"db.name">> => <<"orders">>,
+        <<"db.user">> => <<"app_user">>
+    }
+}, fun() ->
+    case execute_query() of
+        {ok, Rows} ->
+            instrument_client:set_response_attributes(#{
+                rows_returned => length(Rows)
+            }),
+            {ok, Rows};
+        Error ->
+            Error
+    end
+end).
+```
+
+**Manual Example:**
 
 ```erlang
 instrument_tracer:with_span(<<"db_query">>, #{kind => client}, fun() ->
@@ -121,7 +184,7 @@ instrument_tracer:with_span(<<"db_query">>, #{kind => client}, fun() ->
 end).
 ```
 
-**Note:** Avoid including sensitive data in `db.statement`. Use parameterized queries.
+**Note:** Avoid including sensitive data in `db.statement`. Use `instrument_client:sanitize_text/1` or set `sanitize => true`.
 
 ## Messaging Attributes
 
