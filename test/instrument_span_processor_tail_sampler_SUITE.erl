@@ -34,7 +34,8 @@
   non_recording_spans_ignored_test/1,
   no_exporter_configured_test/1,
   invalid_rule_rejected_test/1,
-  integration_with_tracer_test/1
+  integration_with_tracer_test/1,
+  undefined_end_time_test/1
 ]).
 
 all() ->
@@ -54,7 +55,8 @@ all() ->
     non_recording_spans_ignored_test,
     no_exporter_configured_test,
     invalid_rule_rejected_test,
-    integration_with_tracer_test
+    integration_with_tracer_test,
+    undefined_end_time_test
   ].
 
 init_per_suite(Config) ->
@@ -465,6 +467,46 @@ integration_with_tracer_test(_Config) ->
   end,
 
   cleanup_mock_exporter(),
+  ok.
+
+%% Test that spans with undefined end_time skip duration rules gracefully
+undefined_end_time_test(_Config) ->
+  State = make_state(#{
+    always_keep => [{duration_ms, '>', 100}],
+    default_ratio => 0.0  %% Drop spans that don't match rules
+  }),
+
+  %% Create a span with undefined end_time (malformed)
+  MalformedSpan = #span{
+    name = <<"malformed_span">>,
+    ctx = #span_ctx{
+      trace_id = crypto:strong_rand_bytes(16),
+      span_id = crypto:strong_rand_bytes(8),
+      trace_flags = 1
+    },
+    parent_ctx = undefined,
+    kind = internal,
+    start_time = erlang:monotonic_time(nanosecond),
+    end_time = undefined,  %% Undefined end_time
+    attributes = #{},
+    events = [],
+    links = [],
+    status = unset,
+    is_recording = true
+  },
+
+  %% Duration rule should not match (returns false, doesn't crash)
+  ?assertNot(instrument_span_processor_tail_sampler:should_keep(MalformedSpan, State)),
+
+  %% Also test with duration rule that would match if end_time was valid
+  StateFast = make_state(#{
+    always_keep => [{duration_ms, '<', 1000}],  %% Would match most spans
+    default_ratio => 0.0
+  }),
+
+  %% Should still not match since end_time is undefined
+  ?assertNot(instrument_span_processor_tail_sampler:should_keep(MalformedSpan, StateFast)),
+
   ok.
 
 %% ============================================================================

@@ -233,7 +233,14 @@ matches_rule(#span{start_time = Start, end_time = End}, {duration_ms, Op, Thresh
     when is_integer(Start), is_integer(End), End >= Start ->
   DurationMs = (End - Start) div 1000000,  %% Convert ns to ms
   compare(DurationMs, Op, ThresholdMs);
+matches_rule(#span{name = Name, end_time = undefined}, {duration_ms, _, _}) ->
+  %% Span has no end_time - likely called before span ended
+  logger:warning("Tail sampler: duration rule skipped for span ~p with undefined end_time",
+                [Name],
+                #{error_logger => #{tag => warning_msg}}),
+  false;
 matches_rule(_Span, {duration_ms, _, _}) ->
+  %% Invalid start_time, end_time, or end < start
   false;
 
 %% Attribute exact match
