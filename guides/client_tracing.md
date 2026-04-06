@@ -305,12 +305,108 @@ instrument_sampler:set_sampler(instrument_sampler_attribute, #{
 
 ### Sampling Errors After Execution
 
-To sample based on execution results (like errors), consider:
+To sample based on execution results (like errors), use tail-based sampling (see below).
 
-1. **Always sample at a baseline rate** - Use a low `default_ratio` to capture some errors
-2. **Use span processors** - Implement custom `on_end` logic to filter spans
-3. **Tail-based sampling** - Use a collector that samples after spans complete
-4. **Pass error hints upfront** - If you can predict errors (e.g., known bad input), pass attributes at span start
+## Tail-Based Sampling
+
+The `instrument_span_processor_tail_sampler` makes sampling decisions **after spans complete**, enabling filtering based on final state: errors, duration, attributes, and events.
+
+### When to Use Tail Sampling
+
+- **Error sampling** - Always keep spans that ended with errors
+- **Latency sampling** - Keep slow operations (e.g., > 100ms)
+- **Post-execution attributes** - Sample based on attributes set during execution
+- **Exception events** - Keep spans that recorded exceptions
+
+### Configuration
+
+```erlang
+instrument_span_processor:register(instrument_span_processor_tail_sampler, #{
+    %% Always keep spans matching these conditions (OR logic)
+    always_keep => [
+        {status, error},                    %% Keep all error spans
+        {duration_ms, '>', 100},            %% Keep spans > 100ms
+        {attribute, <<"priority">>, high},  %% Keep high priority spans
+        has_exception                       %% Keep spans with exceptions
+    ],
+
+    %% Always drop spans matching these conditions (evaluated after always_keep)
+    always_drop => [
+        {attribute, <<"health_check">>, true}  %% Drop health checks
+    ],
+
+    %% Probabilistic sampling for remaining spans
+    default_ratio => 0.01,  %% 1% of remaining spans
+
+    %% Forward kept spans to this exporter
+    exporter => instrument_exporter_otlp,
+    exporter_config => #{endpoint => <<"http://localhost:4318">>}
+}).
+```
+
+### Rule Types
+
+| Rule | Syntax | Description |
+|------|--------|-------------|
+| Status | `{status, error}` or `{status, ok}` | Match span status |
+| Duration | `{duration_ms, Op, Value}` | Op: `'>'`, `'<'`, `'>='`, `'<='` |
+| Attribute | `{attribute, Key, Value}` | Exact attribute match |
+| Attribute exists | `{attribute_exists, Key}` | Attribute is present |
+| Has event | `{has_event, EventName}` | Span has named event |
+| Has exception | `has_exception` | Span has exception event |
+
+### Processing Order
+
+1. Check `always_keep` rules (OR logic) - if any match, span is **KEPT**
+2. Check `always_drop` rules (OR logic) - if any match, span is **DROPPED**
+3. Apply `default_ratio` probability - if passed, span is **KEPT**
+4. Otherwise span is **DROPPED**
+
+### Example: Error and Latency Sampling
+
+```erlang
+%% Keep all errors and slow requests, drop health checks, sample 0.1% of the rest
+instrument_span_processor:register(instrument_span_processor_tail_sampler, #{
+    always_keep => [
+        {status, error},
+        {duration_ms, '>', 500}   %% > 500ms is slow
+    ],
+    always_drop => [
+        {attribute, <<"http.route">>, <<"/health">>},
+        {attribute, <<"http.route">>, <<"/ready">>}
+    ],
+    default_ratio => 0.001,
+    exporter => instrument_exporter_otlp,
+    exporter_config => #{endpoint => <<"http://localhost:4318">>}
+}).
+```
+
+### Example: Debug Spans
+
+```erlang
+%% Keep spans with debug flag or that recorded retries
+instrument_span_processor:register(instrument_span_processor_tail_sampler, #{
+    always_keep => [
+        {attribute_exists, <<"debug">>},
+        {has_event, <<"retry">>}
+    ],
+    default_ratio => 0.0,  %% Drop everything else
+    exporter => instrument_exporter_console,
+    exporter_config => #{}
+}).
+```
+
+### Tail vs Head Sampling
+
+| Aspect | Head Sampling (Attribute-Based) | Tail Sampling |
+|--------|--------------------------------|---------------|
+| Decision time | At span start | At span end |
+| Error sampling | Must predict errors upfront | Works on actual errors |
+| Latency sampling | Cannot sample by duration | Can filter by duration |
+| Memory usage | Lower (drops spans early) | Higher (keeps until end) |
+| Use case | High-volume production | Debug, error analysis |
+
+For production, combine both: use head sampling for volume control and tail sampling for error/latency capture.
 
 ## Examples
 
