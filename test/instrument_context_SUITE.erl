@@ -23,6 +23,7 @@
   nested_attach_detach/1,
   set_current_no_leak/1,
   spawn_helpers_no_leak/1,
+  propagation_spawn_no_leak/1,
   baggage_operations/1,
   baggage_encode_decode/1,
   propagation_spawn/1,
@@ -39,6 +40,7 @@ all() ->
     nested_attach_detach,
     set_current_no_leak,
     spawn_helpers_no_leak,
+    propagation_spawn_no_leak,
     baggage_operations,
     baggage_encode_decode,
     propagation_spawn,
@@ -190,6 +192,76 @@ spawn_helpers_no_leak(_Config) ->
   after 1000 ->
     ct:fail(timeout)
   end.
+
+%% Test that instrument_propagation spawn functions don't create dictionary leaks (Bug 4 fix)
+propagation_spawn_no_leak(_Config) ->
+  Parent = self(),
+  Ctx = instrument_context:set_value(instrument_context:new(), prop_spawn_key, prop_spawn_value),
+  ok = instrument_context:set_current(Ctx),
+
+  %% Test spawn/2
+  Pid1 = instrument_propagation:spawn(fun(Arg) ->
+    %% Should have the context
+    prop_spawn_value = instrument_context:get_value(instrument_context:current(), prop_spawn_key),
+    %% Verify arg was passed
+    test_arg = Arg,
+    %% Should not have extra context history entries (uses set_current, not attach)
+    Count = count_context_entries(),
+    Parent ! {self(), spawn2_count, Count}
+  end, [test_arg]),
+
+  receive
+    {Pid1, spawn2_count, Count1} ->
+      %% Should have at most 1 entry (the main context key, no history tokens)
+      true = Count1 =< 1
+  after 1000 ->
+    ct:fail(spawn2_timeout)
+  end,
+
+  %% Test spawn_link/2
+  Pid2 = instrument_propagation:spawn_link(fun(Arg) ->
+    prop_spawn_value = instrument_context:get_value(instrument_context:current(), prop_spawn_key),
+    test_arg = Arg,
+    Count = count_context_entries(),
+    Parent ! {self(), spawn_link2_count, Count}
+  end, [test_arg]),
+
+  receive
+    {Pid2, spawn_link2_count, Count2} ->
+      true = Count2 =< 1
+  after 1000 ->
+    ct:fail(spawn_link2_timeout)
+  end,
+
+  %% Test spawn_monitor/1
+  {Pid3, _MonRef} = instrument_propagation:spawn_monitor(fun() ->
+    prop_spawn_value = instrument_context:get_value(instrument_context:current(), prop_spawn_key),
+    Count = count_context_entries(),
+    Parent ! {self(), spawn_monitor_count, Count}
+  end),
+
+  receive
+    {Pid3, spawn_monitor_count, Count3} ->
+      true = Count3 =< 1
+  after 1000 ->
+    ct:fail(spawn_monitor_timeout)
+  end,
+
+  %% Test spawn_opt/2
+  Pid4 = instrument_propagation:spawn_opt(fun() ->
+    prop_spawn_value = instrument_context:get_value(instrument_context:current(), prop_spawn_key),
+    Count = count_context_entries(),
+    Parent ! {self(), spawn_opt_count, Count}
+  end, []),
+
+  receive
+    {Pid4, spawn_opt_count, Count4} ->
+      true = Count4 =< 1
+  after 1000 ->
+    ct:fail(spawn_opt_timeout)
+  end,
+
+  ok.
 
 count_context_entries() ->
   Dict = erlang:get(),

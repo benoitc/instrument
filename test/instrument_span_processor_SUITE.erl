@@ -22,6 +22,7 @@
   processor_register_unregister_test/1,
   processor_list_test/1,
   simple_processor_test/1,
+  simple_processor_state_persistence_test/1,
   processor_chain_test/1,
   processor_integration_test/1,
   force_flush_test/1,
@@ -29,6 +30,8 @@
   batch_timeout_export_test/1,
   batch_max_size_export_test/1,
   batch_queue_overflow_test/1,
+  batch_exporter_state_update_test/1,
+  batch_export_timeout_test/1,
   processor_shutdown_test/1,
   concurrent_span_recording_test/1,
   exporter_error_handling_test/1,
@@ -43,6 +46,7 @@ all() ->
     processor_register_unregister_test,
     processor_list_test,
     simple_processor_test,
+    simple_processor_state_persistence_test,
     processor_chain_test,
     processor_integration_test,
     force_flush_test,
@@ -50,6 +54,8 @@ all() ->
     batch_timeout_export_test,
     batch_max_size_export_test,
     batch_queue_overflow_test,
+    batch_exporter_state_update_test,
+    batch_export_timeout_test,
     processor_shutdown_test,
     concurrent_span_recording_test,
     exporter_error_handling_test,
@@ -157,20 +163,60 @@ simple_processor_test(_Config) ->
     exporter => mock_exporter2
   }),
 
-  %% Store state for on_end callback
-  persistent_term:put({instrument_span_processor_simple, state}, #{
-    exporter => mock_exporter2,
-    exporter_state => #{pid => Self}
-  }),
-
   %% Create and end a span
   Span = instrument_tracer:start_span(<<"processor_test_span">>),
   instrument_tracer:end_span(Span),
 
   %% Cleanup
   instrument_span_processor:unregister(instrument_span_processor_simple),
-  persistent_term:erase({instrument_span_processor_simple, state}),
   meck:unload(mock_exporter2),
+  ok.
+
+%% Test that simple processor correctly persists state to persistent_term (Bug 1 fix)
+simple_processor_state_persistence_test(_Config) ->
+  Self = self(),
+  meck:new(state_test_exporter, [non_strict]),
+  meck:expect(state_test_exporter, init, fun(_) -> {ok, #{pid => Self, calls => 0}} end),
+  meck:expect(state_test_exporter, export, fun(Spans, State) ->
+    #{pid := Pid, calls := Calls} = State,
+    Pid ! {exported, length(Spans), Calls},
+    {ok, State#{calls => Calls + 1}}
+  end),
+  meck:expect(state_test_exporter, shutdown, fun(_) -> ok end),
+
+  %% Register simple processor
+  ok = instrument_span_processor:register(instrument_span_processor_simple, #{
+    exporter => state_test_exporter
+  }),
+
+  %% Verify state was stored in persistent_term (Bug 1 fix verification)
+  State = persistent_term:get({instrument_span_processor_simple, state}, undefined),
+  ?assertNotEqual(undefined, State),
+
+  %% Create and end a span - should be exported immediately
+  Span1 = instrument_tracer:start_span(<<"state_test_span_1">>),
+  instrument_tracer:end_span(Span1),
+
+  %% Verify export was called
+  receive
+    {exported, 1, _} -> ok
+  after 1000 ->
+    ct:fail(span_not_exported)
+  end,
+
+  %% Create another span to verify state persists
+  Span2 = instrument_tracer:start_span(<<"state_test_span_2">>),
+  instrument_tracer:end_span(Span2),
+
+  receive
+    {exported, 1, _} -> ok
+  after 1000 ->
+    ct:fail(second_span_not_exported)
+  end,
+
+  %% Cleanup
+  instrument_span_processor:unregister(instrument_span_processor_simple),
+  meck:unload(state_test_exporter),
   ok.
 
 processor_chain_test(_Config) ->
@@ -395,6 +441,106 @@ batch_queue_overflow_test(_Config) ->
   instrument_span_processor:unregister(instrument_span_processor_batch),
   meck:unload(overflow_exporter),
   ok.
+
+%% Test that batch processor correctly updates exporter state (Bug 5 fix)
+batch_exporter_state_update_test(_Config) ->
+  Self = self(),
+  meck:new(stateful_exporter, [non_strict]),
+  meck:expect(stateful_exporter, init, fun(_) -> {ok, #{count => 0, pid => Self}} end),
+  meck:expect(stateful_exporter, export, fun(Spans, #{count := C, pid := Pid} = State) ->
+    NewCount = C + length(Spans),
+    Pid ! {export_count, NewCount},
+    {ok, State#{count => NewCount}}
+  end),
+  meck:expect(stateful_exporter, shutdown, fun(#{count := C, pid := Pid}) ->
+    Pid ! {shutdown_count, C},
+    ok
+  end),
+
+  %% Register batch processor with small batch size for quick exports
+  ok = instrument_span_processor:register(instrument_span_processor_batch, #{
+    exporter => stateful_exporter,
+    max_export_batch_size => 2,
+    schedule_delay_millis => 60000  %% Long delay so we control exports via batch size
+  }),
+
+  %% Create 4 spans to trigger 2 exports
+  lists:foreach(fun(I) ->
+    Name = iolist_to_binary([<<"stateful_span_">>, integer_to_binary(I)]),
+    Span = instrument_tracer:start_span(Name),
+    instrument_tracer:end_span(Span)
+  end, lists:seq(1, 4)),
+
+  %% Wait a bit for async processing
+  timer:sleep(100),
+
+  %% Force shutdown to get final state
+  ok = instrument_span_processor:unregister(instrument_span_processor_batch),
+
+  %% Verify exporter received cumulative count in shutdown
+  receive
+    {shutdown_count, Count} ->
+      %% Should have seen at least 4 spans total
+      ?assert(Count >= 4, io_lib:format("Expected >= 4, got ~p", [Count]))
+  after 1000 ->
+    ct:fail(shutdown_not_called)
+  end,
+
+  meck:unload(stateful_exporter),
+  ok.
+
+%% Test that batch processor respects export timeout (Bug 5 fix)
+batch_export_timeout_test(_Config) ->
+  Self = self(),
+  meck:new(slow_exporter, [non_strict]),
+  meck:expect(slow_exporter, init, fun(_) -> {ok, #{pid => Self}} end),
+  meck:expect(slow_exporter, export, fun(_Spans, #{pid := Pid} = State) ->
+    Pid ! export_started,
+    %% Sleep longer than timeout
+    timer:sleep(500),
+    Pid ! export_completed,
+    {ok, State}
+  end),
+  meck:expect(slow_exporter, shutdown, fun(_) -> ok end),
+
+  %% Register batch processor with short timeout
+  ok = instrument_span_processor:register(instrument_span_processor_batch, #{
+    exporter => slow_exporter,
+    max_export_batch_size => 1,
+    export_timeout_millis => 100,  %% 100ms timeout
+    schedule_delay_millis => 60000
+  }),
+
+  %% Create a span to trigger export
+  Span = instrument_tracer:start_span(<<"timeout_test_span">>),
+  instrument_tracer:end_span(Span),
+
+  %% Verify export started
+  receive
+    export_started -> ok
+  after 1000 ->
+    ct:fail(export_not_started)
+  end,
+
+  %% The export should be killed by timeout, so export_completed should NOT arrive
+  %% (or arrive late after we've moved on)
+  timer:sleep(200),
+
+  %% Cleanup - this should not hang even if export is slow
+  ok = instrument_span_processor:unregister(instrument_span_processor_batch),
+
+  %% Flush any remaining messages
+  flush_messages(),
+
+  meck:unload(slow_exporter),
+  ok.
+
+flush_messages() ->
+  receive
+    _ -> flush_messages()
+  after 0 ->
+    ok
+  end.
 
 processor_shutdown_test(_Config) ->
   %% Test that shutdown flushes pending spans

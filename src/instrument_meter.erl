@@ -408,33 +408,90 @@ register_instrument(Name, Instrument) ->
 do_add(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
   %% No attributes - use base metric directly
   instrument_nif:inc_gauge(Ref, float(Value));
-do_add(#metric{handle = Ref} = _Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - for now, fall back to base metric
-  %% Future: create vector metrics for attribute cardinality
-  instrument_nif:inc_gauge(Ref, float(Value));
+do_add(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
+  %% With attributes - use vec API
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(Name, counter, LabelNames, Metric),
+  instrument:inc_counter_vec(VecName, LabelValues, Value);
 do_add(_, _, _) ->
   {error, invalid_handle}.
 
 do_record(#metric{} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
   %% No attributes - use base metric directly
   instrument_histogram:observe_histogram(Metric, Value);
-do_record(#metric{} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - for now, fall back to base metric
-  %% Future: create vector metrics for attribute cardinality
-  instrument_histogram:observe_histogram(Metric, Value);
+do_record(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
+  %% With attributes - use vec API
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(Name, histogram, LabelNames, Metric),
+  instrument:observe_histogram_vec(VecName, LabelValues, Value);
 do_record(_, _, _) ->
   {error, invalid_handle}.
 
 do_set(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
   %% No attributes - use base metric directly
   instrument_nif:set_gauge(Ref, float(Value));
-do_set(#metric{handle = Ref} = _Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - for now, fall back to base metric
-  %% Future: create vector metrics for attribute cardinality
-  instrument_nif:set_gauge(Ref, float(Value));
+do_set(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
+  %% With attributes - use vec API
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
+  instrument:set_gauge_vec(VecName, LabelValues, Value);
 do_set(_, _, _) ->
   {error, invalid_handle}.
 
 default_boundaries() ->
   %% Default histogram boundaries per OTel spec
   [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0].
+
+%% @doc Convert attribute map to sorted label names and values.
+%% #{method => <<"GET">>, status => 200} -> {[method, status], [<<"GET">>, <<"200">>]}
+attrs_to_labels(Attrs) ->
+  Sorted = lists:sort(maps:to_list(Attrs)),
+  {[K || {K, _} <- Sorted], [to_label_value(V) || {_, V} <- Sorted]}.
+
+to_label_value(V) when is_binary(V) -> V;
+to_label_value(V) when is_list(V) -> list_to_binary(V);
+to_label_value(V) when is_atom(V) -> atom_to_binary(V, utf8);
+to_label_value(V) when is_integer(V) -> integer_to_binary(V);
+to_label_value(V) when is_float(V) -> float_to_binary(V, [{decimals, 6}, compact]).
+
+%% @doc Lazily create a vec metric if not exists.
+%% The vec name includes the label names to support different attribute schemas.
+ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
+  VecName = make_vec_name(BaseName, LabelNames),
+  case instrument_registry:lookup(VecName) of
+    undefined ->
+      %% Create vec metric based on type
+      case Type of
+        counter ->
+          instrument:new_counter_vec(VecName, <<>>, LabelNames);
+        gauge ->
+          instrument:new_gauge_vec(VecName, <<>>, LabelNames);
+        histogram ->
+          instrument:new_histogram_vec(VecName, <<>>, LabelNames)
+      end,
+      VecName;
+    _ ->
+      VecName
+  end.
+
+%% Include label names in the vec metric name to distinguish different attribute schemas
+make_vec_name({otel, Name}, LabelNames) when is_binary(Name) ->
+  LabelSuffix = label_suffix(LabelNames),
+  {otel_vec, <<Name/binary, LabelSuffix/binary>>};
+make_vec_name(Name, LabelNames) when is_atom(Name) ->
+  LabelSuffix = label_suffix(LabelNames),
+  list_to_atom(atom_to_list(Name) ++ "_vec" ++ binary_to_list(LabelSuffix));
+make_vec_name(Name, LabelNames) when is_binary(Name) ->
+  LabelSuffix = label_suffix(LabelNames),
+  <<Name/binary, "_vec", LabelSuffix/binary>>.
+
+%% Create a deterministic suffix from label names
+label_suffix([]) -> <<>>;
+label_suffix(LabelNames) ->
+  %% Sort for determinism, then hash
+  Sorted = lists:sort(LabelNames),
+  Joined = lists:foldl(fun(L, Acc) ->
+    LBin = if is_atom(L) -> atom_to_binary(L, utf8); true -> L end,
+    <<Acc/binary, "_", LBin/binary>>
+  end, <<>>, Sorted),
+  Joined.

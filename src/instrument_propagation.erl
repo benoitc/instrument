@@ -55,7 +55,7 @@ spawn(Fun) when is_function(Fun, 0) ->
 spawn(Fun, Args) when is_function(Fun), is_list(Args) ->
   Ctx = instrument_context:current(),
   erlang:spawn(fun() ->
-    _ = instrument_context:attach(Ctx),
+    ok = instrument_context:set_current(Ctx),
     erlang:apply(Fun, Args)
   end).
 
@@ -69,7 +69,7 @@ spawn_link(Fun) when is_function(Fun, 0) ->
 spawn_link(Fun, Args) when is_function(Fun), is_list(Args) ->
   Ctx = instrument_context:current(),
   erlang:spawn_link(fun() ->
-    _ = instrument_context:attach(Ctx),
+    ok = instrument_context:set_current(Ctx),
     erlang:apply(Fun, Args)
   end).
 
@@ -78,7 +78,7 @@ spawn_link(Fun, Args) when is_function(Fun), is_list(Args) ->
 spawn_monitor(Fun) when is_function(Fun, 0) ->
   Ctx = instrument_context:current(),
   erlang:spawn_monitor(fun() ->
-    _ = instrument_context:attach(Ctx),
+    ok = instrument_context:set_current(Ctx),
     Fun()
   end).
 
@@ -87,7 +87,7 @@ spawn_monitor(Fun) when is_function(Fun, 0) ->
 spawn_opt(Fun, Opts) when is_function(Fun, 0), is_list(Opts) ->
   Ctx = instrument_context:current(),
   erlang:spawn_opt(fun() ->
-    _ = instrument_context:attach(Ctx),
+    ok = instrument_context:set_current(Ctx),
     Fun()
   end, Opts).
 

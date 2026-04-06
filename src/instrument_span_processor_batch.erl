@@ -161,26 +161,28 @@ handle_call(shutdown, _From, State) ->
     exporter = Exporter,
     exporter_state = ExporterState,
     queue = Queue,
-    timer_ref = TimerRef
+    timer_ref = TimerRef,
+    export_timeout = ExportTimeout
   } = State,
   %% Cancel timer
   cancel_timer(TimerRef),
-  %% Export remaining spans
-  export_batch(Queue, Exporter, ExporterState),
+  %% Export remaining spans with timeout
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
   %% Shutdown exporter
-  catch Exporter:shutdown(ExporterState),
+  catch Exporter:shutdown(NewExporterState),
   %% Clean up persistent_term
   persistent_term:erase({?MODULE, state}),
-  {reply, ok, State#state{queue = [], queue_size = 0}};
+  {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
 
 handle_call(force_flush, _From, State) ->
   #state{
     exporter = Exporter,
     exporter_state = ExporterState,
-    queue = Queue
+    queue = Queue,
+    export_timeout = ExportTimeout
   } = State,
-  export_batch(Queue, Exporter, ExporterState),
-  {reply, ok, State#state{queue = [], queue_size = 0}};
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
+  {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
 
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
@@ -193,7 +195,8 @@ handle_cast({on_end, Span}, State) ->
     exporter_state = ExporterState,
     queue = Queue,
     queue_size = QueueSize,
-    dropped_spans = Dropped
+    dropped_spans = Dropped,
+    export_timeout = ExportTimeout
   } = State,
 
   %% Check if queue is full
@@ -207,8 +210,8 @@ handle_cast({on_end, Span}, State) ->
       %% Check if we should export immediately
       case NewQueueSize >= MaxExportBatchSize of
         true ->
-          export_batch(NewQueue, Exporter, ExporterState),
-          {noreply, State#state{queue = [], queue_size = 0}};
+          NewExporterState = export_batch_with_timeout(NewQueue, Exporter, ExporterState, ExportTimeout),
+          {noreply, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
         false ->
           {noreply, State#state{queue = NewQueue, queue_size = NewQueueSize}}
       end
@@ -222,13 +225,14 @@ handle_info(export, State) ->
     exporter = Exporter,
     exporter_state = ExporterState,
     queue = Queue,
-    schedule_delay = ScheduleDelay
+    schedule_delay = ScheduleDelay,
+    export_timeout = ExportTimeout
   } = State,
-  %% Export current batch
-  export_batch(Queue, Exporter, ExporterState),
+  %% Export current batch with timeout
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
   %% Schedule next export
   TimerRef = schedule_export(ScheduleDelay),
-  {noreply, State#state{queue = [], queue_size = 0, timer_ref = TimerRef}};
+  {noreply, State#state{queue = [], queue_size = 0, timer_ref = TimerRef, exporter_state = NewExporterState}};
 
 handle_info(_Info, State) ->
   {noreply, State}.
@@ -238,11 +242,12 @@ terminate(_Reason, State) ->
     exporter = Exporter,
     exporter_state = ExporterState,
     queue = Queue,
-    timer_ref = TimerRef
+    timer_ref = TimerRef,
+    export_timeout = ExportTimeout
   } = State,
   cancel_timer(TimerRef),
-  export_batch(Queue, Exporter, ExporterState),
-  catch Exporter:shutdown(ExporterState),
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
+  catch Exporter:shutdown(NewExporterState),
   persistent_term:erase({?MODULE, state}),
   ok.
 
@@ -261,13 +266,48 @@ cancel_timer(undefined) ->
 cancel_timer(Ref) ->
   erlang:cancel_timer(Ref).
 
-export_batch([], _Exporter, _ExporterState) ->
-  ok;
+export_batch([], _Exporter, ExporterState) ->
+  ExporterState;
 export_batch(Spans, Exporter, ExporterState) ->
   %% Reverse to maintain order
   OrderedSpans = lists:reverse(Spans),
   try
-    Exporter:export(OrderedSpans, ExporterState)
+    case Exporter:export(OrderedSpans, ExporterState) of
+      {ok, NewState} -> NewState;
+      {error, _Reason, NewState} -> NewState;
+      _ -> ExporterState
+    end
   catch
-    _:_ -> ok
+    _:_ -> ExporterState
+  end.
+
+export_batch_with_timeout(Spans, Exporter, ExporterState, Timeout) ->
+  Parent = self(),
+  Ref = make_ref(),
+  {Pid, MonRef} = erlang:spawn_monitor(fun() ->
+    Result = export_batch(Spans, Exporter, ExporterState),
+    Parent ! {Ref, Result}
+  end),
+  receive
+    {Ref, NewExporterState} ->
+      erlang:demonitor(MonRef, [flush]),
+      NewExporterState;
+    {'DOWN', MonRef, process, Pid, _Reason} ->
+      %% Drain any late message from the worker
+      drain_ref_message(Ref),
+      ExporterState
+  after Timeout ->
+    erlang:demonitor(MonRef, [flush]),
+    exit(Pid, kill),
+    %% Drain any late message from the worker that may have arrived just before/during kill
+    drain_ref_message(Ref),
+    ExporterState
+  end.
+
+%% Drain any orphaned message with the given ref to prevent mailbox leaks
+drain_ref_message(Ref) ->
+  receive
+    {Ref, _} -> ok
+  after 0 ->
+    ok
   end.

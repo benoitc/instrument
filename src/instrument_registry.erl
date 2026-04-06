@@ -217,7 +217,15 @@ collect_all() ->
     case lookup(Name) of
       undefined -> false;
       #metric{collect = {Mod, Fun, Args}} ->
-        {true, erlang:apply(Mod, Fun, Args)}
+        try
+          {true, erlang:apply(Mod, Fun, Args)}
+        catch
+          Class:Reason:Stacktrace ->
+            error_logger:warning_msg(
+              "Metric collector ~p:~p failed: ~p:~p~n~p",
+              [Mod, Fun, Class, Reason, Stacktrace]),
+            false
+        end
     end
   end, Names).
 

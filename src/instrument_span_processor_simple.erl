@@ -54,10 +54,12 @@ init(Config) ->
   ExporterConfig = maps:get(exporter_config, Config, #{}),
   case Exporter:init(ExporterConfig) of
     {ok, ExporterState} ->
-      {ok, #state{
+      State = #state{
         exporter = Exporter,
         exporter_state = ExporterState
-      }};
+      },
+      persistent_term:put({?MODULE, state}, State),
+      {ok, State};
     {error, Reason} ->
       {error, Reason}
   end.

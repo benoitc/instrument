@@ -37,7 +37,8 @@
     metrics_counter_assertion/1,
     metrics_gauge_assertion/1,
     metrics_histogram_assertion/1,
-    metrics_clear/1
+    metrics_clear/1,
+    metrics_collector_error_isolation/1
 ]).
 
 %% Log tests
@@ -53,6 +54,7 @@
     reset_clears_all/1
 ]).
 
+-include("instrument.hrl").
 -include("instrument_otel.hrl").
 
 all() ->
@@ -73,6 +75,7 @@ all() ->
         metrics_gauge_assertion,
         metrics_histogram_assertion,
         metrics_clear,
+        metrics_collector_error_isolation,
         log_collection,
         log_assert_exists,
         log_assert_properties,
@@ -379,6 +382,43 @@ metrics_clear(_Config) ->
 
     ok = instrument_test:clear_metrics(),
     0 = length(instrument_test:get_metrics()),
+    ok.
+
+%% Test that a crashing collector doesn't prevent other collectors from running (Bug 2 fix)
+metrics_collector_error_isolation(_Config) ->
+    %% Create a good counter
+    GoodCounter = instrument:new_counter(good_counter, <<"Good counter">>),
+    instrument:inc_counter(GoodCounter, 10),
+
+    %% Create a mock metric with a crashing collector
+    meck:new(crashing_collector, [non_strict]),
+    meck:expect(crashing_collector, collect, fun() ->
+        error(intentional_crash)
+    end),
+
+    %% Register the crashing metric directly to the registry
+    CrashingMetric = #metric{
+        name = crashing_metric,
+        handle = undefined,
+        collect = {crashing_collector, collect, []}
+    },
+    ok = instrument:register(CrashingMetric),
+
+    %% Create another good counter after the crashing one
+    GoodCounter2 = instrument:new_counter(good_counter2, <<"Good counter 2">>),
+    instrument:inc_counter(GoodCounter2, 5),
+
+    %% collect_all should not crash and should return data from working collectors
+    Results = instrument_registry:collect_all(),
+
+    %% Should have collected something (the non-crashing counters)
+    true = is_list(Results),
+
+    %% Cleanup
+    instrument:unregister(crashing_metric),
+    instrument:unregister(good_counter),
+    instrument:unregister(good_counter2),
+    meck:unload(crashing_collector),
     ok.
 
 %% ============================================================================
