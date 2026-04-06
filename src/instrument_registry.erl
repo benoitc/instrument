@@ -34,6 +34,11 @@
 
 -include("instrument.hrl").
 
+%% State record - metrics_set is the source of truth for registered metric names
+-record(state, {
+  metrics_set = sets:new() :: sets:set(term())
+}).
+
 %% API
 
 start_link() ->
@@ -79,31 +84,35 @@ create_vector_metric(Name, Label) ->
 
 init([]) ->
   _ = create_tables(),
-  {ok, []}.
+  %% Initialize persistent_term index as empty
+  persistent_term:put(instrument_metrics, []),
+  {ok, #state{metrics_set = sets:new()}}.
 
 
 create_tables() ->
   [ets:new(T, [public, named_table, set, {keypos,#metric.name}]) || T <- tables()].
 
-handle_call({reg, #metric{name=N}=Metric}, _From, State) ->
-  Reply = case ets:member(instrument_lib:table(), N) of
-            true ->
-              {error, already_exists};
-            false ->
-              _ = do_reg(Metric),
-              ok
-          
-          end,
-  {reply, Reply, State};
+handle_call({reg, #metric{name=N}=Metric}, _From, #state{metrics_set = Set} = State) ->
+  case ets:member(instrument_lib:table(), N) of
+    true ->
+      {reply, {error, already_exists}, State};
+    false ->
+      do_reg_metric(Metric),
+      NewSet = sets:add_element(N, Set),
+      sync_metrics_index(NewSet),
+      {reply, ok, State#state{metrics_set = NewSet}}
+  end;
 
-handle_call({unreg, Name}, _From, State) ->
-  _ = do_unreg(Name),
-  {reply, ok, State};
+handle_call({unreg, Name}, _From, #state{metrics_set = Set} = State) ->
+  do_unreg_metric(Name),
+  NewSet = sets:del_element(Name, Set),
+  sync_metrics_index(NewSet),
+  {reply, ok, State#state{metrics_set = NewSet}};
 
-handle_call(unregister_all, _From, State) ->
-  _Res = do_delete_all(),
+handle_call(unregister_all, _From, _State) ->
+  do_delete_all(),
   _ = erlang:garbage_collect(self()),
-  {reply, ok, State};
+  {reply, ok, #state{metrics_set = sets:new()}};
 
 
 handle_call({create_vector_metric, Name, Label}, _From, State) ->
@@ -111,7 +120,7 @@ handle_call({create_vector_metric, Name, Label}, _From, State) ->
             [] -> ok;
             [Metric] ->
               Metric2 = do_create_metric(Metric, Label),
-              _ = do_reg(Metric2),
+              do_reg_metric(Metric2),
               ok
           end,
   {reply, Reply, State};
@@ -121,7 +130,7 @@ handle_call({remove_label, Name, Label}, _From, State) ->
             [] -> ok;
             [Metric] ->
               Metric2 = do_remove_label(Metric, Label),
-              _ = do_reg(Metric2),
+              do_reg_metric(Metric2),
               ok
           end,
   {reply, Reply, State};
@@ -131,7 +140,7 @@ handle_call({clear_labels, Name}, _From, State) ->
             [] -> ok;
             [Metric] ->
               Metric2 = do_clear_labels(Metric),
-              _ = do_reg(Metric2),
+              do_reg_metric(Metric2),
               ok
           end,
   {reply, Reply, State};
@@ -151,30 +160,30 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-do_reg(Metric) ->
+%% @private Register a metric in ETS and persistent_term (for fast lookup).
+%% Does NOT update the metrics index - that's handled by the gen_server state.
+do_reg_metric(Metric) ->
   #metric{name = Name} = Metric,
   %% Store in ETS tables
   [ets:insert(T, Metric) || T <- tables()],
   %% Store in persistent_term for fast lookup
-  persistent_term:put({instrument_metric, Name}, Metric),
-  %% Update metrics index
-  Names = persistent_term:get(instrument_metrics, []),
-  case lists:member(Name, Names) of
-    true -> ok;
-    false -> persistent_term:put(instrument_metrics, [Name | Names])
-  end.
+  persistent_term:put({instrument_metric, Name}, Metric).
 
-do_unreg(Name) ->
+%% @private Unregister a metric from ETS and persistent_term.
+%% Does NOT update the metrics index - that's handled by the gen_server state.
+do_unreg_metric(Name) ->
   %% Delete from all ETS tables (they're partitioned by scheduler)
   [ets:delete(T, Name) || T <- tables()],
   %% Remove from persistent_term
   catch persistent_term:erase({instrument_metric, Name}),
-  %% Remove from index
-  Names = persistent_term:get(instrument_metrics, []),
-  persistent_term:put(instrument_metrics, lists:delete(Name, Names)),
   %% Erase cached labels for this metric
   _ = erase_cached_labels(Name),
   ok.
+
+%% @private Sync the metrics index from gen_server state to persistent_term.
+%% This is the only place the instrument_metrics list is written.
+sync_metrics_index(Set) ->
+  persistent_term:put(instrument_metrics, sets:to_list(Set)).
 
 erase_cached_labels(Name) ->
   Keys = persistent_term:get(),
@@ -221,9 +230,11 @@ collect_all() ->
           {true, erlang:apply(Mod, Fun, Args)}
         catch
           Class:Reason:Stacktrace ->
-            error_logger:warning_msg(
-              "Metric collector ~p:~p failed: ~p:~p~n~p",
-              [Mod, Fun, Class, Reason, Stacktrace]),
+            logger:warning("Metric collector ~p:~p failed: ~p:~p",
+                          [Mod, Fun, Class, Reason],
+                          #{error_logger => #{tag => warning_msg},
+                            mfa => {Mod, Fun, length(Args)},
+                            stacktrace => Stacktrace}),
             false
         end
     end
