@@ -41,7 +41,8 @@
 -export([
   detect_env/0,
   detect_process/0,
-  detect_host/0
+  detect_host/0,
+  detect_service/0
 ]).
 
 -define(DETECTORS_KEY, '$instrument_resource_detectors').
@@ -153,12 +154,34 @@ detect_host() ->
   },
   instrument_resource:create(Attrs2).
 
+%% @doc Detects service identity from config and environment.
+%% Reads service.name from OTEL_SERVICE_NAME, service.version from
+%% OTEL_SERVICE_VERSION, and custom attributes from application config.
+-spec detect_service() -> #resource{}.
+detect_service() ->
+  %% Start with resource attributes from application config
+  ConfigAttrs = instrument_config:get_resource_config(),
+  ServiceName = instrument_config:get_service_name(),
+  ServiceVersion = instrument_config:get_service_version(),
+
+  Attrs0 = maps:merge(#{}, ConfigAttrs),
+  Attrs1 = case ServiceName of
+    undefined -> Attrs0;
+    Name -> Attrs0#{<<"service.name">> => Name}
+  end,
+  Attrs2 = case ServiceVersion of
+    undefined -> Attrs1;
+    Version -> Attrs1#{<<"service.version">> => Version}
+  end,
+  instrument_resource:create(Attrs2).
+
 %% ============================================================================
 %% Internal Functions
 %% ============================================================================
 
 default_detectors() ->
   [
+    {service, fun detect_service/0},
     {env, fun detect_env/0},
     {process, fun detect_process/0},
     {host, fun detect_host/0}

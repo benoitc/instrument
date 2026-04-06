@@ -79,9 +79,16 @@ on_end(Span) ->
   case persistent_term:get({?MODULE, state}, undefined) of
     undefined ->
       ok;
-    #state{exporter = Exporter, exporter_state = ExporterState} ->
+    #state{exporter = Exporter, exporter_state = ExporterState} = State ->
       try
-        Exporter:export([Span], ExporterState)
+        case Exporter:export([Span], ExporterState) of
+          {ok, NewExporterState} ->
+            persistent_term:put({?MODULE, state}, State#state{exporter_state = NewExporterState});
+          {error, _Reason, NewExporterState} ->
+            persistent_term:put({?MODULE, state}, State#state{exporter_state = NewExporterState});
+          _ ->
+            ok
+        end
       catch
         _:_ -> ok
       end
@@ -104,6 +111,7 @@ shutdown() ->
 -spec shutdown(#state{}) -> ok.
 shutdown(#state{exporter = Exporter, exporter_state = ExporterState}) ->
   catch Exporter:shutdown(ExporterState),
+  persistent_term:erase({?MODULE, state}),
   ok.
 
 %% @doc Forces a flush. No-op for simple processor since it exports immediately.

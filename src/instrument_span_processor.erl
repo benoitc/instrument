@@ -100,7 +100,8 @@ register(ProcessorModule, Config) when is_atom(ProcessorModule), is_map(Config) 
 %% @doc Unregisters a span processor.
 -spec unregister(module()) -> ok.
 unregister(ProcessorModule) when is_atom(ProcessorModule) ->
-  gen_server:call(?SERVER, {unregister, ProcessorModule}, 15000).
+  %% Use a long timeout to accommodate export_timeout_millis
+  gen_server:call(?SERVER, {unregister, ProcessorModule}, 60000).
 
 %% @doc Lists all registered processors.
 -spec list() -> [module()].
@@ -270,11 +271,14 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% @private Start batch processor under the instrument supervisor
 start_batch_processor(Config) ->
+  %% Set shutdown timeout based on export_timeout_millis plus buffer
+  ExportTimeout = maps:get(export_timeout_millis, Config, 30000),
+  ShutdownTimeout = ExportTimeout + 5000,
   ChildSpec = #{
     id => instrument_span_processor_batch,
     start => {instrument_span_processor_batch, start_link, [Config]},
     restart => permanent,
-    shutdown => 5000,
+    shutdown => ShutdownTimeout,
     type => worker,
     modules => [instrument_span_processor_batch]
   },

@@ -165,9 +165,8 @@ handle_call(shutdown, _From, State) ->
   } = State,
   %% Cancel timer
   cancel_timer(TimerRef),
-  %% Export remaining spans with timeout (cap to fit within gen_server:call timeout)
-  ShutdownTimeout = min(ExportTimeout, 5000),
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ShutdownTimeout),
+  %% Export remaining spans with configured timeout
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
   %% Shutdown exporter
   catch Exporter:shutdown(NewExporterState),
   {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
@@ -244,9 +243,8 @@ terminate(_Reason, State) ->
     export_timeout = ExportTimeout
   } = State,
   cancel_timer(TimerRef),
-  %% Cap shutdown timeout to fit within supervisor's 5s shutdown window
-  ShutdownTimeout = min(ExportTimeout, 5000),
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ShutdownTimeout),
+  %% Use configured export timeout for shutdown
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
   catch Exporter:shutdown(NewExporterState),
   ok.
 

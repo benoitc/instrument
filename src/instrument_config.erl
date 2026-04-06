@@ -32,6 +32,8 @@
   get/2,
   set/2,
   get_service_name/0,
+  get_service_version/0,
+  get_resource_config/0,
   get_sampler/0,
   get_propagators/0,
   get_batch_processor_config/0,
@@ -47,6 +49,7 @@
   set_verbose_tracing/1,
   %% Exporter controls
   auto_register_exporters/0,
+  auto_register_span_processor/0,
   enable_exporter/1,
   disable_exporter/1,
   is_exporter_enabled/1,
@@ -68,6 +71,7 @@
 init() ->
   Config = #{
     service_name => read_service_name(),
+    service_version => read_service_version(),
     sampler => read_sampler(),
     propagators => read_propagators(),
     batch_processor => read_batch_processor_config(),
@@ -104,6 +108,16 @@ set(Key, Value) ->
 -spec get_service_name() -> binary() | undefined.
 get_service_name() ->
   get(service_name).
+
+%% @doc Gets the service version.
+-spec get_service_version() -> binary() | undefined.
+get_service_version() ->
+  get(service_version).
+
+%% @doc Gets resource attributes from application config.
+-spec get_resource_config() -> map().
+get_resource_config() ->
+  application:get_env(instrument, resource, #{}).
 
 %% @doc Gets the configured sampler.
 -spec get_sampler() -> {module(), term()} | undefined.
@@ -202,6 +216,34 @@ auto_register_exporters() ->
   end,
   ok.
 
+%% @doc Auto-registers span processor based on config.
+%% Reads from application env {span_processor, {Module, Config}} or
+%% uses batch processor with OTEL_BSP_* settings if exporter is available.
+-spec auto_register_span_processor() -> ok.
+auto_register_span_processor() ->
+  case application:get_env(instrument, span_processor) of
+    {ok, {Module, Config}} ->
+      instrument_span_processor:register(Module, Config);
+    _ ->
+      %% Check for batch processor env vars
+      BatchConfig = get_batch_processor_config(),
+      case map_size(BatchConfig) > 0 of
+        true ->
+          %% Get exporter from config or env
+          case get_default_exporter() of
+            undefined -> ok;
+            {ExporterMod, ExporterCfg} ->
+              FullConfig = BatchConfig#{
+                exporter => ExporterMod,
+                exporter_config => ExporterCfg
+              },
+              instrument_span_processor:register(instrument_span_processor_batch, FullConfig)
+          end;
+        false -> ok
+      end
+  end,
+  ok.
+
 %% @doc Enables a specific exporter.
 -spec enable_exporter(module()) -> ok.
 enable_exporter(Module) when is_atom(Module) ->
@@ -241,6 +283,12 @@ get_exporters() ->
 
 read_service_name() ->
   case os:getenv("OTEL_SERVICE_NAME") of
+    false -> undefined;
+    Value -> list_to_binary(Value)
+  end.
+
+read_service_version() ->
+  case os:getenv("OTEL_SERVICE_VERSION") of
     false -> undefined;
     Value -> list_to_binary(Value)
   end.
@@ -383,3 +431,25 @@ register_exporter_by_name(_) ->
 parse_exporter_name("otlp") -> {true, instrument_exporter_otlp};
 parse_exporter_name("console") -> {true, instrument_exporter_console};
 parse_exporter_name(_) -> false.
+
+get_default_exporter() ->
+  %% First check application env
+  case application:get_env(instrument, span_exporter) of
+    {ok, {Module, Config}} -> {Module, Config};
+    _ ->
+      %% Fall back to OTEL_EXPORTERS
+      case os:getenv("OTEL_EXPORTERS") of
+        false -> undefined;
+        Value ->
+          case string:tokens(Value, ",") of
+            ["otlp" | _] ->
+              case get_otlp_endpoint(traces) of
+                undefined -> undefined;
+                Endpoint -> {instrument_exporter_otlp, #{endpoint => Endpoint}}
+              end;
+            ["console" | _] ->
+              {instrument_exporter_console, #{}};
+            _ -> undefined
+          end
+      end
+  end.

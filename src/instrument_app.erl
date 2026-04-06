@@ -22,7 +22,15 @@ start(_StartType, _StartArgs) ->
         {read_concurrency, true},
         {write_concurrency, true}
     ]),
-    instrument_sup:start_link().
+    case instrument_sup:start_link() of
+        {ok, Pid} ->
+            %% Auto-register exporters and processors from config/env
+            instrument_config:auto_register_exporters(),
+            instrument_config:auto_register_span_processor(),
+            {ok, Pid};
+        Error ->
+            Error
+    end.
 
 %%--------------------------------------------------------------------
 stop(_State) ->
