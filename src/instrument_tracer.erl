@@ -221,6 +221,26 @@ start_span_impl(Name, Opts) ->
 
   %% Attach to context
   attach_span(FinalSpan),
+
+  %% Enable seq_trace if flight recorder is active (only for root spans)
+  case ParentSpanCtx of
+    undefined ->
+      case instrument_flight_recorder:is_enabled() of
+        true ->
+          %% Use trace_id as label (convert to integer for seq_trace)
+          Label = binary:decode_unsigned(TraceId),
+          seq_trace:set_token(label, Label),
+          seq_trace:set_token(send, true),
+          seq_trace:set_token('receive', true),
+          seq_trace:set_token(timestamp, true);
+        false ->
+          ok
+      end;
+    _ ->
+      %% Child spans inherit the seq_trace token automatically
+      ok
+  end,
+
   FinalSpan.
 
 %% @private Creates a minimal no-op span when tracing is disabled.
@@ -281,7 +301,7 @@ end_span(#span{is_recording = false} = Span) ->
   %% Non-recording spans still need to be detached from context
   detach_span(Span),
   ok;
-end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
+end_span(#span{ctx = #span_ctx{span_id = SpanId}, parent_ctx = ParentCtx} = OriginalSpan) ->
   %% Get the current span from context (may have been modified)
   %% Use the span_id to verify we're ending the right span
   SpanToEnd = case current_span() of
@@ -304,6 +324,13 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
   FinalSpan = SpanWithEndTime#span{is_recording = false},
   %% Export the span
   export_span(FinalSpan),
+  %% Clear seq_trace token if this is root span
+  case ParentCtx of
+    undefined ->
+      seq_trace:reset_trace();
+    _ ->
+      ok
+  end,
   %% Detach from context using the span we're ending
   detach_span(SpanToEnd),
   ok.

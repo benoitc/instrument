@@ -39,11 +39,14 @@
   get_otlp_endpoint/1,
   get_log_level/0,
   is_tracing_enabled/0,
-  set_tracing_enabled/1
+  set_tracing_enabled/1,
+  is_flight_recorder_enabled/0,
+  set_flight_recorder_enabled/1
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
 -define(TRACING_ENABLED_KEY, '$instrument_tracing_enabled').
+-define(FLIGHT_RECORDER_KEY, '$instrument_flight_recorder_enabled').
 
 %% ============================================================================
 %% API
@@ -145,6 +148,20 @@ is_tracing_enabled() ->
 set_tracing_enabled(Enabled) when is_boolean(Enabled) ->
   persistent_term:put(?TRACING_ENABLED_KEY, Enabled),
   ok.
+
+%% @doc Checks if the flight recorder is enabled.
+%% Note: This reads from instrument_flight_recorder's persistent_term for consistency.
+-spec is_flight_recorder_enabled() -> boolean().
+is_flight_recorder_enabled() ->
+  persistent_term:get(?FLIGHT_RECORDER_KEY, false).
+
+%% @doc Enables or disables the flight recorder.
+%% This is a convenience wrapper around instrument_flight_recorder:enable/disable.
+-spec set_flight_recorder_enabled(boolean()) -> ok.
+set_flight_recorder_enabled(true) ->
+  instrument_flight_recorder:enable();
+set_flight_recorder_enabled(false) ->
+  instrument_flight_recorder:disable().
 
 %% ============================================================================
 %% Internal Functions

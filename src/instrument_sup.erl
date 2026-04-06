@@ -33,7 +33,8 @@ init([]) ->
   MetricsExporter = child_spec(worker, metrics_exporter, instrument_metrics_exporter, permanent, []),
   LogExporter = child_spec(worker, log_exporter, instrument_log_exporter, permanent, []),
   SpanProcessor = child_spec(worker, span_processor, instrument_span_processor, permanent, []),
-  {ok, { {one_for_all, 0, 1}, [Registry, Exporter, MetricsExporter, LogExporter, SpanProcessor]} }.
+  FlightRecorder = child_spec(worker, flight_recorder, instrument_flight_recorder, permanent, []),
+  {ok, { {one_for_all, 0, 1}, [Registry, Exporter, MetricsExporter, LogExporter, SpanProcessor, FlightRecorder]} }.
 
 %%====================================================================
 %% Internal functions
