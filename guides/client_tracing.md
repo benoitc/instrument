@@ -605,6 +605,82 @@ instrument_config:disable_exporter(instrument_exporter_otlp).
 instrument_config:enable_exporter(instrument_exporter_otlp).
 ```
 
+## Custom Span Processors
+
+### Implementing a Custom Processor
+
+Custom span processors implement the `instrument_span_processor` behaviour:
+
+```erlang
+-module(my_processor).
+-behaviour(instrument_span_processor).
+
+-export([init/1, on_start/2, on_end/1, shutdown/0, shutdown/1, force_flush/0, force_flush/1]).
+
+init(Config) -> {ok, #{config => Config}}.
+
+on_start(Span, _ParentCtx) ->
+    %% Called when a span starts
+    %% Return the (possibly modified) span
+    Span.
+
+on_end(Span) ->
+    %% Called when a span ends
+    %% Perform export, logging, etc.
+    ok.
+
+shutdown() -> ok.
+shutdown(_State) -> ok.
+force_flush() -> ok.
+force_flush(_State) -> ok.
+```
+
+### Processor Callback Restrictions
+
+**WARNING: Processor callbacks must NOT call back into the span processor system.**
+
+The `on_start/2` and `on_end/1` callbacks execute within the span processor gen_server. Calling `instrument_span_processor` functions from within these callbacks will cause a deadlock:
+
+```erlang
+%% WRONG - Will deadlock!
+on_end(Span) ->
+    instrument_span_processor:force_flush(),  %% Deadlock!
+    ok.
+
+%% WRONG - Will deadlock!
+on_start(Span, _ParentCtx) ->
+    instrument_span_processor:list(),  %% Deadlock!
+    Span.
+```
+
+**Safe patterns:**
+
+```erlang
+%% OK - Async export in separate process
+on_end(Span) ->
+    spawn(fun() -> export_span(Span) end),
+    ok.
+
+%% OK - Direct API calls that don't use span processor
+on_start(Span, _ParentCtx) ->
+    instrument_tracer:trace_id(Span),  %% OK, doesn't use processor
+    Span.
+
+%% OK - Store in ETS for batch processing
+on_end(Span) ->
+    ets:insert(my_span_buffer, {make_ref(), Span}),
+    ok.
+```
+
+**What to avoid in processor callbacks:**
+
+- `instrument_span_processor:register/2`
+- `instrument_span_processor:unregister/1`
+- `instrument_span_processor:list/0`
+- `instrument_span_processor:shutdown/0`
+- `instrument_span_processor:force_flush/0`
+- Any synchronous call that might eventually call back into the span processor
+
 ## Production Recommendations
 
 ### Performance Overhead

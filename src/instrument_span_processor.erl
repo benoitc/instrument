@@ -23,6 +23,23 @@
 %% %% Unregister a processor
 %% instrument_span_processor:unregister(instrument_span_processor_batch).
 %% '''
+%%
+%% == Callback Restrictions ==
+%% WARNING: Processor callbacks (on_start/2, on_end/1) execute within the
+%% span processor gen_server. These callbacks must NOT call back into the
+%% span processor system, as this will cause a deadlock.
+%%
+%% Avoid calling these functions from processor callbacks:
+%% - `instrument_span_processor:register/2'
+%% - `instrument_span_processor:unregister/1'
+%% - `instrument_span_processor:list/0'
+%% - `instrument_span_processor:shutdown/0'
+%% - `instrument_span_processor:force_flush/0'
+%%
+%% Safe patterns for async work in callbacks:
+%% - Spawn a new process for external calls
+%% - Store in ETS for later batch processing
+%% - Use async message passing
 -module(instrument_span_processor).
 -author("benoitc").
 
@@ -55,6 +72,8 @@
 -define(SERVER, ?MODULE).
 
 %% Behavior callbacks
+%% WARNING: on_start and on_end execute in the span processor gen_server.
+%% Do NOT call instrument_span_processor functions from these callbacks.
 -callback on_start(Span :: #span{}, ParentCtx :: #span_ctx{} | undefined) -> #span{}.
 -callback on_end(Span :: #span{}) -> ok.
 -callback shutdown() -> ok.
