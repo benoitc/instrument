@@ -371,6 +371,8 @@ make_attributes(Labels, LabelVals) ->
     maps:put(to_binary(Label), to_binary(Val), Acc)
   end, #{}, lists:zip(Labels, LabelVals)).
 
+to_binary({otel, Name}) when is_binary(Name) -> Name;
+to_binary({otel_vec, Name}) when is_binary(Name) -> Name;
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_binary(V) when is_list(V) -> list_to_binary(V);

@@ -38,7 +38,8 @@
     metrics_gauge_assertion/1,
     metrics_histogram_assertion/1,
     metrics_clear/1,
-    metrics_collector_error_isolation/1
+    metrics_collector_error_isolation/1,
+    metrics_otel_tuple_name_matching/1
 ]).
 
 %% Log tests
@@ -76,6 +77,7 @@ all() ->
         metrics_histogram_assertion,
         metrics_clear,
         metrics_collector_error_isolation,
+        metrics_otel_tuple_name_matching,
         log_collection,
         log_assert_exists,
         log_assert_properties,
@@ -419,6 +421,42 @@ metrics_collector_error_isolation(_Config) ->
     instrument:unregister(good_counter),
     instrument:unregister(good_counter2),
     meck:unload(crashing_collector),
+    ok.
+
+%% Regression test: OTel tuple names {otel, Name} and {otel_vec, Name} must be
+%% matched correctly when looking up metrics by base name
+metrics_otel_tuple_name_matching(_Config) ->
+    %% Create OTel meter metrics (which use tuple names internally)
+    Meter = instrument_meter:get_meter(<<"test_matching">>),
+    Counter = instrument_meter:create_counter(Meter, <<"tuple_test_counter">>, #{
+        description => <<"Test counter">>
+    }),
+
+    %% Add values - without attributes uses {otel, Name}
+    ok = instrument_meter:add(Counter, 10),
+
+    %% Add values with attributes - creates {otel_vec, Name_label} metrics
+    ok = instrument_meter:add(Counter, 5, #{method => <<"GET">>}),
+    ok = instrument_meter:add(Counter, 3, #{method => <<"POST">>}),
+
+    %% Collect and verify metrics can be found
+    Metrics = instrument_test:collect_metrics(),
+
+    %% Should find metrics containing the base name
+    MatchingMetrics = [M || M <- Metrics,
+                           case maps:get(name, M, undefined) of
+                               N when is_binary(N) ->
+                                   binary:match(N, <<"tuple_test_counter">>) =/= nomatch;
+                               _ -> false
+                           end],
+
+    %% Should have found at least one metric
+    true = length(MatchingMetrics) >= 1,
+
+    %% Verify names are properly formatted (not malformed tuple strings)
+    lists:foreach(fun(#{name := Name}) ->
+        nomatch = binary:match(Name, <<"{otel">>)
+    end, MatchingMetrics),
     ok.
 
 %% ============================================================================

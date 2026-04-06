@@ -146,7 +146,9 @@ format_label_pair(Key, Value) ->
   ValBin = escape_label_value(Value),
   [KeyBin, <<"=\"">>, ValBin, <<"\"">>].
 
--spec format_name(atom() | list() | binary()) -> binary().
+-spec format_name(atom() | list() | binary() | tuple()) -> binary().
+format_name({otel, Name}) when is_binary(Name) -> Name;
+format_name({otel_vec, Name}) when is_binary(Name) -> Name;
 format_name(Name) when is_atom(Name) ->
   atom_to_binary(Name, utf8);
 format_name(Name) when is_list(Name) ->

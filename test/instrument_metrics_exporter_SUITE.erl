@@ -344,12 +344,14 @@ metric_name_otel_test(_Config) ->
   %% OTel metrics use tuple names internally, but should export as readable names
   %% The internal name is {otel, <<"otel_request_count">>}
   OtelMetrics = [M || #{name := N} = M <- Metrics,
-                      N =:= <<"{otel,<<\"otel_request_count\">>}">> orelse
-                      N =:= <<"otel_request_count">> orelse
                       binary:match(N, <<"otel_request_count">>) =/= nomatch],
 
   %% Should find the metric
   true = length(OtelMetrics) >= 1,
+
+  %% Verify the name is NOT the malformed tuple string format
+  [#{name := Name} | _] = OtelMetrics,
+  nomatch = binary:match(Name, <<"{otel">>),
   ok.
 
 %% Test that OTel meter metrics with attributes have correct names

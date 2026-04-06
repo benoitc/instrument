@@ -591,6 +591,12 @@ find_metric_by_names([Name | Rest], Type, Metrics) ->
 
 name_matches(Name, Name) -> true;
 name_matches({_, Name}, Name) -> true;
+name_matches({otel, Name}, SearchName) when is_binary(Name), is_binary(SearchName) ->
+  Name =:= SearchName;
+name_matches({otel_vec, Name}, SearchName) when is_binary(Name), is_binary(SearchName) ->
+  %% Vec metrics have label suffix - match if starts with search name + "_"
+  Prefix = <<SearchName/binary, "_">>,
+  binary:match(Name, Prefix) =:= {0, byte_size(Prefix)};
 name_matches(_, _) -> false.
 
 find_data_point(ExpectedAttrs, DataPoints) when map_size(ExpectedAttrs) =:= 0 ->

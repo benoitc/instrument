@@ -37,7 +37,8 @@
   prometheus_label_escaping/1,
   prometheus_meter_counter/1,
   prometheus_meter_gauge/1,
-  prometheus_meter_histogram/1
+  prometheus_meter_histogram/1,
+  format_name_tuple_test/1
 ]).
 
 all() ->
@@ -65,7 +66,8 @@ groups() ->
       prometheus_label_escaping,
       prometheus_meter_counter,
       prometheus_meter_gauge,
-      prometheus_meter_histogram
+      prometheus_meter_histogram,
+      format_name_tuple_test
     ]}
   ].
 
@@ -245,4 +247,31 @@ prometheus_meter_histogram(_Config) ->
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"meter_latency_bucket">>) =/= nomatch,
   true = binary:match(Output, <<"meter_latency_count">>) =/= nomatch,
+  ok.
+
+%% Regression test for tuple name handling in prometheus format
+%% OTel metrics use tuple names {otel, Name} and {otel_vec, Name} internally.
+%% This test verifies they are correctly formatted in prometheus output.
+format_name_tuple_test(_Config) ->
+  %% Create OTel meter metrics (which use tuple names internally)
+  Meter = instrument_meter:get_meter(<<"format_test">>),
+
+  %% Counter without attributes - uses {otel, Name}
+  Counter = instrument_meter:create_counter(Meter, <<"fmt_test_counter">>, #{
+    description => <<"Format test counter">>
+  }),
+  ok = instrument_meter:add(Counter, 10),
+
+  %% Counter with attributes - uses {otel_vec, Name_label}
+  ok = instrument_meter:add(Counter, 5, #{method => <<"GET">>}),
+
+  %% Get prometheus output
+  Output = instrument_prometheus:format(),
+
+  %% Should contain the metric name (not the malformed tuple string)
+  true = binary:match(Output, <<"fmt_test_counter">>) =/= nomatch,
+
+  %% Should NOT contain malformed tuple format
+  nomatch = binary:match(Output, <<"{otel">>),
+  nomatch = binary:match(Output, <<"otel_vec">>),
   ok.
