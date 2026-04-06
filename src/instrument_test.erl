@@ -583,13 +583,15 @@ find_metric_by_names([], _Type, _Metrics) ->
     {error, not_found};
 find_metric_by_names([Name | Rest], Type, Metrics) ->
     case [M || M <- Metrics,
-               maps:get(name, M) =:= Name orelse
-               (is_tuple(maps:get(name, M, undefined)) andalso
-                element(2, maps:get(name, M)) =:= Name),
+               name_matches(maps:get(name, M, undefined), Name),
                maps:get(type, M) =:= Type] of
         [Metric | _] -> {ok, Metric};
         [] -> find_metric_by_names(Rest, Type, Metrics)
     end.
+
+name_matches(Name, Name) -> true;
+name_matches({_, Name}, Name) -> true;
+name_matches(_, _) -> false.
 
 find_data_point(ExpectedAttrs, DataPoints) when map_size(ExpectedAttrs) =:= 0 ->
     case DataPoints of
