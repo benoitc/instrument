@@ -313,6 +313,7 @@ A step-by-step guide to instrumenting Erlang applications:
 ### Guides
 
 - [Getting Started Guide](guides/getting_started.md)
+- [Elixir Users Guide](guides/elixir_guide.md)
 - [Instrumentation Guide](guides/instrumentation_guide.md)
 - [Context Propagation Guide](guides/context_propagation.md)
 - [Sampling and Processing Guide](guides/sampling_and_processing.md)
