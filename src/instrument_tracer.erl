@@ -74,7 +74,6 @@
 
 -define(SPAN_KEY, '$instrument_span').
 -define(TRACER_KEY, '$instrument_tracer').
--define(EXPORTERS_KEY, '$instrument_span_exporters').
 
 -type span_opts() :: #{
   kind => client | server | producer | consumer | internal,
@@ -531,17 +530,17 @@ is_sampled() ->
 
 %% @doc Registers a span exporter.
 %% The exporter must be a function that takes a span record.
+%% Thread-safe: uses ETS for atomic operations.
 -spec register_exporter(fun((span()) -> ok)) -> ok.
 register_exporter(Exporter) when is_function(Exporter, 1) ->
-  Exporters = persistent_term:get(?EXPORTERS_KEY, []),
-  persistent_term:put(?EXPORTERS_KEY, [Exporter | Exporters]),
+  ets:insert(instrument_span_exporters, {exporter, Exporter}),
   ok.
 
 %% @doc Unregisters a span exporter.
+%% Thread-safe: uses ETS for atomic operations.
 -spec unregister_exporter(fun((span()) -> ok)) -> ok.
 unregister_exporter(Exporter) ->
-  Exporters = persistent_term:get(?EXPORTERS_KEY, []),
-  persistent_term:put(?EXPORTERS_KEY, lists:delete(Exporter, Exporters)),
+  ets:delete_object(instrument_span_exporters, {exporter, Exporter}),
   ok.
 
 %% ============================================================================
@@ -584,12 +583,21 @@ update_current_span(UpdateFun) ->
   end.
 
 export_span(Span) ->
-  Exporters = persistent_term:get(?EXPORTERS_KEY, []),
+  %% Get exporters from ETS (thread-safe read)
+  Exporters = try
+    [E || {exporter, E} <- ets:tab2list(instrument_span_exporters)]
+  catch
+    error:badarg -> []  %% Table doesn't exist yet
+  end,
   lists:foreach(fun(Exporter) ->
     try
       Exporter(Span)
     catch
-      _:_ -> ok
+      Class:Reason:Stacktrace ->
+        logger:warning("Span exporter failed: ~p:~p",
+                      [Class, Reason],
+                      #{error_logger => #{tag => warning_msg},
+                        stacktrace => Stacktrace})
     end
   end, Exporters).
 

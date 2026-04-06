@@ -29,7 +29,8 @@
   propagation_across_processes/1,
   spans_no_context_leak/1,
   tracing_disabled/1,
-  custom_span_id/1
+  custom_span_id/1,
+  concurrent_exporter_registration/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -50,7 +51,8 @@ all() ->
     propagation_across_processes,
     spans_no_context_leak,
     tracing_disabled,
-    custom_span_id
+    custom_span_id,
+    concurrent_exporter_registration
   ].
 
 init_per_suite(Config) ->
@@ -425,4 +427,54 @@ custom_span_id(_Config) ->
     true = SpanId =/= instrument_id:span_id_to_hex(CustomSpanId),
     true = SpanId =/= HexSpanId
   end),
+  ok.
+
+concurrent_exporter_registration(_Config) ->
+  %% Test concurrent registration and unregistration of exporters
+  Parent = self(),
+  NumProcesses = 50,
+
+  %% Create unique exporters for each process
+  Exporters = [fun(_Span) -> ok end || _ <- lists:seq(1, NumProcesses)],
+
+  %% Spawn processes that register exporters concurrently
+  Pids = [spawn_link(fun() ->
+    Exporter = lists:nth(N, Exporters),
+    ok = instrument_tracer:register_exporter(Exporter),
+    Parent ! {registered, self(), Exporter}
+  end) || N <- lists:seq(1, NumProcesses)],
+
+  %% Collect results
+  RegisteredExporters = [receive
+    {registered, Pid, Exporter} -> Exporter
+  after 5000 ->
+    ct:fail({timeout_waiting_for, Pid})
+  end || Pid <- Pids],
+
+  %% Verify all exporters were registered (no duplicates lost)
+  CurrentExporters = [E || {exporter, E} <- ets:tab2list(instrument_span_exporters)],
+  lists:foreach(fun(E) ->
+    true = lists:member(E, CurrentExporters)
+  end, RegisteredExporters),
+
+  %% Now test concurrent unregistration
+  UnregPids = [spawn_link(fun() ->
+    Exporter = lists:nth(N, Exporters),
+    ok = instrument_tracer:unregister_exporter(Exporter),
+    Parent ! {unregistered, self()}
+  end) || N <- lists:seq(1, NumProcesses)],
+
+  %% Wait for all unregistrations
+  lists:foreach(fun(Pid) ->
+    receive {unregistered, Pid} -> ok
+    after 5000 -> ct:fail({timeout_waiting_for, Pid})
+    end
+  end, UnregPids),
+
+  %% Verify all exporters were unregistered
+  FinalExporters = [E || {exporter, E} <- ets:tab2list(instrument_span_exporters)],
+  lists:foreach(fun(E) ->
+    false = lists:member(E, FinalExporters)
+  end, RegisteredExporters),
+
   ok.

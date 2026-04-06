@@ -16,6 +16,12 @@
 
 start(_StartType, _StartArgs) ->
     ok = instrument_config:init(),
+    %% Create ETS table for span exporters (atomic operations)
+    _ = ets:new(instrument_span_exporters, [
+        public, named_table, bag,
+        {read_concurrency, true},
+        {write_concurrency, true}
+    ]),
     instrument_sup:start_link().
 
 %%--------------------------------------------------------------------
