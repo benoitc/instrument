@@ -89,8 +89,10 @@ mk_histogram(Buckets) ->
     sum = Sum
   }.
 
-validate_buckets(Buckets) ->
-  [Start | Rest] = Buckets,
+validate_buckets([]) ->
+  error_logger:error_msg("histogram buckets must not be empty", []),
+  erlang:error(empty_buckets);
+validate_buckets([Start | Rest]) ->
   validate_buckets(Rest, Start).
 
 validate_buckets([Boundary | Rest], Prev) when Boundary > Prev ->

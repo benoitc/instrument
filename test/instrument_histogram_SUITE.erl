@@ -19,6 +19,7 @@
 -export([
   can_generate_buckets/1,
   validate_buckets/1,
+  validate_empty_buckets/1,
   concurrent_histogram/1,
   histogram_concurrent_observe/1,
   histogram_consistency/1
@@ -28,6 +29,7 @@ all() ->
   [
     can_generate_buckets,
     validate_buckets,
+    validate_empty_buckets,
     concurrent_histogram,
     histogram_concurrent_observe,
     histogram_consistency
@@ -61,6 +63,21 @@ validate_buckets(_Config) ->
     try instrument_histogram:validate_buckets([2, 1])
     catch
       error:Error -> Error
+    end,
+  ok.
+
+validate_empty_buckets(_Config) ->
+  %% Empty buckets should raise error:empty_buckets, not crash with badmatch
+  empty_buckets =
+    try instrument_histogram:validate_buckets([])
+    catch
+      error:Error -> Error
+    end,
+  %% Also test that new_histogram with empty buckets fails gracefully
+  empty_buckets =
+    try instrument_histogram:new_histogram(test_empty, "empty buckets", [])
+    catch
+      error:Error2 -> Error2
     end,
   ok.
 
