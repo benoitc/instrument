@@ -204,16 +204,39 @@ set_verbose_tracing(Enabled) when is_boolean(Enabled) ->
   persistent_term:put(?VERBOSE_TRACING_KEY, Enabled),
   ok.
 
-%% @doc Auto-registers exporters based on OTEL_EXPORTERS environment variable.
-%% Supported values: otlp, console (comma-separated).
-%% Example: OTEL_EXPORTERS=otlp,console
+%% @doc Auto-registers exporters based on environment variables.
+%% Supports standard OTel env vars (OTEL_TRACES_EXPORTER, OTEL_METRICS_EXPORTER,
+%% OTEL_LOGS_EXPORTER) and legacy OTEL_EXPORTERS.
+%% Supported values: otlp, console, none.
 -spec auto_register_exporters() -> ok.
 auto_register_exporters() ->
-  case os:getenv("OTEL_EXPORTERS") of
+  %% Register trace exporters (OTEL_TRACES_EXPORTER or OTEL_EXPORTERS)
+  TracesExporter = case os:getenv("OTEL_TRACES_EXPORTER") of
+    false -> os:getenv("OTEL_EXPORTERS");
+    V1 -> V1
+  end,
+  case TracesExporter of
     false -> ok;
-    Value ->
-      Names = string:tokens(Value, ","),
+    "none" -> ok;
+    TraceValue ->
+      Names = string:tokens(TraceValue, ","),
       lists:foreach(fun register_exporter_by_name/1, Names)
+  end,
+  %% Register metrics exporters (OTEL_METRICS_EXPORTER)
+  case os:getenv("OTEL_METRICS_EXPORTER") of
+    false -> ok;
+    "none" -> ok;
+    MetricsValue ->
+      MetricsNames = string:tokens(MetricsValue, ","),
+      lists:foreach(fun register_metrics_exporter_by_name/1, MetricsNames)
+  end,
+  %% Register log exporters (OTEL_LOGS_EXPORTER)
+  case os:getenv("OTEL_LOGS_EXPORTER") of
+    false -> ok;
+    "none" -> ok;
+    LogsValue ->
+      LogsNames = string:tokens(LogsValue, ","),
+      lists:foreach(fun register_log_exporter_by_name/1, LogsNames)
   end,
   ok.
 
@@ -445,14 +468,59 @@ parse_exporter_name("otlp") -> {true, instrument_exporter_otlp};
 parse_exporter_name("console") -> {true, instrument_exporter_console};
 parse_exporter_name(_) -> false.
 
+register_metrics_exporter_by_name(Name) ->
+  case parse_metrics_exporter_name(string:trim(Name)) of
+    {true, Module} ->
+      Config = case Module of
+        instrument_metrics_exporter_otlp ->
+          case get_otlp_endpoint(metrics) of
+            undefined -> #{};
+            Endpoint -> #{endpoint => Endpoint}
+          end;
+        _ -> #{}
+      end,
+      Exporter = Module:new(Config),
+      instrument_metrics_exporter:register(Exporter);
+    false -> ok
+  end.
+
+parse_metrics_exporter_name("otlp") -> {true, instrument_metrics_exporter_otlp};
+parse_metrics_exporter_name("console") -> {true, instrument_metrics_exporter_console};
+parse_metrics_exporter_name(_) -> false.
+
+register_log_exporter_by_name(Name) ->
+  case parse_log_exporter_name(string:trim(Name)) of
+    {true, Module} ->
+      Config = case Module of
+        instrument_log_exporter_otlp ->
+          case get_otlp_endpoint(logs) of
+            undefined -> #{};
+            Endpoint -> #{endpoint => Endpoint}
+          end;
+        _ -> #{}
+      end,
+      Exporter = Module:new(Config),
+      instrument_log_exporter:register(Exporter);
+    false -> ok
+  end.
+
+parse_log_exporter_name("otlp") -> {true, instrument_log_exporter_otlp};
+parse_log_exporter_name("console") -> {true, instrument_log_exporter_console};
+parse_log_exporter_name(_) -> false.
+
 get_default_exporter() ->
   %% First check application env
   case application:get_env(instrument, span_exporter) of
     {ok, {Module, Config}} -> {Module, Config};
     _ ->
-      %% Fall back to OTEL_EXPORTERS
-      case os:getenv("OTEL_EXPORTERS") of
+      %% Check OTEL_TRACES_EXPORTER first, then fall back to OTEL_EXPORTERS
+      ExporterEnv = case os:getenv("OTEL_TRACES_EXPORTER") of
+        false -> os:getenv("OTEL_EXPORTERS");
+        V -> V
+      end,
+      case ExporterEnv of
         false -> undefined;
+        "none" -> undefined;
         Value ->
           case string:tokens(Value, ",") of
             ["otlp" | _] ->

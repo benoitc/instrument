@@ -75,14 +75,18 @@ init(Config) ->
       {error, missing_endpoint};
     Endpoint ->
       EndpointBin = to_binary(Endpoint),
-      TracesPath = maps:get(traces_path, Config, ?DEFAULT_TRACES_PATH),
+      DefaultPath = ?DEFAULT_TRACES_PATH,
+      TracesPath = maps:get(traces_path, Config, DefaultPath),
+      %% Check if endpoint already contains the signal path (per-signal endpoint)
+      %% If so, don't append the path again (OTel spec compliance)
+      {NormalizedEndpoint, EffectivePath} = normalize_endpoint(EndpointBin, TracesPath),
       Headers = maps:to_list(maps:get(headers, Config, #{})),
       Compression = maps:get(compression, Config, none),
       Timeout = maps:get(timeout, Config, ?DEFAULT_TIMEOUT),
 
       {ok, #state{
-        endpoint = EndpointBin,
-        traces_path = TracesPath,
+        endpoint = NormalizedEndpoint,
+        traces_path = EffectivePath,
         headers = Headers,
         compression = Compression,
         timeout = Timeout
@@ -286,3 +290,31 @@ send_request(Payload, #state{
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_list(V) -> list_to_binary(V);
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8).
+
+%% @private
+%% Normalize endpoint URL and determine effective path.
+%% If the endpoint already contains the signal path, use empty path.
+%% This handles per-signal endpoints like OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+%% which may already include /v1/traces.
+normalize_endpoint(Endpoint, SignalPath) ->
+  %% Strip trailing slash from endpoint
+  StrippedEndpoint = case binary:last(Endpoint) of
+    $/ -> binary:part(Endpoint, 0, byte_size(Endpoint) - 1);
+    _ -> Endpoint
+  end,
+  %% Check if endpoint already ends with the signal path
+  PathLen = byte_size(SignalPath),
+  EndpointLen = byte_size(StrippedEndpoint),
+  case EndpointLen >= PathLen of
+    true ->
+      Suffix = binary:part(StrippedEndpoint, EndpointLen - PathLen, PathLen),
+      case Suffix of
+        SignalPath ->
+          %% Endpoint already contains the path, don't append
+          {StrippedEndpoint, <<>>};
+        _ ->
+          {StrippedEndpoint, SignalPath}
+      end;
+    false ->
+      {StrippedEndpoint, SignalPath}
+  end.

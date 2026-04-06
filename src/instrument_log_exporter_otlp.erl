@@ -79,14 +79,17 @@ exporter_init(Config) ->
       {error, missing_endpoint};
     Endpoint ->
       EndpointBin = to_binary(Endpoint),
-      LogsPath = maps:get(logs_path, Config, ?DEFAULT_LOGS_PATH),
+      DefaultPath = ?DEFAULT_LOGS_PATH,
+      LogsPath = maps:get(logs_path, Config, DefaultPath),
+      %% Check if endpoint already contains the signal path (per-signal endpoint)
+      {NormalizedEndpoint, EffectivePath} = normalize_endpoint(EndpointBin, LogsPath),
       Headers = maps:to_list(maps:get(headers, Config, #{})),
       Compression = maps:get(compression, Config, none),
       Timeout = maps:get(timeout, Config, ?DEFAULT_TIMEOUT),
 
       {ok, #state{
-        endpoint = EndpointBin,
-        logs_path = LogsPath,
+        endpoint = NormalizedEndpoint,
+        logs_path = EffectivePath,
         headers = Headers,
         compression = Compression,
         timeout = Timeout
@@ -212,13 +215,15 @@ add_trace_context(Map, TraceId, SpanId, TraceFlags) ->
   end.
 
 encode_trace_id(TraceId) when is_binary(TraceId), byte_size(TraceId) =:= 16 ->
-  base64:encode(TraceId);
+  %% Encode as lowercase hex per OTLP spec
+  binary:encode_hex(TraceId, lowercase);
 encode_trace_id(TraceId) when is_binary(TraceId) ->
   %% Already encoded (hex), return as-is
   TraceId.
 
 encode_span_id(SpanId) when is_binary(SpanId), byte_size(SpanId) =:= 8 ->
-  base64:encode(SpanId);
+  %% Encode as lowercase hex per OTLP spec
+  binary:encode_hex(SpanId, lowercase);
 encode_span_id(SpanId) when is_binary(SpanId) ->
   SpanId.
 
@@ -288,3 +293,23 @@ send_request(Payload, #state{
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_list(V) -> list_to_binary(V);
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8).
+
+%% @private
+%% Normalize endpoint URL and determine effective path.
+normalize_endpoint(Endpoint, SignalPath) ->
+  StrippedEndpoint = case binary:last(Endpoint) of
+    $/ -> binary:part(Endpoint, 0, byte_size(Endpoint) - 1);
+    _ -> Endpoint
+  end,
+  PathLen = byte_size(SignalPath),
+  EndpointLen = byte_size(StrippedEndpoint),
+  case EndpointLen >= PathLen of
+    true ->
+      Suffix = binary:part(StrippedEndpoint, EndpointLen - PathLen, PathLen),
+      case Suffix of
+        SignalPath -> {StrippedEndpoint, <<>>};
+        _ -> {StrippedEndpoint, SignalPath}
+      end;
+    false ->
+      {StrippedEndpoint, SignalPath}
+  end.

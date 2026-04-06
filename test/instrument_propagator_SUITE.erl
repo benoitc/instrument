@@ -272,8 +272,8 @@ custom_propagator_test(_Config) ->
 malformed_traceparent_test(_Config) ->
   %% Test handling of malformed traceparent headers
 
-  %% Invalid version
-  Carrier1 = #{<<"traceparent">> => <<"99-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01">>},
+  %% Invalid version ff (only ff is invalid per W3C spec)
+  Carrier1 = #{<<"traceparent">> => <<"ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01">>},
   Ctx1 = instrument_propagator_tracecontext:extract(Carrier1, instrument_context:new()),
   SpanCtx1 = instrument_context:get_value(Ctx1, span_ctx),
   ?assertEqual(undefined, SpanCtx1),
@@ -295,6 +295,13 @@ malformed_traceparent_test(_Config) ->
   Ctx4 = instrument_propagator_tracecontext:extract(Carrier4, instrument_context:new()),
   SpanCtx4 = instrument_context:get_value(Ctx4, span_ctx),
   ?assertEqual(undefined, SpanCtx4),
+
+  %% Version > 00 should be accepted per W3C spec (forward compatibility)
+  Carrier5 = #{<<"traceparent">> => <<"01-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01">>},
+  Ctx5 = instrument_propagator_tracecontext:extract(Carrier5, instrument_context:new()),
+  SpanCtx5 = instrument_context:get_value(Ctx5, span_ctx),
+  ?assertNotEqual(undefined, SpanCtx5),
+  ?assertEqual(1, SpanCtx5#span_ctx.trace_flags),
   ok.
 
 missing_headers_test(_Config) ->

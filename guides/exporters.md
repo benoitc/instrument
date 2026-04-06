@@ -63,7 +63,7 @@ instrument_tracer:with_span(<<"my_operation">>, fun() ->
 end).
 
 %% Metrics are collected and exported periodically (default: 60s)
-instrument:increment_counter(my_counter).
+instrument:inc_counter(my_counter).
 
 %% Logs are exported when using logger
 logger:info("This will be exported with trace context").

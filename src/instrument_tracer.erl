@@ -73,6 +73,7 @@
 -include("instrument_otel.hrl").
 
 -define(SPAN_KEY, '$instrument_span').
+-define(SPAN_STACK_KEY, '$instrument_span_stack').
 -define(TRACER_KEY, '$instrument_tracer').
 
 -type span_opts() :: #{
@@ -553,22 +554,45 @@ current_span_ctx() ->
 
 attach_span(Span) ->
   Ctx = instrument_context:current(),
+  %% Push current span onto stack before attaching the new one
+  CurrentSpan = instrument_context:get_value(Ctx, ?SPAN_KEY),
+  Stack = instrument_context:get_value(Ctx, ?SPAN_STACK_KEY, []),
+  NewStack = case CurrentSpan of
+    undefined -> Stack;
+    _ -> [CurrentSpan | Stack]
+  end,
   NewCtx = instrument_context:set_value(Ctx, ?SPAN_KEY, Span),
   NewCtx2 = instrument_context:set_value(NewCtx, span_ctx, Span#span.ctx),
+  NewCtx3 = instrument_context:set_value(NewCtx2, ?SPAN_STACK_KEY, NewStack),
   %% Use set_current to avoid leaking process dictionary entries.
-  %% The tracer manages its own span stack via parent_ctx field.
-  instrument_context:set_current(NewCtx2).
+  instrument_context:set_current(NewCtx3).
 
 detach_span(#span{parent_ctx = undefined}) ->
   Ctx = instrument_context:current(),
   NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
   NewCtx2 = instrument_context:remove_value(NewCtx, span_ctx),
-  instrument_context:set_current(NewCtx2);
+  NewCtx3 = instrument_context:remove_value(NewCtx2, ?SPAN_STACK_KEY),
+  instrument_context:set_current(NewCtx3);
 detach_span(#span{parent_ctx = ParentCtx}) ->
   Ctx = instrument_context:current(),
-  NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),
+  %% Pop the parent span from stack and restore it
+  Stack = instrument_context:get_value(Ctx, ?SPAN_STACK_KEY, []),
+  {NewCtx, NewStack} = case Stack of
+    [] ->
+      %% No parent span on stack, just remove current
+      Ctx1 = instrument_context:remove_value(Ctx, ?SPAN_KEY),
+      {Ctx1, []};
+    [ParentSpan | Rest] ->
+      %% Restore parent span
+      Ctx1 = instrument_context:set_value(Ctx, ?SPAN_KEY, ParentSpan),
+      {Ctx1, Rest}
+  end,
   NewCtx2 = instrument_context:set_value(NewCtx, span_ctx, ParentCtx),
-  instrument_context:set_current(NewCtx2).
+  NewCtx3 = case NewStack of
+    [] -> instrument_context:remove_value(NewCtx2, ?SPAN_STACK_KEY);
+    _ -> instrument_context:set_value(NewCtx2, ?SPAN_STACK_KEY, NewStack)
+  end,
+  instrument_context:set_current(NewCtx3).
 
 update_current_span(UpdateFun) ->
   case current_span() of

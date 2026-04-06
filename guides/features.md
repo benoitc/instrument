@@ -118,10 +118,17 @@ instrument_meter:add(Counter, 1, #{method => <<"GET">>}).
 ### Tracing API
 
 ```erlang
-%% Create spans
-Span = instrument_tracer:start_span(<<"operation_name">>).
-instrument_tracer:set_attributes(Span, #{key => value}).
-instrument_tracer:add_event(Span, <<"event_name">>, #{}).
+%% Create spans (with_span is preferred)
+instrument_tracer:with_span(<<"operation_name">>, fun() ->
+    instrument_tracer:set_attributes(#{key => value}),
+    instrument_tracer:add_event(<<"event_name">>, #{}),
+    do_work()
+end).
+
+%% Or manual span management
+Span = instrument_tracer:start_span(<<"operation_name">>),
+instrument_tracer:set_attributes(#{key => value}),
+instrument_tracer:add_event(<<"event_name">>, #{}),
 instrument_tracer:end_span(Span).
 ```
 

@@ -478,31 +478,50 @@ to_label_value(V) when is_float(V) -> float_to_binary(V, [{decimals, 6}, compact
 %% @doc Lazily create a vec metric if not exists.
 %% The vec name includes the label names to support different attribute schemas.
 %% This function is concurrency-safe - handles race conditions gracefully.
+%% Histogram needs special handling to preserve custom bucket boundaries.
+ensure_vec_metric(BaseName, histogram, LabelNames, BaseMetric) ->
+  VecName = make_vec_name(BaseName, LabelNames),
+  case instrument_registry:lookup(VecName) of
+    undefined ->
+      try
+        Boundaries = instrument_histogram:get_bucket_boundaries(BaseMetric),
+        instrument:new_histogram_vec(VecName, <<>>, LabelNames, Boundaries),
+        track_vec_metric(BaseName, VecName),
+        VecName
+      catch
+        error:{badmatch, {error, already_exists}} ->
+          track_vec_metric(BaseName, VecName),
+          VecName;
+        _:_ ->
+          case instrument_registry:lookup(VecName) of
+            undefined -> error({failed_to_create_vec_metric, VecName});
+            _ ->
+              track_vec_metric(BaseName, VecName),
+              VecName
+          end
+      end;
+    _ ->
+      VecName
+  end;
+%% Counter and gauge don't need special handling
 ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
   VecName = make_vec_name(BaseName, LabelNames),
   case instrument_registry:lookup(VecName) of
     undefined ->
-      %% Try to create vec metric - handle race condition where another process
-      %% may create it first
       try
         case Type of
           counter ->
             instrument:new_counter_vec(VecName, <<>>, LabelNames);
           gauge ->
-            instrument:new_gauge_vec(VecName, <<>>, LabelNames);
-          histogram ->
-            instrument:new_histogram_vec(VecName, <<>>, LabelNames)
+            instrument:new_gauge_vec(VecName, <<>>, LabelNames)
         end,
-        %% Track this vec metric for cleanup on unregister
         track_vec_metric(BaseName, VecName),
         VecName
       catch
         error:{badmatch, {error, already_exists}} ->
-          %% Another process created it first - that's fine
           track_vec_metric(BaseName, VecName),
           VecName;
         _:_ ->
-          %% Re-check if it exists now (may have been created by another process)
           case instrument_registry:lookup(VecName) of
             undefined -> error({failed_to_create_vec_metric, VecName});
             _ ->

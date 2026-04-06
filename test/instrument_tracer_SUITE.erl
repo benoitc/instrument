@@ -34,6 +34,7 @@
 ]).
 
 -include("instrument_otel.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 all() ->
   [
@@ -140,6 +141,7 @@ with_span_exception(_Config) ->
 nested_spans(_Config) ->
   instrument_tracer:with_span(<<"parent">>, fun() ->
     ParentCtx = instrument_tracer:span_ctx(),
+    ParentSpan = instrument_tracer:current_span(),
 
     instrument_tracer:with_span(<<"child">>, fun() ->
       ChildSpan = instrument_tracer:current_span(),
@@ -153,7 +155,30 @@ nested_spans(_Config) ->
       #span_ctx{span_id = ParentSpanId} = ParentCtx,
       #span_ctx{span_id = ChildSpanId} = ChildSpan#span.ctx,
       true = ParentSpanId =/= ChildSpanId
-    end)
+    end),
+
+    %% After child ends, parent span should be restored (not undefined)
+    RestoredSpan = instrument_tracer:current_span(),
+    ?assertNotEqual(undefined, RestoredSpan),
+    ?assertEqual(<<"parent">>, RestoredSpan#span.name),
+    ?assertEqual(ParentSpan#span.ctx, RestoredSpan#span.ctx),
+
+    %% Test deeply nested spans
+    instrument_tracer:with_span(<<"child2">>, fun() ->
+      instrument_tracer:with_span(<<"grandchild">>, fun() ->
+        GrandchildSpan = instrument_tracer:current_span(),
+        ?assertEqual(<<"grandchild">>, GrandchildSpan#span.name)
+      end),
+      %% After grandchild ends, child2 should be current
+      AfterGrandchild = instrument_tracer:current_span(),
+      ?assertNotEqual(undefined, AfterGrandchild),
+      ?assertEqual(<<"child2">>, AfterGrandchild#span.name)
+    end),
+
+    %% After child2 ends, parent should be current again
+    AfterChild2 = instrument_tracer:current_span(),
+    ?assertNotEqual(undefined, AfterChild2),
+    ?assertEqual(<<"parent">>, AfterChild2#span.name)
   end),
   ok.
 

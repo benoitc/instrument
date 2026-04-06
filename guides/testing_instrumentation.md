@@ -301,7 +301,7 @@ test_log_with_trace_context(_Config) ->
     %% Create log within a span
     instrument_tracer:with_span(<<"operation">>, fun() ->
         %% Your logging code that uses instrument_logger
-        instrument_logger:info("Processing item", #{item_id => 123})
+        logger:info("Processing item", #{item_id => 123})
     end),
 
     %% Flush logs

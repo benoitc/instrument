@@ -43,6 +43,7 @@
   new_histogram/2, new_histogram/3,
   observe_histogram/2,
   get_histogram/1,
+  get_bucket_boundaries/1,
   collect/2,
   default_buckets/0,
   linear_buckets/3,
@@ -137,6 +138,10 @@ get_histogram(#metric{handle=Hist}) ->
     sum => SumValue,
     buckets => Buckets }.
 
+%% @doc Get the bucket boundaries configured for this histogram.
+-spec get_bucket_boundaries(#metric{}) -> [number()].
+get_bucket_boundaries(#metric{handle = Hist}) ->
+  Hist#histogram.bucket_boundaries.
 
 cumulative_count([Count | RestCounts], [Boundary | RestBoundaries], Acc, Buckets) ->
   Acc2 = Acc + Count,

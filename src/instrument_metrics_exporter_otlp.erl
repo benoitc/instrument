@@ -73,14 +73,17 @@ exporter_init(Config) ->
       {error, missing_endpoint};
     Endpoint ->
       EndpointBin = to_binary(Endpoint),
-      MetricsPath = maps:get(metrics_path, Config, ?DEFAULT_METRICS_PATH),
+      DefaultPath = ?DEFAULT_METRICS_PATH,
+      MetricsPath = maps:get(metrics_path, Config, DefaultPath),
+      %% Check if endpoint already contains the signal path (per-signal endpoint)
+      {NormalizedEndpoint, EffectivePath} = normalize_endpoint(EndpointBin, MetricsPath),
       Headers = maps:to_list(maps:get(headers, Config, #{})),
       Compression = maps:get(compression, Config, none),
       Timeout = maps:get(timeout, Config, ?DEFAULT_TIMEOUT),
 
       {ok, #state{
-        endpoint = EndpointBin,
-        metrics_path = MetricsPath,
+        endpoint = NormalizedEndpoint,
+        metrics_path = EffectivePath,
         headers = Headers,
         compression = Compression,
         timeout = Timeout
@@ -262,3 +265,23 @@ send_request(Payload, #state{
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_list(V) -> list_to_binary(V);
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8).
+
+%% @private
+%% Normalize endpoint URL and determine effective path.
+normalize_endpoint(Endpoint, SignalPath) ->
+  StrippedEndpoint = case binary:last(Endpoint) of
+    $/ -> binary:part(Endpoint, 0, byte_size(Endpoint) - 1);
+    _ -> Endpoint
+  end,
+  PathLen = byte_size(SignalPath),
+  EndpointLen = byte_size(StrippedEndpoint),
+  case EndpointLen >= PathLen of
+    true ->
+      Suffix = binary:part(StrippedEndpoint, EndpointLen - PathLen, PathLen),
+      case Suffix of
+        SignalPath -> {StrippedEndpoint, <<>>};
+        _ -> {StrippedEndpoint, SignalPath}
+      end;
+    false ->
+      {StrippedEndpoint, SignalPath}
+  end.

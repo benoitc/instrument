@@ -94,28 +94,38 @@ parse_traceparent(Value, Ctx) ->
   try
     %% Format: VERSION-TRACEID-SPANID-FLAGS
     %% Example: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+    %% Per W3C spec: accept versions > 00 and try to parse known fields
     case binary:split(Value, <<"-">>, [global]) of
-      [<<"00">>, TraceIdHex, SpanIdHex, FlagsHex] when
+      [Version, TraceIdHex, SpanIdHex, FlagsHex | _Rest] when
+          byte_size(Version) =:= 2,
           byte_size(TraceIdHex) =:= 32,
           byte_size(SpanIdHex) =:= 16,
-          byte_size(FlagsHex) =:= 2 ->
-        TraceId = instrument_id:hex_to_trace_id(TraceIdHex),
-        SpanId = instrument_id:hex_to_span_id(SpanIdHex),
-        %% Validate trace and span IDs (reject all-zero values per W3C spec)
-        case instrument_id:is_valid_trace_id(TraceId) andalso
-             instrument_id:is_valid_span_id(SpanId) of
-          true ->
-            Flags = parse_trace_flags(FlagsHex),
-            SpanCtx = #span_ctx{
-              trace_id = TraceId,
-              span_id = SpanId,
-              trace_flags = Flags,
-              is_remote = true
-            },
-            instrument_context:set_value(Ctx, span_ctx, SpanCtx);
-          false ->
-            %% Invalid IDs, reject and return unchanged context
-            Ctx
+          byte_size(FlagsHex) >= 2 ->
+        %% Reject invalid version ff per W3C spec
+        case Version of
+          <<"ff">> -> Ctx;
+          <<"FF">> -> Ctx;
+          _ ->
+            TraceId = instrument_id:hex_to_trace_id(TraceIdHex),
+            SpanId = instrument_id:hex_to_span_id(SpanIdHex),
+            %% Validate trace and span IDs (reject all-zero values per W3C spec)
+            case instrument_id:is_valid_trace_id(TraceId) andalso
+                 instrument_id:is_valid_span_id(SpanId) of
+              true ->
+                %% Only parse first 2 chars of flags for forward compat
+                FlagsPart = binary:part(FlagsHex, 0, 2),
+                Flags = parse_trace_flags(FlagsPart),
+                SpanCtx = #span_ctx{
+                  trace_id = TraceId,
+                  span_id = SpanId,
+                  trace_flags = Flags,
+                  is_remote = true
+                },
+                instrument_context:set_value(Ctx, span_ctx, SpanCtx);
+              false ->
+                %% Invalid IDs, reject and return unchanged context
+                Ctx
+            end
         end;
       _ ->
         Ctx
