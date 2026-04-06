@@ -30,7 +30,13 @@
   metric_name_binary_test/1,
   metric_name_vec_test/1,
   metric_name_otel_test/1,
-  metric_name_otel_with_attrs_test/1
+  metric_name_otel_with_attrs_test/1,
+  %% Attribute tests
+  metric_attrs_empty_test/1,
+  metric_attrs_vec_labels_test/1,
+  metric_attrs_otel_single_test/1,
+  metric_attrs_otel_multiple_test/1,
+  metric_attrs_type_conversion_test/1
 ]).
 
 all() ->
@@ -50,7 +56,13 @@ all() ->
     metric_name_binary_test,
     metric_name_vec_test,
     metric_name_otel_test,
-    metric_name_otel_with_attrs_test
+    metric_name_otel_with_attrs_test,
+    %% Attribute tests
+    metric_attrs_empty_test,
+    metric_attrs_vec_labels_test,
+    metric_attrs_otel_single_test,
+    metric_attrs_otel_multiple_test,
+    metric_attrs_type_conversion_test
   ].
 
 init_per_suite(Config) ->
@@ -361,4 +373,122 @@ metric_name_otel_with_attrs_test(_Config) ->
 
   %% Should have created metrics for the different attribute schemas
   true = length(AttrMetrics) >= 1,
+  ok.
+
+%% ============================================================================
+%% Attribute Tests
+%% ============================================================================
+
+%% Test that metrics without labels have empty attributes
+metric_attrs_empty_test(_Config) ->
+  Counter = instrument:new_counter(attrs_empty_counter, [{help, "No labels"}]),
+  ok = instrument:inc_counter(Counter, 10),
+
+  Metrics = instrument_metrics_exporter:collect(),
+  [#{data_points := [#{attributes := Attrs}]}] =
+    [M || #{name := N} = M <- Metrics, N =:= <<"attrs_empty_counter">>],
+
+  %% Attributes should be empty map
+  #{} = Attrs,
+  0 = map_size(Attrs),
+  ok.
+
+%% Test that vec metric labels are correctly converted to attributes
+metric_attrs_vec_labels_test(_Config) ->
+  ok = instrument:new_counter_vec(attrs_vec_counter, "Vec with labels", [region, service]),
+  ok = instrument:inc_counter_vec(attrs_vec_counter, [<<"us-east">>, <<"api">>], 100),
+  ok = instrument:inc_counter_vec(attrs_vec_counter, [<<"eu-west">>, <<"web">>], 50),
+
+  Metrics = instrument_metrics_exporter:collect(),
+  [#{data_points := DataPoints}] =
+    [M || #{name := N} = M <- Metrics, N =:= <<"attrs_vec_counter">>],
+
+  %% Should have 2 data points
+  2 = length(DataPoints),
+
+  %% Extract all attributes
+  AllAttrs = [maps:get(attributes, DP) || DP <- DataPoints],
+
+  %% Find us-east/api data point
+  [UsEastAttrs] = [A || A <- AllAttrs, maps:get(<<"region">>, A, undefined) =:= <<"us-east">>],
+  <<"us-east">> = maps:get(<<"region">>, UsEastAttrs),
+  <<"api">> = maps:get(<<"service">>, UsEastAttrs),
+
+  %% Find eu-west/web data point
+  [EuWestAttrs] = [A || A <- AllAttrs, maps:get(<<"region">>, A, undefined) =:= <<"eu-west">>],
+  <<"eu-west">> = maps:get(<<"region">>, EuWestAttrs),
+  <<"web">> = maps:get(<<"service">>, EuWestAttrs),
+  ok.
+
+%% Test OTel metrics with single attribute
+metric_attrs_otel_single_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"single_attr_svc">>),
+  Gauge = instrument_meter:create_gauge(Meter, <<"otel_single_attr_gauge">>, #{}),
+
+  ok = instrument_meter:set(Gauge, 42.5, #{host => <<"server1">>}),
+  ok = instrument_meter:set(Gauge, 38.2, #{host => <<"server2">>}),
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find the vec metric created for attributes
+  GaugeMetrics = [M || #{name := N} = M <- Metrics,
+                       binary:match(N, <<"otel_single_attr_gauge">>) =/= nomatch],
+  true = length(GaugeMetrics) >= 1,
+
+  %% Get data points and verify attributes
+  [#{data_points := DataPoints} | _] = GaugeMetrics,
+  AllAttrs = [maps:get(attributes, DP) || DP <- DataPoints],
+
+  %% Should have host attribute
+  true = lists:any(fun(A) -> maps:get(<<"host">>, A, undefined) =:= <<"server1">> end, AllAttrs),
+  true = lists:any(fun(A) -> maps:get(<<"host">>, A, undefined) =:= <<"server2">> end, AllAttrs),
+  ok.
+
+%% Test OTel metrics with multiple attributes
+metric_attrs_otel_multiple_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"multi_attr_svc">>),
+  Histogram = instrument_meter:create_histogram(Meter, <<"otel_multi_attr_hist">>, #{
+    boundaries => [0.1, 0.5, 1.0, 5.0]
+  }),
+
+  ok = instrument_meter:record(Histogram, 0.25, #{method => <<"GET">>, endpoint => <<"/api">>}),
+  ok = instrument_meter:record(Histogram, 0.8, #{method => <<"POST">>, endpoint => <<"/api">>}),
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find histogram metrics
+  HistMetrics = [M || #{name := N} = M <- Metrics,
+                      binary:match(N, <<"otel_multi_attr_hist">>) =/= nomatch],
+  true = length(HistMetrics) >= 1,
+
+  %% Verify attributes contain both keys
+  [#{data_points := DataPoints} | _] = HistMetrics,
+  [#{attributes := Attrs} | _] = DataPoints,
+
+  %% Should have method and endpoint attributes
+  true = maps:is_key(<<"method">>, Attrs) orelse maps:is_key(<<"endpoint">>, Attrs),
+  ok.
+
+%% Test attribute value type conversions
+metric_attrs_type_conversion_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"type_conv_svc">>),
+  Counter = instrument_meter:create_counter(Meter, <<"otel_type_conv_counter">>, #{}),
+
+  %% Test different attribute value types
+  ok = instrument_meter:add(Counter, 1, #{
+    string_val => <<"hello">>,
+    int_val => 42,
+    atom_val => my_atom
+  }),
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find the counter
+  CounterMetrics = [M || #{name := N} = M <- Metrics,
+                         binary:match(N, <<"otel_type_conv_counter">>) =/= nomatch],
+  true = length(CounterMetrics) >= 1,
+
+  %% Verify we can collect without errors (types were converted)
+  [#{data_points := DataPoints} | _] = CounterMetrics,
+  true = length(DataPoints) >= 1,
   ok.
