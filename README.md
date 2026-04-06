@@ -319,6 +319,7 @@ A step-by-step guide to instrumenting Erlang applications:
 - [Sampling and Processing Guide](guides/sampling_and_processing.md)
 - [Exporters Guide](guides/exporters.md)
 - [Features Reference](guides/features.md)
+- [Benchmarks](guides/benchmarks.md)
 
 ### Reference
 
