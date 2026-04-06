@@ -28,7 +28,8 @@
   %% New tests for edge cases
   enable_idempotent/1,
   trace_flags_cleared_after_span/1,
-  async_parent_span_traced/1
+  async_parent_span_traced/1,
+  marker_in_spawned_child/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -48,7 +49,8 @@ all() ->
     %% Edge case tests
     enable_idempotent,
     trace_flags_cleared_after_span,
-    async_parent_span_traced
+    async_parent_span_traced,
+    marker_in_spawned_child
   ].
 
 init_per_suite(Config) ->
@@ -463,3 +465,44 @@ worker_loop(Parent) ->
     stop ->
       ok
   end.
+
+marker_in_spawned_child(_Config) ->
+  %% Test that mark/1,2 works in spawned children that inherit tracing
+  %% via set_on_spawn (they don't have label in process dict, but can
+  %% extract it from tracer state)
+  ok = instrument_flight_recorder:enable(),
+  Parent = self(),
+
+  instrument_tracer:with_span(<<"parent_span">>, fun() ->
+    TraceIdHex = instrument_tracer:trace_id(),
+    TraceIdBin = instrument_id:hex_to_trace_id(TraceIdHex),
+
+    %% Spawn a child process (inherits tracing via set_on_spawn)
+    spawn(fun() ->
+      %% Add a marker in the child process
+      ok = instrument_flight_recorder:mark(<<"child_marker">>, #{from => child}),
+      Parent ! child_done
+    end),
+
+    receive child_done -> ok after 1000 -> ct:fail(timeout) end,
+
+    %% Wait for events to flush
+    timer:sleep(100),
+
+    %% Get events for this trace
+    Events = instrument_flight_recorder:get_trace(TraceIdBin),
+    ct:pal("Events with child marker: ~p", [Events]),
+
+    %% Find the child marker
+    Markers = [E || {_, E} <- Events, element(1, E) =:= marker],
+    ct:pal("Markers found: ~p", [Markers]),
+
+    %% Should have at least one marker from the child
+    true = length(Markers) >= 1,
+
+    %% Verify it's the child marker
+    true = lists:any(fun({marker, <<"child_marker">>, #{from := child}}) -> true;
+                        (_) -> false
+                     end, Markers)
+  end),
+  ok.

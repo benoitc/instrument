@@ -165,8 +165,9 @@ mark(Name, Meta) when is_binary(Name), is_map(Meta) ->
   case is_enabled() of
     false -> ok;
     true ->
-      %% Get current trace label from process dictionary
-      Label = get(?LABEL_KEY),
+      %% Get current trace label - check process dict first, then tracer state
+      %% (for spawned children that inherit tracing via set_on_spawn)
+      Label = get_current_label(),
       case Label of
         undefined -> ok;
         _ ->
@@ -288,6 +289,34 @@ code_change(_OldVsn, State, _Extra) ->
 %% ============================================================================
 %% Internal Functions
 %% ============================================================================
+
+%% @private Get current trace label from process dict or tracer state.
+%% For spawned children that inherit tracing via set_on_spawn, the label
+%% is not in process dict but can be extracted from the tracer state.
+get_current_label() ->
+  case get(?LABEL_KEY) of
+    undefined ->
+      %% Try to get label from tracer state (for spawned children)
+      extract_label_from_tracer();
+    Label ->
+      Label
+  end.
+
+%% @private Extract label from tracer state if available.
+%% Note: dialyzer's type spec for trace_info is incomplete, so we use
+%% try/catch to safely extract the label from the tracer state tuple.
+-dialyzer({nowarn_function, extract_label_from_tracer/0}).
+extract_label_from_tracer() ->
+  try
+    case erlang:trace_info(self(), tracer) of
+      {tracer, {instrument_tracer_nif, TracerState}} when is_map(TracerState) ->
+        maps:get(label, TracerState, undefined);
+      _ ->
+        undefined
+    end
+  catch
+    _:_ -> undefined
+  end.
 
 %% @private Evicts N oldest entries from the buffer.
 evict_oldest(0) ->
