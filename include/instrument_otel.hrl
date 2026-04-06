@@ -21,7 +21,7 @@
 %% Must be defined before span record
 -record(span_event, {
   name :: binary(),
-  timestamp :: integer(),                      % monotonic time in nanoseconds
+  timestamp :: integer(),                      % wall clock time in nanoseconds (Unix epoch)
   attributes = #{} :: map()
 }).
 
@@ -38,7 +38,7 @@
   ctx :: #span_ctx{},
   parent_ctx :: #span_ctx{} | undefined,
   kind = internal :: client | server | producer | consumer | internal,
-  start_time :: integer(),                     % monotonic time in nanoseconds
+  start_time :: integer(),                     % wall clock time in nanoseconds (Unix epoch)
   end_time :: integer() | undefined,
   attributes = #{} :: map(),
   events = [] :: [#span_event{}],
