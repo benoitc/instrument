@@ -241,10 +241,36 @@ trace_send(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
  * trace_receive/5 - Handle receive trace event.
  * TraceTerm: the message being received
  * Opts: #{}
+ *
+ * Filters internal tracer bootstrap messages that pollute trace output
+ * when set_on_spawn propagates tracing to child processes.
+ * Pattern: {Ref, {tracer, {instrument_tracer_nif, _}}}
  */
 static ERL_NIF_TERM
 trace_receive(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
+    ERL_NIF_TERM trace_term = argv[3];  /* The received message */
+
+    /* Check if this is an internal tracer bootstrap message */
+    /* Pattern: {Ref, {tracer, {instrument_tracer_nif, _}}} */
+    int arity;
+    const ERL_NIF_TERM* tuple;
+    if (enif_get_tuple(env, trace_term, &arity, &tuple) && arity == 2) {
+        /* Check second element is {tracer, ...} */
+        const ERL_NIF_TERM* inner_tuple;
+        int inner_arity;
+        if (enif_get_tuple(env, tuple[1], &inner_arity, &inner_tuple) && inner_arity == 2) {
+            char atom_str[32];
+            if (enif_get_atom(env, inner_tuple[0], atom_str, sizeof(atom_str), ERL_NIF_LATIN1)) {
+                if (strcmp(atom_str, "tracer") == 0) {
+                    /* This is a tracer control message, discard it */
+                    return enif_make_atom(env, "ok");
+                }
+            }
+        }
+    }
+
+    /* Normal message, forward to worker */
     return trace(env, argc, argv);
 }
 

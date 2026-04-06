@@ -29,7 +29,8 @@
   enable_idempotent/1,
   trace_flags_cleared_after_span/1,
   async_parent_span_traced/1,
-  marker_in_spawned_child/1
+  marker_in_spawned_child/1,
+  tracer_bootstrap_filtered/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -50,7 +51,8 @@ all() ->
     enable_idempotent,
     trace_flags_cleared_after_span,
     async_parent_span_traced,
-    marker_in_spawned_child
+    marker_in_spawned_child,
+    tracer_bootstrap_filtered
   ].
 
 init_per_suite(Config) ->
@@ -505,4 +507,46 @@ marker_in_spawned_child(_Config) ->
                         (_) -> false
                      end, Markers)
   end),
+  ok.
+
+tracer_bootstrap_filtered(_Config) ->
+  %% Test that internal tracer bootstrap messages are filtered out
+  %% When set_on_spawn propagates tracing, spawned children receive
+  %% internal messages like {Ref, {tracer, {instrument_tracer_nif, _}}}
+  %% which should not appear in trace output
+  ok = instrument_flight_recorder:enable(),
+  instrument_flight_recorder:clear(),
+
+  TraceId = crypto:strong_rand_bytes(16),
+
+  %% Start span and spawn child
+  instrument_tracer:with_span(<<"parent">>, #{trace_id => TraceId}, fun() ->
+    %% Spawn child - this triggers tracer bootstrap message
+    Child = spawn(fun() ->
+      %% Child sends a normal message to itself
+      self() ! <<"normal_msg">>,
+      receive <<"normal_msg">> -> ok end,
+      timer:sleep(10)
+    end),
+    timer:sleep(100),
+    exit(Child, kill)
+  end),
+
+  timer:sleep(100),
+  Events = instrument_flight_recorder:get_trace(TraceId),
+  ct:pal("Events (should not contain tracer bootstrap): ~p", [Events]),
+
+  %% Verify no tracer bootstrap messages in trace
+  %% Pattern: {'receive', Pid, {Ref, {tracer, ...}}}
+  TracerMsgs = [E || {_, E} <- Events,
+                     is_tuple(E),
+                     tuple_size(E) >= 3,
+                     element(1, E) =:= 'receive',
+                     is_tuple(element(3, E)),
+                     tuple_size(element(3, E)) =:= 2,
+                     is_tuple(element(2, element(3, E))),
+                     tuple_size(element(2, element(3, E))) >= 1,
+                     element(1, element(2, element(3, E))) =:= tracer],
+  ct:pal("Tracer bootstrap messages found (should be empty): ~p", [TracerMsgs]),
+  [] = TracerMsgs,
   ok.
