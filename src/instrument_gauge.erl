@@ -21,7 +21,7 @@
 %% Value = instrument_gauge:get_gauge(Gauge).
 %% '''
 %%
-%% @see instrument for the main API facade
+%% @see instrument
 -module(instrument_gauge).
 
 %% public api

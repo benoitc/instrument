@@ -2,21 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.1] - 2026-04-01
-
-### Added
-- E2E tests with Docker (Prometheus + Jaeger)
-- Stress tests and race condition tests
-- OpenTelemetry compatibility info to README
-- Sampling and processing guide, external collectors documentation
-
-### Fixed
-- Context/memory leaks with instrument cleanup
-
-### Changed
-- Documentation updates for B3 propagation and OTel clarity
-
-## [0.3.0] - 2026-03-31
+## [0.3.0] - 2026-04-01
 
 ### Added
 - OpenTelemetry-compatible API with native implementation
@@ -38,11 +24,19 @@ All notable changes to this project will be documented in this file.
 - New test suites for context, tracer, meter, and exporter modules
 - New `instrument_otel.hrl` header with OTel record definitions
 - Documentation guides: getting started, instrumentation, context propagation, exporters
+- E2E tests with Docker (Prometheus + Jaeger)
+- Stress tests and race condition tests
+- OpenTelemetry compatibility info to README
+- Sampling and processing guide, external collectors documentation
+
+### Fixed
+- Context/memory leaks with instrument cleanup
 
 ### Changed
 - Extended `metric` record with OTel fields (description, unit, meter, attributes)
 - Updated application description to mention OpenTelemetry support
 - Added hackney 3.2.1 as dependency for OTLP HTTP export
+- Documentation updates for B3 propagation and OTel clarity
 
 ## [0.2.0] - 2026-03-31
 

@@ -19,7 +19,7 @@
 %% Value = instrument_counter:get_counter(Counter).
 %% '''
 %%
-%% @see instrument for the main API facade
+%% @see instrument
 -module(instrument_counter).
 
 %% public api
