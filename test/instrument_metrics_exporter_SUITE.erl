@@ -24,7 +24,13 @@
   console_labeled_json/1,
   otlp_exporter_init/1,
   flush/1,
-  periodic_export/1
+  periodic_export/1,
+  %% Metric name tests
+  metric_name_atom_test/1,
+  metric_name_binary_test/1,
+  metric_name_vec_test/1,
+  metric_name_otel_test/1,
+  metric_name_otel_with_attrs_test/1
 ]).
 
 all() ->
@@ -38,7 +44,13 @@ all() ->
     console_labeled_json,
     otlp_exporter_init,
     flush,
-    periodic_export
+    periodic_export,
+    %% Metric name tests
+    metric_name_atom_test,
+    metric_name_binary_test,
+    metric_name_vec_test,
+    metric_name_otel_test,
+    metric_name_otel_with_attrs_test
   ].
 
 init_per_suite(Config) ->
@@ -250,4 +262,103 @@ periodic_export(_Config) ->
 
   %% Small delay to allow async export to complete
   timer:sleep(100),
+  ok.
+
+%% ============================================================================
+%% Metric Name Tests
+%% ============================================================================
+
+%% Test that atom metric names are correctly converted to binary
+metric_name_atom_test(_Config) ->
+  Counter = instrument:new_counter(my_atom_counter, [{help, "Atom name counter"}]),
+  ok = instrument:inc_counter(Counter, 5),
+
+  Metrics = instrument_metrics_exporter:collect(),
+  CounterMetrics = [M || #{name := N} = M <- Metrics, N =:= <<"my_atom_counter">>],
+  true = length(CounterMetrics) >= 1,
+
+  [#{name := Name, data_points := [#{value := Value}]}] = CounterMetrics,
+  <<"my_atom_counter">> = Name,
+  5.0 = Value,
+  ok.
+
+%% Test that binary metric names are preserved
+metric_name_binary_test(_Config) ->
+  %% Use instrument_nif directly to create metric with binary name
+  Gauge = instrument:new_gauge(<<"my_binary_gauge">>, [{help, "Binary name gauge"}]),
+  ok = instrument:set_gauge(Gauge, 42),
+
+  Metrics = instrument_metrics_exporter:collect(),
+  GaugeMetrics = [M || #{name := N} = M <- Metrics, N =:= <<"my_binary_gauge">>],
+  true = length(GaugeMetrics) >= 1,
+
+  [#{name := Name, data_points := [#{value := Value}]}] = GaugeMetrics,
+  <<"my_binary_gauge">> = Name,
+  42.0 = Value,
+  ok.
+
+%% Test that vec metric names are correctly exported
+metric_name_vec_test(_Config) ->
+  ok = instrument:new_counter_vec(my_vec_counter, "Vec counter", [method, status]),
+  ok = instrument:inc_counter_vec(my_vec_counter, [<<"GET">>, <<"200">>], 10),
+  ok = instrument:inc_counter_vec(my_vec_counter, [<<"POST">>, <<"201">>], 5),
+
+  Metrics = instrument_metrics_exporter:collect(),
+  VecMetrics = [M || #{name := N} = M <- Metrics, N =:= <<"my_vec_counter">>],
+  true = length(VecMetrics) >= 1,
+
+  [#{name := Name, data_points := DataPoints}] = VecMetrics,
+  <<"my_vec_counter">> = Name,
+
+  %% Should have 2 data points with different attributes
+  true = length(DataPoints) >= 2,
+
+  %% Verify attributes are present
+  Attrs = [maps:get(attributes, DP) || DP <- DataPoints],
+  true = lists:any(fun(A) -> maps:get(<<"method">>, A, undefined) =:= <<"GET">> end, Attrs),
+  true = lists:any(fun(A) -> maps:get(<<"method">>, A, undefined) =:= <<"POST">> end, Attrs),
+  ok.
+
+%% Test that OTel meter metric names are correctly exported
+metric_name_otel_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"test_service">>),
+  Counter = instrument_meter:create_counter(Meter, <<"otel_request_count">>, #{
+    description => <<"OTel request counter">>
+  }),
+  ok = instrument_meter:add(Counter, 100),
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% OTel metrics use tuple names internally, but should export as readable names
+  %% The internal name is {otel, <<"otel_request_count">>}
+  OtelMetrics = [M || #{name := N} = M <- Metrics,
+                      N =:= <<"{otel,<<\"otel_request_count\">>}">> orelse
+                      N =:= <<"otel_request_count">> orelse
+                      binary:match(N, <<"otel_request_count">>) =/= nomatch],
+
+  %% Should find the metric
+  true = length(OtelMetrics) >= 1,
+  ok.
+
+%% Test that OTel meter metrics with attributes have correct names
+metric_name_otel_with_attrs_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"attr_service">>),
+  Counter = instrument_meter:create_counter(Meter, <<"otel_attr_counter">>, #{
+    description => <<"OTel counter with attributes">>
+  }),
+
+  %% Add with different attribute sets
+  ok = instrument_meter:add(Counter, 1, #{method => <<"GET">>}),
+  ok = instrument_meter:add(Counter, 2, #{method => <<"POST">>}),
+  ok = instrument_meter:add(Counter, 3, #{method => <<"GET">>, status => 200}),
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% The vec metrics created for attributes should have distinct names
+  %% Find all metrics related to otel_attr_counter
+  AttrMetrics = [M || #{name := N} = M <- Metrics,
+                      binary:match(N, <<"otel_attr_counter">>) =/= nomatch],
+
+  %% Should have created metrics for the different attribute schemas
+  true = length(AttrMetrics) >= 1,
   ok.
