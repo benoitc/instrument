@@ -184,7 +184,7 @@ encode_span(#span{
     <<"kind">> => encode_span_kind(Kind),
     <<"startTimeUnixNano">> => integer_to_binary(StartTime),
     <<"endTimeUnixNano">> => integer_to_binary(EndTimeNano),
-    <<"traceFlags">> => TraceFlags,
+    <<"flags">> => TraceFlags,
     <<"attributes">> => encode_attributes(Attributes),
     <<"events">> => encode_events(Events),
     <<"links">> => encode_links(Links),

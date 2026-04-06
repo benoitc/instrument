@@ -188,16 +188,24 @@ encode_number_data_point(#{attributes := Attrs, value := Value, timestamp := Ts}
 
 encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := Ts}) ->
   #{count := Count, sum := Sum, buckets := Buckets} = Value,
-  BucketCounts = [maps:get(count, B) || B <- Buckets],
-  ExplicitBounds = [maps:get(bound, B) || B <- Buckets, maps:get(bound, B) =/= infinity],
+  %% OTLP bucketCounts must be one longer than explicitBounds (includes +Inf bucket)
+  %% Get individual bucket counts (not cumulative)
+  BucketCounts = [maps:get(count, B, 0) || B <- Buckets],
+  %% ExplicitBounds excludes +Inf
+  ExplicitBounds = [maps:get(upper_bound, B) || B <- Buckets,
+                    maps:get(upper_bound, B) =/= infinity],
   #{
     <<"attributes">> => encode_attributes(Attrs),
     <<"timeUnixNano">> => integer_to_binary(Ts),
-    <<"count">> => integer_to_binary(Count),
+    <<"count">> => encode_uint64(Count),
     <<"sum">> => Sum,
-    <<"bucketCounts">> => [integer_to_binary(C) || C <- BucketCounts],
+    <<"bucketCounts">> => [encode_uint64(C) || C <- BucketCounts],
     <<"explicitBounds">> => ExplicitBounds
   }.
+
+%% Encode count as string (OTLP uses fixed64/string for counts)
+encode_uint64(V) when is_integer(V) -> integer_to_binary(V);
+encode_uint64(V) when is_float(V) -> integer_to_binary(trunc(V)).
 
 encode_attributes(Attrs) ->
   maps:fold(fun(K, V, Acc) ->

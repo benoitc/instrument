@@ -104,7 +104,9 @@ format_histogram_data(Name, Labels, LabelVals, #{count := Count, sum := Sum, buc
 
 -spec format_histogram_buckets(binary(), list(), list()) -> iolist().
 format_histogram_buckets(Name, LabelPairs, Buckets) ->
-  [format_bucket(Name, LabelPairs, B) || B <- Buckets].
+  %% Filter out +Inf bucket (handled separately by format_histogram_bucket_inf)
+  FiniteBuckets = [B || B <- Buckets, maps:get(upper_bound, B) =/= infinity],
+  [format_bucket(Name, LabelPairs, B) || B <- FiniteBuckets].
 
 -spec format_bucket(binary(), list(), map()) -> iolist().
 format_bucket(Name, LabelPairs, #{upper_bound := Le, cumulative_count := Count}) ->

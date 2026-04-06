@@ -397,7 +397,8 @@ add_event(Name) ->
 add_event(Name, Attrs) when is_binary(Name), is_map(Attrs) ->
   Event = #span_event{
     name = Name,
-    timestamp = erlang:monotonic_time(nanosecond),
+    %% Use system_time (Unix epoch) not monotonic_time for OTLP compatibility
+    timestamp = erlang:system_time(nanosecond),
     attributes = Attrs
   },
   update_current_span(fun(Span) ->

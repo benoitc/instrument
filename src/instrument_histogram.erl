@@ -75,13 +75,14 @@ new_histogram(Name, Help, Buckets) ->
 
 mk_histogram(Buckets) ->
   ok = validate_buckets(Buckets),
+  %% Create N+1 bucket counts: one for each boundary plus +Inf bucket
   Counts = lists:map(
     fun(_) ->
       {ok, Ref} = instrument_nif:new_gauge(),
       Ref
-    end, Buckets),
+    end, Buckets ++ [infinity]),
   {ok, Sum} =  instrument_nif:new_gauge(),
-  
+
   #histogram{
     bucket_boundaries = Buckets,
     bucket_counts = list_to_tuple(Counts),
@@ -107,14 +108,14 @@ observe_histogram(#metric{handle=Hist}, Value) ->
   #histogram{bucket_boundaries = Boundaries,
     bucket_counts = Counts,
     sum = Sum} = Hist,
-  
-  case find(Boundaries, Value, 1) of
-    Idx when Idx > 0 ->
-      instrument_nif:inc_gauge(element(Idx, Counts)),
-      instrument_nif:inc_gauge(Sum, float(Value));
-    _ ->
-      ok
-  end.
+
+  %% Find bucket index (1-based), or use +Inf bucket (last one) if above all boundaries
+  Idx = case find(Boundaries, Value, 1) of
+    -1 -> tuple_size(Counts);  %% +Inf bucket is the last one
+    I -> I
+  end,
+  instrument_nif:inc_gauge(element(Idx, Counts)),
+  instrument_nif:inc_gauge(Sum, float(Value)).
 
 %% Linear search is efficient for typical histogram bucket counts (10-15 buckets).
 %% For the default OTel bucket configuration, linear search outperforms binary
@@ -145,8 +146,13 @@ get_bucket_boundaries(#metric{handle = Hist}) ->
 
 cumulative_count([Count | RestCounts], [Boundary | RestBoundaries], Acc, Buckets) ->
   Acc2 = Acc + Count,
-  Bucket = #{cumulative_count => Acc2, upper_bound => Boundary},
+  Bucket = #{cumulative_count => Acc2, upper_bound => Boundary, count => Count},
   cumulative_count(RestCounts, RestBoundaries, Acc2, [Bucket | Buckets]);
+cumulative_count([InfCount], [], Acc, Buckets) ->
+  %% +Inf bucket (values above all boundaries)
+  Acc2 = Acc + InfCount,
+  InfBucket = #{cumulative_count => Acc2, upper_bound => infinity, count => InfCount},
+  lists:reverse([InfBucket | Buckets]);
 cumulative_count([], [], _Acc, Buckets) ->
   lists:reverse(Buckets).
 
