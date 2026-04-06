@@ -59,7 +59,8 @@
   batch = [] :: [#span{}],
   batch_size = 512 :: pos_integer(),
   batch_timeout = 5000 :: pos_integer(),
-  timer_ref :: reference() | undefined
+  timer_ref :: reference() | undefined,
+  hook_fun :: fun((#span{}) -> ok) | undefined
 }).
 
 -type exporter() :: #{
@@ -134,10 +135,9 @@ shutdown() ->
 
 init([]) ->
   %% Register as the default span exporter
-  instrument_tracer:register_exporter(fun(Span) ->
-    export_span(Span)
-  end),
-  {ok, #state{}}.
+  HookFun = fun(Span) -> export_span(Span) end,
+  instrument_tracer:register_exporter(HookFun),
+  {ok, #state{hook_fun = HookFun}}.
 
 handle_call({register, Module, Config}, _From, State) ->
   case Module:init(Config) of
@@ -170,10 +170,15 @@ handle_call(flush, _From, State) ->
 
 handle_call(shutdown, _From, State) ->
   State2 = do_flush(State),
+  %% Unregister the hook to prevent leaks across restarts
+  case State2#state.hook_fun of
+    undefined -> ok;
+    HookFun -> instrument_tracer:unregister_exporter(HookFun)
+  end,
   lists:foreach(fun(#{module := M, state := S}) ->
     catch M:shutdown(S)
   end, State2#state.exporters),
-  {reply, ok, State2#state{exporters = []}};
+  {reply, ok, State2#state{exporters = [], hook_fun = undefined}};
 
 handle_call(_Request, _From, State) ->
   {reply, {error, unknown_request}, State}.
@@ -203,6 +208,11 @@ handle_info(_Info, State) ->
 terminate(_Reason, State) ->
   %% Final flush and shutdown
   State2 = do_flush(State),
+  %% Unregister the hook to prevent leaks
+  case State2#state.hook_fun of
+    undefined -> ok;
+    HookFun -> instrument_tracer:unregister_exporter(HookFun)
+  end,
   lists:foreach(fun(#{module := M, state := S}) ->
     catch M:shutdown(S)
   end, State2#state.exporters),
@@ -231,13 +241,20 @@ do_flush(#state{batch = []} = State) ->
 do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
   %% Export to all registered exporters
   NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    case catch M:export(Batch, S) of
-      {ok, NewState} ->
-        Exporter#{state => NewState};
-      {error, _Reason, NewState} ->
-        Exporter#{state => NewState};
-      _ ->
-        Exporter
+    %% Check if exporter is enabled at runtime
+    case instrument_config:is_exporter_enabled(M) of
+      false ->
+        %% Skip disabled exporter
+        Exporter;
+      true ->
+        case catch M:export(Batch, S) of
+          {ok, NewState} ->
+            Exporter#{state => NewState};
+          {error, _Reason, NewState} ->
+            Exporter#{state => NewState};
+          _ ->
+            Exporter
+        end
     end
   end, Exporters),
   cancel_timer(State#state{batch = [], exporters = NewExporters}).

@@ -249,11 +249,18 @@ mk_metric(#vector{ name=Name, help=Help, metric=gauge }) ->
 mk_metric(#vector{ name=Name, help=Help, metric=histogram, buckets=Buckets }) ->
   instrument_histogram:new_histogram(Name, Help, Buckets).
 
-do_remove_label(#metric{ handle = Vector } = Metric, Label) ->
+do_remove_label(#metric{ name = Name, handle = Vector } = Metric, Label) ->
   #vector{ labels_map = LabelsMap } = Vector,
+  %% Erase the cache entry for this specific label
+  persistent_term:erase({instrument_label, Name, Label}),
   Vector2 = Vector#vector{labels_map=maps:remove(Label, LabelsMap)},
   Metric#metric{handle=Vector2}.
 
-do_clear_labels(#metric{ handle = Vector } = Metric) ->
+do_clear_labels(#metric{ name = Name, handle = Vector } = Metric) ->
+  #vector{ labels_map = LabelsMap } = Vector,
+  %% Erase cache entries for all labels
+  maps:foreach(fun(LabelValues, _) ->
+    persistent_term:erase({instrument_label, Name, LabelValues})
+  end, LabelsMap),
   Vector2 = Vector#vector{labels_map=#{}},
   Metric#metric{handle=Vector2}.

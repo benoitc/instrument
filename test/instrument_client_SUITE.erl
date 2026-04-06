@@ -367,13 +367,15 @@ set_response_attributes_test(_Config) ->
 pool_acquire_span_test(_Config) ->
     Span = instrument_client:pool_acquire_span(<<"db_pool">>, postgresql),
     ?assertEqual(client, Span#span.kind),
-    ?assertMatch(<<"postgresql pool.acquire">>, Span#span.name),
+    %% Span is now named "postgresql pool" and contains acquire event
+    ?assertMatch(<<"postgresql pool">>, Span#span.name),
 
     Attrs = Span#span.attributes,
     ?assertEqual(<<"db_pool">>, maps:get(<<"pool.name">>, Attrs)),
     ?assertEqual(<<"postgresql">>, maps:get(<<"pool.type">>, Attrs)),
 
-    instrument_tracer:end_span(Span),
+    %% End the span using pool_release_span which adds release event
+    instrument_client:pool_release_span(Span),
     ok.
 
 with_pool_span_test(_Config) ->

@@ -7,10 +7,18 @@
 %%
 %% This sampler allows configuring sampling rates based on span attributes,
 %% enabling sophisticated sampling strategies like:
-%% - Always sample errors
 %% - Lower sampling for high-volume read operations
 %% - Higher sampling for writes and mutations
 %% - Force sampling for critical tables/topics
+%%
+%% == IMPORTANT: Sampling Timing ==
+%% Sampling decisions are made at span start, BEFORE your code executes.
+%% Only attributes passed in the span options at creation time can influence
+%% the sampling decision. Attributes set later via set_attribute/2 have NO
+%% effect on sampling.
+%%
+%% For error sampling based on execution results, use tail-based sampling
+%% or custom span processors instead of attribute rules.
 %%
 %% == Configuration ==
 %% ```
@@ -18,10 +26,10 @@
 %%     default_ratio => 0.1,
 %%     attribute_rules => [
 %%         %% {AttributeName, Value, SamplingRatio}
+%%         %% These attributes MUST be passed at span creation time
 %%         {<<"db.operation">>, <<"SELECT">>, 0.01},
 %%         {<<"db.operation">>, <<"DELETE">>, 0.5},
-%%         {<<"db.sql.table">>, <<"audit_log">>, 1.0},
-%%         {<<"error">>, true, 1.0}  %% Always sample errors
+%%         {<<"db.sql.table">>, <<"audit_log">>, 1.0}
 %%     ]
 %% }).
 %% '''
@@ -39,7 +47,6 @@
 %% #{
 %%     default_ratio => 0.001,  %% 0.1% baseline
 %%     attribute_rules => [
-%%         {<<"error">>, true, 1.0},
 %%         {<<"db.operation">>, <<"SELECT">>, 0.001},
 %%         {<<"db.operation">>, <<"INSERT">>, 0.01},
 %%         {<<"db.operation">>, <<"UPDATE">>, 0.01},
@@ -55,8 +62,7 @@
 %%     default_ratio => 0.1,
 %%     attribute_rules => [
 %%         {<<"http.method">>, <<"GET">>, 0.01},
-%%         {<<"http.method">>, <<"POST">>, 0.1},
-%%         {<<"http.status_code">>, 500, 1.0}
+%%         {<<"http.method">>, <<"POST">>, 0.1}
 %%     ]
 %% }
 %% '''

@@ -237,13 +237,20 @@ do_export(#state{exporters = Exporters} = State) ->
   %% Apply metric views for transformation
   TransformedMetrics = instrument_metric_view:apply_views(Metrics),
   NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    case catch M:exporter_export(TransformedMetrics, S) of
-      {ok, NewState} ->
-        Exporter#{state => NewState};
-      {error, _Reason, NewState} ->
-        Exporter#{state => NewState};
-      _ ->
-        Exporter
+    %% Check if exporter is enabled at runtime
+    case instrument_config:is_exporter_enabled(M) of
+      false ->
+        %% Skip disabled exporter
+        Exporter;
+      true ->
+        case catch M:exporter_export(TransformedMetrics, S) of
+          {ok, NewState} ->
+            Exporter#{state => NewState};
+          {error, _Reason, NewState} ->
+            Exporter#{state => NewState};
+          _ ->
+            Exporter
+        end
     end
   end, Exporters),
   State#state{exporters = NewExporters}.

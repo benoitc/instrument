@@ -221,17 +221,42 @@ end).
 
 The `instrument_sampler_attribute` module provides fine-grained sampling control based on span attributes.
 
+### Important: Sampling Timing
+
+**Sampling decisions are made at span start**, before your code executes. This means:
+
+- Attributes must be passed in `Opts.attributes` to influence sampling
+- Attributes set later with `set_attribute/2` do NOT affect sampling
+- `set_status(error)` does NOT retroactively force sampling
+
+For effective sampling, pass known attributes at span creation time:
+
+```erlang
+%% WRONG: error attribute set too late
+instrument_client:with_client_span(postgresql, Op, #{}, fun() ->
+    case query() of
+        {error, _} ->
+            instrument_tracer:set_attribute(<<"error">>, true),  %% Too late!
+            ...
+    end
+end).
+
+%% RIGHT: Use known attributes at span start
+instrument_client:with_client_span(postgresql, Op, #{
+    attributes => #{
+        <<"db.operation">> => Op,
+        <<"db.sql.table">> => Table
+    }
+}, fun() -> ... end).
+```
+
 ### Configuration
 
 ```erlang
 instrument_sampler:set_sampler(instrument_sampler_attribute, #{
     default_ratio => 0.001,  %% 0.1% baseline
     attribute_rules => [
-        %% Always sample errors
-        {<<"error">>, true, 1.0},
-        {<<"otel.status_code">>, <<"ERROR">>, 1.0},
-
-        %% Lower rate for reads, higher for writes
+        %% These attributes MUST be set at span creation time
         {<<"db.operation">>, <<"SELECT">>, 0.001},
         {<<"db.operation">>, <<"INSERT">>, 0.01},
         {<<"db.operation">>, <<"UPDATE">>, 0.01},
@@ -243,6 +268,8 @@ instrument_sampler:set_sampler(instrument_sampler_attribute, #{
     ]
 }).
 ```
+
+**Note**: Rules like `{<<"error">>, true, 1.0}` only work if the `error` attribute is passed at span creation. For error sampling based on execution results, use tail-based sampling (post-export filtering) or custom span processors.
 
 ### Rule Matching
 
@@ -275,6 +302,15 @@ instrument_sampler:set_sampler(instrument_sampler_attribute, #{
     ]
 }).
 ```
+
+### Sampling Errors After Execution
+
+To sample based on execution results (like errors), consider:
+
+1. **Always sample at a baseline rate** - Use a low `default_ratio` to capture some errors
+2. **Use span processors** - Implement custom `on_end` logic to filter spans
+3. **Tail-based sampling** - Use a collector that samples after spans complete
+4. **Pass error hints upfront** - If you can predict errors (e.g., known bad input), pass attributes at span start
 
 ## Examples
 
@@ -495,7 +531,7 @@ For a 10ms database query, tracing adds approximately 0.07% overhead.
 | 10K - 100K ops/sec | 0.1-1% |
 | > 100K ops/sec | 0.01-0.1% + errors |
 
-Always sample errors and slow operations regardless of rate.
+Note: Error sampling via attributes only works if you pass error hints at span start. For runtime error sampling, use tail-based sampling or span processors.
 
 ### Production Configuration
 
@@ -507,11 +543,7 @@ configure() ->
     instrument_sampler:set_sampler(instrument_sampler_attribute, #{
         default_ratio => 0.001,
         attribute_rules => [
-            %% Always sample errors
-            {<<"error">>, true, 1.0},
-            {<<"otel.status_code">>, <<"ERROR">>, 1.0},
-
-            %% Always sample slow operations
+            %% Sample slow operations (must be set at span start)
             {<<"slow_operation">>, true, 1.0},
 
             %% Higher rate for writes

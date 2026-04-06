@@ -229,42 +229,67 @@ format_trace_comment(Opts) ->
 %% Resource Pool Helpers
 %% ============================================================================
 
-%% @doc Executes a function with pool acquire/release spans.
+%% @doc Executes a function with pool acquire/release events in a wrapper span.
+%% Creates a single span that contains both pool.acquire and pool.release events,
+%% properly capturing the full pool operation lifecycle.
 -spec with_pool_span(binary(), client_system(), fun(() -> Result)) -> Result
     when Result :: term().
 with_pool_span(PoolName, System, Fun) when is_function(Fun, 0) ->
-    AcquireSpan = pool_acquire_span(PoolName, System),
-    try
-        instrument_tracer:end_span(AcquireSpan),
-        Fun()
-    after
-        pool_release_span(PoolName)
-    end.
-
-%% @doc Creates a span for pool resource acquisition.
-%% Call instrument_tracer:end_span/1 when the resource is acquired.
--spec pool_acquire_span(binary(), client_system()) -> #span{}.
-pool_acquire_span(PoolName, System) ->
     SystemBin = to_binary(System),
-    SpanName = <<SystemBin/binary, " pool.acquire">>,
-    instrument_tracer:start_span(SpanName, #{
+    SpanName = <<SystemBin/binary, " pool">>,
+    instrument_tracer:with_span(SpanName, #{
         kind => client,
         attributes => #{
             <<"pool.name">> => PoolName,
             <<"pool.type">> => SystemBin
         }
-    }).
+    }, fun() ->
+        %% Add acquire event at start
+        instrument_tracer:add_event(<<"pool.acquire">>, #{
+            <<"pool.name">> => PoolName
+        }),
+        try
+            Fun()
+        after
+            %% Add release event at end (within same span)
+            instrument_tracer:add_event(<<"pool.release">>, #{
+                <<"pool.name">> => PoolName
+            })
+        end
+    end).
 
-%% @doc Records pool resource release.
-%% Creates a minimal span event on the current span.
+%% @doc Creates a span for pool resource acquisition.
+%% The returned span should be ended AFTER the pool operation completes,
+%% not immediately after acquisition.
+%% Use pool_release_span/1 with the returned span to properly end it.
+-spec pool_acquire_span(binary(), client_system()) -> #span{}.
+pool_acquire_span(PoolName, System) ->
+    SystemBin = to_binary(System),
+    SpanName = <<SystemBin/binary, " pool">>,
+    Span = instrument_tracer:start_span(SpanName, #{
+        kind => client,
+        attributes => #{
+            <<"pool.name">> => PoolName,
+            <<"pool.type">> => SystemBin
+        }
+    }),
+    instrument_tracer:add_event(<<"pool.acquire">>, #{
+        <<"pool.name">> => PoolName
+    }),
+    Span.
+
+%% @doc Records pool resource release and ends the pool span.
+%% When called with a span record, adds release event and ends the span.
+%% When called with just a pool name (legacy), adds release event to current span.
 -spec pool_release_span(binary() | #span{}) -> ok.
+pool_release_span(PoolSpan) when is_record(PoolSpan, span) ->
+    instrument_tracer:add_event(<<"pool.release">>, #{}),
+    instrument_tracer:end_span(PoolSpan);
 pool_release_span(PoolName) when is_binary(PoolName) ->
+    %% Legacy: just add event if only name provided
     instrument_tracer:add_event(<<"pool.release">>, #{
         <<"pool.name">> => PoolName
-    });
-pool_release_span(#span{}) ->
-    %% Legacy: if passed a span, just add event to current span
-    instrument_tracer:add_event(<<"pool.release">>, #{}).
+    }).
 
 %% ============================================================================
 %% Attribute Builders

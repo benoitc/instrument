@@ -228,13 +228,20 @@ do_flush(#state{batch = []} = State) ->
 do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
   %% Export to all registered exporters
   NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    case catch M:exporter_export(Batch, S) of
-      {ok, NewState} ->
-        Exporter#{state => NewState};
-      {error, _Reason, NewState} ->
-        Exporter#{state => NewState};
-      _ ->
-        Exporter
+    %% Check if exporter is enabled at runtime
+    case instrument_config:is_exporter_enabled(M) of
+      false ->
+        %% Skip disabled exporter
+        Exporter;
+      true ->
+        case catch M:exporter_export(Batch, S) of
+          {ok, NewState} ->
+            Exporter#{state => NewState};
+          {error, _Reason, NewState} ->
+            Exporter#{state => NewState};
+          _ ->
+            Exporter
+        end
     end
   end, Exporters),
   cancel_timer(State#state{batch = [], exporters = NewExporters}).
