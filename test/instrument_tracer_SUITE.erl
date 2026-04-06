@@ -27,7 +27,9 @@
   trace_id_generation/1,
   span_exporter/1,
   propagation_across_processes/1,
-  spans_no_context_leak/1
+  spans_no_context_leak/1,
+  tracing_disabled/1,
+  custom_span_id/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -46,7 +48,9 @@ all() ->
     trace_id_generation,
     span_exporter,
     propagation_across_processes,
-    spans_no_context_leak
+    spans_no_context_leak,
+    tracing_disabled,
+    custom_span_id
   ].
 
 init_per_suite(Config) ->
@@ -349,3 +353,76 @@ count_context_entries() ->
 is_context_key('$instrument_context') -> true;
 is_context_key({'$instrument_context', _}) -> true;
 is_context_key(_) -> false.
+
+tracing_disabled(_Config) ->
+  %% Ensure tracing is enabled initially
+  true = instrument_config:is_tracing_enabled(),
+
+  %% Disable tracing
+  ok = instrument_config:set_tracing_enabled(false),
+
+  try
+    %% Create span when disabled - should return noop span
+    NoopSpan = instrument_tracer:start_span(<<"noop_test">>),
+    #span{name = <<"noop_test">>, is_recording = false} = NoopSpan,
+
+    %% Span should have zero IDs
+    #span{ctx = #span_ctx{trace_id = <<0:128>>, span_id = <<0:64>>}} = NoopSpan,
+
+    %% with_span should still execute the function
+    Result = instrument_tracer:with_span(<<"disabled_span">>, fun() ->
+      %% Operations on non-recording span are no-ops
+      ok = instrument_tracer:set_attribute(<<"key">>, <<"value">>),
+      computed_value
+    end),
+    computed_value = Result,
+
+    %% Span should still be available as current
+    instrument_tracer:with_span(<<"test">>, fun() ->
+      CurrentSpan = instrument_tracer:current_span(),
+      #span{is_recording = false} = CurrentSpan
+    end),
+
+    %% No span after with_span returns
+    undefined = instrument_tracer:current_span()
+  after
+    %% Re-enable tracing
+    ok = instrument_config:set_tracing_enabled(true)
+  end,
+
+  %% Verify tracing works again after re-enabling
+  instrument_tracer:with_span(<<"enabled_span">>, fun() ->
+    EnabledSpan = instrument_tracer:current_span(),
+    #span{is_recording = true} = EnabledSpan,
+    %% Should have non-zero IDs
+    #span{ctx = #span_ctx{trace_id = TraceId, span_id = SpanId}} = EnabledSpan,
+    true = TraceId =/= <<0:128>>,
+    true = SpanId =/= <<0:64>>
+  end),
+  ok.
+
+custom_span_id(_Config) ->
+  %% Test with 8-byte binary span_id
+  CustomSpanId = crypto:strong_rand_bytes(8),
+  instrument_tracer:with_span(<<"custom_id_test">>, #{span_id => CustomSpanId}, fun() ->
+    SpanIdHex = instrument_tracer:span_id(),
+    ExpectedHex = instrument_id:span_id_to_hex(CustomSpanId),
+    ExpectedHex = SpanIdHex
+  end),
+
+  %% Test with 16-char hex string span_id
+  HexSpanId = <<"abcd1234abcd1234">>,
+  instrument_tracer:with_span(<<"hex_id_test">>, #{span_id => HexSpanId}, fun() ->
+    SpanIdHex = instrument_tracer:span_id(),
+    HexSpanId = SpanIdHex
+  end),
+
+  %% Verify auto-generated IDs still work
+  instrument_tracer:with_span(<<"auto_id_test">>, fun() ->
+    SpanId = instrument_tracer:span_id(),
+    16 = byte_size(SpanId),
+    %% Should not be our custom IDs
+    true = SpanId =/= instrument_id:span_id_to_hex(CustomSpanId),
+    true = SpanId =/= HexSpanId
+  end),
+  ok.
