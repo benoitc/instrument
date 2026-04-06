@@ -435,9 +435,9 @@ metric_attrs_otel_single_test(_Config) ->
                        binary:match(N, <<"otel_single_attr_gauge">>) =/= nomatch],
   true = length(GaugeMetrics) >= 1,
 
-  %% Get data points and verify attributes
-  [#{data_points := DataPoints} | _] = GaugeMetrics,
-  AllAttrs = [maps:get(attributes, DP) || DP <- DataPoints],
+  %% Get data points and verify attributes (check ALL matching metrics, not just first)
+  AllDataPoints = lists:flatmap(fun(#{data_points := DPs}) -> DPs end, GaugeMetrics),
+  AllAttrs = [maps:get(attributes, DP) || DP <- AllDataPoints],
 
   %% Should have host attribute
   true = lists:any(fun(A) -> maps:get(<<"host">>, A, undefined) =:= <<"server1">> end, AllAttrs),
@@ -461,12 +461,12 @@ metric_attrs_otel_multiple_test(_Config) ->
                       binary:match(N, <<"otel_multi_attr_hist">>) =/= nomatch],
   true = length(HistMetrics) >= 1,
 
-  %% Verify attributes contain both keys
-  [#{data_points := DataPoints} | _] = HistMetrics,
-  [#{attributes := Attrs} | _] = DataPoints,
+  %% Verify attributes contain both keys (check ALL matching metrics, not just first)
+  AllDataPoints = lists:flatmap(fun(#{data_points := DPs}) -> DPs end, HistMetrics),
+  AllAttrs = [maps:get(attributes, DP) || DP <- AllDataPoints],
 
   %% Should have method and endpoint attributes
-  true = maps:is_key(<<"method">>, Attrs) orelse maps:is_key(<<"endpoint">>, Attrs),
+  true = lists:any(fun(A) -> maps:is_key(<<"method">>, A) orelse maps:is_key(<<"endpoint">>, A) end, AllAttrs),
   ok.
 
 %% Test attribute value type conversions

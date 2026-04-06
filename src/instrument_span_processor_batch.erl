@@ -62,6 +62,7 @@
 -define(DEFAULT_MAX_EXPORT_BATCH_SIZE, 512).
 -define(DEFAULT_SCHEDULE_DELAY_MILLIS, 5000).
 -define(DEFAULT_EXPORT_TIMEOUT_MILLIS, 30000).
+-define(SHUTDOWN_TIMEOUT_MILLIS, 10000).
 
 -record(state, {
   exporter :: module(),
@@ -132,7 +133,7 @@ on_end(Span) ->
 %% @doc Shuts down the processor.
 -spec shutdown() -> ok.
 shutdown() ->
-  gen_server:call(?MODULE, shutdown).
+  gen_server:call(?MODULE, shutdown, ?SHUTDOWN_TIMEOUT_MILLIS).
 
 %% @doc Shuts down the processor with state.
 -spec shutdown(#state{}) -> ok.
@@ -164,8 +165,9 @@ handle_call(shutdown, _From, State) ->
   } = State,
   %% Cancel timer
   cancel_timer(TimerRef),
-  %% Export remaining spans with timeout
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
+  %% Export remaining spans with timeout (cap to fit within gen_server:call timeout)
+  ShutdownTimeout = min(ExportTimeout, 5000),
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ShutdownTimeout),
   %% Shutdown exporter
   catch Exporter:shutdown(NewExporterState),
   {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
@@ -242,7 +244,9 @@ terminate(_Reason, State) ->
     export_timeout = ExportTimeout
   } = State,
   cancel_timer(TimerRef),
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
+  %% Cap shutdown timeout to fit within supervisor's 5s shutdown window
+  ShutdownTimeout = min(ExportTimeout, 5000),
+  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ShutdownTimeout),
   catch Exporter:shutdown(NewExporterState),
   ok.
 

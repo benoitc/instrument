@@ -100,7 +100,7 @@ register(ProcessorModule, Config) when is_atom(ProcessorModule), is_map(Config) 
 %% @doc Unregisters a span processor.
 -spec unregister(module()) -> ok.
 unregister(ProcessorModule) when is_atom(ProcessorModule) ->
-  gen_server:call(?SERVER, {unregister, ProcessorModule}).
+  gen_server:call(?SERVER, {unregister, ProcessorModule}, 15000).
 
 %% @doc Lists all registered processors.
 -spec list() -> [module()].
