@@ -34,7 +34,10 @@
   prometheus_gauge_vec_format/1,
   prometheus_histogram_format/1,
   prometheus_histogram_vec_format/1,
-  prometheus_label_escaping/1
+  prometheus_label_escaping/1,
+  prometheus_meter_counter/1,
+  prometheus_meter_gauge/1,
+  prometheus_meter_histogram/1
 ]).
 
 all() ->
@@ -59,7 +62,10 @@ groups() ->
       prometheus_gauge_vec_format,
       prometheus_histogram_format,
       prometheus_histogram_vec_format,
-      prometheus_label_escaping
+      prometheus_label_escaping,
+      prometheus_meter_counter,
+      prometheus_meter_gauge,
+      prometheus_meter_histogram
     ]}
   ].
 
@@ -73,11 +79,13 @@ end_per_suite(Config) ->
 
 init_per_testcase(_, Config) ->
   ok = instrument:unregister_all(),
+  ok = instrument_meter:unregister_all_instruments(),
   timer:sleep(100),
   Config.
 
 end_per_testcase(_, _Config) ->
   ok = instrument:unregister_all(),
+  ok = instrument_meter:unregister_all_instruments(),
   timer:sleep(100),
   ok.
 
@@ -196,4 +204,45 @@ prometheus_label_escaping(_Config) ->
   true = binary:match(Output, <<"label=\"value with \\\"quotes\\\"\"">>)  =/= nomatch,
   true = binary:match(Output, <<"label=\"value\\\\with\\\\backslashes\"">>)  =/= nomatch,
   true = binary:match(Output, <<"label=\"value\\nwith\\nnewlines\"">>)  =/= nomatch,
+  ok.
+
+%% Meter integration tests
+
+prometheus_meter_counter(_Config) ->
+  Meter = instrument_meter:get_meter(<<"prom_test">>),
+  Counter = instrument_meter:create_counter(Meter, <<"meter_requests">>, #{
+    description => <<"Meter counter">>
+  }),
+  ok = instrument_meter:add(Counter, 100),
+  ok = instrument_meter:add(Counter, 50),
+
+  Output = instrument_prometheus:format(),
+  %% Verify base metric appears
+  true = binary:match(Output, <<"meter_requests">>) =/= nomatch,
+  ok.
+
+prometheus_meter_gauge(_Config) ->
+  Meter = instrument_meter:get_meter(<<"prom_test">>),
+  Gauge = instrument_meter:create_gauge(Meter, <<"meter_temperature">>, #{
+    description => <<"Meter gauge">>
+  }),
+  ok = instrument_meter:set(Gauge, 23.5),
+
+  Output = instrument_prometheus:format(),
+  true = binary:match(Output, <<"meter_temperature">>) =/= nomatch,
+  true = binary:match(Output, <<"23.5">>) =/= nomatch,
+  ok.
+
+prometheus_meter_histogram(_Config) ->
+  Meter = instrument_meter:get_meter(<<"prom_test">>),
+  Histogram = instrument_meter:create_histogram(Meter, <<"meter_latency">>, #{
+    description => <<"Meter histogram">>,
+    boundaries => [0.1, 0.5, 1.0]
+  }),
+  ok = instrument_meter:record(Histogram, 0.3),
+  ok = instrument_meter:record(Histogram, 0.7),
+
+  Output = instrument_prometheus:format(),
+  true = binary:match(Output, <<"meter_latency_bucket">>) =/= nomatch,
+  true = binary:match(Output, <<"meter_latency_count">>) =/= nomatch,
   ok.
