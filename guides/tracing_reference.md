@@ -64,7 +64,8 @@ Executes a function within a span. Recommended for most use cases.
     attributes => map(),
     links => [#span_link{}],
     start_time => integer(),
-    parent => #span_ctx{} | undefined
+    parent => #span_ctx{} | undefined,
+    span_id => binary()     %% Custom 8-byte binary or 16-char hex string
 }.
 ```
 
@@ -506,6 +507,36 @@ Context = instrument_propagation:extract(Carrier, BaseContext).
 | `client` | Makes outgoing request | HTTP client, DB client |
 | `producer` | Sends message | Queue producer, pub/sub |
 | `consumer` | Receives message | Queue consumer, subscriber |
+
+## Custom Span IDs
+
+You can provide a custom span ID when creating spans. This is useful for:
+
+- Correlating spans with external systems that generate their own IDs
+- Replaying or importing traces from external sources
+- Testing with predictable IDs
+
+### Usage
+
+```erlang
+%% Using 8-byte binary
+SpanId = crypto:strong_rand_bytes(8),
+instrument_tracer:with_span(<<"operation">>, #{span_id => SpanId}, fun() ->
+    do_work()
+end).
+
+%% Using 16-character hex string
+instrument_tracer:with_span(<<"operation">>, #{span_id => <<"abcd1234abcd1234">>}, fun() ->
+    do_work()
+end).
+```
+
+### ID Format
+
+- **Binary format**: 8 bytes (64 bits)
+- **Hex string format**: 16 lowercase hex characters
+
+The span ID must be non-zero per W3C TraceContext spec.
 
 ## Best Practices
 

@@ -81,7 +81,8 @@
   attributes => map(),
   links => [#span_link{}],
   start_time => integer(),
-  parent => #span_ctx{} | undefined
+  parent => #span_ctx{} | undefined,
+  span_id => binary()     %% Custom 8-byte span ID or 16-char hex string
 }.
 
 -type tracer() :: #tracer{}.
@@ -138,7 +139,7 @@ start_span(Name, Opts) when is_binary(Name), is_map(Opts) ->
     P -> P
   end,
 
-  %% Generate new IDs
+  %% Generate IDs
   {TraceId, ParentSpanCtx} = case ParentCtx of
     undefined ->
       %% New trace
@@ -147,7 +148,13 @@ start_span(Name, Opts) when is_binary(Name), is_map(Opts) ->
       %% Continue existing trace
       {TId, ParentCtx}
   end,
-  SpanId = instrument_id:generate_span_id(),
+  SpanId = case maps:get(span_id, Opts, undefined) of
+    undefined -> instrument_id:generate_span_id();
+    CustomSpanId when is_binary(CustomSpanId), byte_size(CustomSpanId) =:= 8 ->
+      CustomSpanId;
+    CustomSpanIdHex when is_binary(CustomSpanIdHex), byte_size(CustomSpanIdHex) =:= 16 ->
+      instrument_id:hex_to_span_id(CustomSpanIdHex)
+  end,
 
   %% Make sampling decision
   #sampling_result{
