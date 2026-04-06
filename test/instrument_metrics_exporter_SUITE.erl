@@ -23,6 +23,7 @@
   console_labeled_text/1,
   console_labeled_json/1,
   otlp_exporter_init/1,
+  otlp_start_time_unix_nano/1,
   flush/1,
   periodic_export/1,
   %% Metric name tests
@@ -49,6 +50,7 @@ all() ->
     console_labeled_text,
     console_labeled_json,
     otlp_exporter_init,
+    otlp_start_time_unix_nano,
     flush,
     periodic_export,
     %% Metric name tests
@@ -236,6 +238,43 @@ otlp_exporter_init(_Config) ->
 
   %% Shutdown returns ok
   ok = instrument_metrics_exporter_otlp:exporter_shutdown(State),
+  ok.
+
+otlp_start_time_unix_nano(_Config) ->
+  %% Test that OTLP export includes startTimeUnixNano for cumulative metrics
+  BeforeCreate = erlang:system_time(nanosecond),
+
+  %% Create counter and histogram
+  Counter = instrument:new_counter(otlp_start_time_counter, [{help, "Test counter"}]),
+  ok = instrument:inc_counter(Counter, 5),
+
+  Histogram = instrument:new_histogram(otlp_start_time_hist, [{help, "Test histogram"}]),
+  ok = instrument:observe_histogram(Histogram, 0.5),
+
+  AfterCreate = erlang:system_time(nanosecond),
+
+  %% Collect metrics
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find counter metric
+  [CounterMetric] = [M || #{name := N} = M <- Metrics, N =:= <<"otlp_start_time_counter">>],
+  #{data_points := [#{start_time := CounterStartTime, timestamp := CounterTs}]} = CounterMetric,
+
+  %% Verify start_time is reasonable (between before and after create)
+  true = CounterStartTime >= BeforeCreate,
+  true = CounterStartTime =< AfterCreate,
+  %% Verify timestamp is after start_time
+  true = CounterTs >= CounterStartTime,
+
+  %% Find histogram metric
+  [HistMetric] = [M || #{name := N} = M <- Metrics, N =:= <<"otlp_start_time_hist">>],
+  #{data_points := [#{start_time := HistStartTime, timestamp := HistTs}]} = HistMetric,
+
+  %% Verify histogram start_time is reasonable
+  true = HistStartTime >= BeforeCreate,
+  true = HistStartTime =< AfterCreate,
+  true = HistTs >= HistStartTime,
+
   ok.
 
 flush(_Config) ->

@@ -176,17 +176,23 @@ encode_metric_data(histogram, DataPoints) ->
     }
   }.
 
-encode_number_data_point(#{attributes := Attrs, value := Value, timestamp := Ts}) ->
+encode_number_data_point(#{attributes := Attrs, value := Value, timestamp := Ts} = DP) ->
   ValueField = case is_integer(Value) of
     true -> #{<<"asInt">> => integer_to_binary(Value)};
     false -> #{<<"asDouble">> => Value}
   end,
-  maps:merge(#{
+  Base = #{
     <<"attributes">> => encode_attributes(Attrs),
     <<"timeUnixNano">> => integer_to_binary(Ts)
-  }, ValueField).
+  },
+  %% Add startTimeUnixNano for cumulative metrics (counters)
+  Base2 = case maps:get(start_time, DP, undefined) of
+    undefined -> Base;
+    StartTime -> Base#{<<"startTimeUnixNano">> => integer_to_binary(StartTime)}
+  end,
+  maps:merge(Base2, ValueField).
 
-encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := Ts}) ->
+encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := Ts} = DP) ->
   #{count := Count, sum := Sum, buckets := Buckets} = Value,
   %% OTLP bucketCounts must be one longer than explicitBounds (includes +Inf bucket)
   %% Get individual bucket counts (not cumulative)
@@ -194,14 +200,19 @@ encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := 
   %% ExplicitBounds excludes +Inf
   ExplicitBounds = [maps:get(upper_bound, B) || B <- Buckets,
                     maps:get(upper_bound, B) =/= infinity],
-  #{
+  Base = #{
     <<"attributes">> => encode_attributes(Attrs),
     <<"timeUnixNano">> => integer_to_binary(Ts),
     <<"count">> => encode_uint64(Count),
     <<"sum">> => Sum,
     <<"bucketCounts">> => [encode_uint64(C) || C <- BucketCounts],
     <<"explicitBounds">> => ExplicitBounds
-  }.
+  },
+  %% Add startTimeUnixNano for cumulative histograms
+  case maps:get(start_time, DP, undefined) of
+    undefined -> Base;
+    StartTime -> Base#{<<"startTimeUnixNano">> => integer_to_binary(StartTime)}
+  end.
 
 %% Encode count as string (OTLP uses fixed64/string for counts)
 encode_uint64(V) when is_integer(V) -> integer_to_binary(V);

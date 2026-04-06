@@ -377,11 +377,12 @@ create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_bin
 create_underlying_metric(Name, counter, _Opts) ->
   %% Use gauge NIF for counter (monotonic increments only)
   {ok, Ref} = instrument_nif:new_gauge(),
+  StartTime = erlang:system_time(nanosecond),
   Info = instrument_lib:mk_info(Name, <<>>),
   Metric = #metric{
     name = {otel, Name},
-    handle = Ref,
-    collect = {instrument_counter, collect, [Info, Ref]}
+    handle = {Ref, StartTime},
+    collect = {instrument_counter, collect, [Info, {Ref, StartTime}]}
   },
   ok = instrument:register(Metric),
   Metric;
@@ -426,8 +427,11 @@ register_instrument(Name, Instrument) ->
     false -> persistent_term:put(otel_instruments, [Name | Names])
   end.
 
-do_add(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric directly
+do_add(#metric{handle = {Ref, _StartTime}}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
+  %% No attributes - use base metric directly (counter with start_time tracking)
+  instrument_nif:inc_gauge(Ref, float(Value));
+do_add(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
+  %% No attributes - use base metric directly (plain gauge ref)
   instrument_nif:inc_gauge(Ref, float(Value));
 do_add(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
   %% With attributes - use vec API

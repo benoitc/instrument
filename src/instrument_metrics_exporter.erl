@@ -267,7 +267,8 @@ collect_metrics() ->
     end
   end, RawMetrics).
 
-convert_metric(#{type := counter, name := Name, help := Help, val := Val}, Timestamp) ->
+convert_metric(#{type := counter, name := Name, help := Help, val := Val} = Metric, Timestamp) ->
+  StartTime = maps:get(start_time, Metric, undefined),
   #{
     name => to_binary(Name),
     description => extract_help(Help),
@@ -276,7 +277,8 @@ convert_metric(#{type := counter, name := Name, help := Help, val := Val}, Times
     data_points => [#{
       attributes => #{},
       value => Val,
-      timestamp => Timestamp
+      timestamp => Timestamp,
+      start_time => StartTime
     }]
   };
 
@@ -319,7 +321,8 @@ convert_metric(#{type := gauge, name := Name, help := Help, labels := Labels, da
     } || {_, LabelVals, Val} <- Data]
   };
 
-convert_metric(#{type := histogram, name := Name, help := Help, count := Count, sum := Sum, buckets := Buckets}, Timestamp) ->
+convert_metric(#{type := histogram, name := Name, help := Help, count := Count, sum := Sum, buckets := Buckets} = Metric, Timestamp) ->
+  StartTime = maps:get(start_time, Metric, undefined),
   #{
     name => to_binary(Name),
     description => extract_help(Help),
@@ -332,7 +335,8 @@ convert_metric(#{type := histogram, name := Name, help := Help, count := Count, 
         sum => Sum,
         buckets => [#{bound => maps:get(upper_bound, B), count => maps:get(cumulative_count, B)} || B <- Buckets]
       },
-      timestamp => Timestamp
+      timestamp => Timestamp,
+      start_time => StartTime
     }]
   };
 

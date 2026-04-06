@@ -59,7 +59,8 @@
 -record(histogram, {
   bucket_boundaries = [],
   bucket_counts = [],
-  sum = 0.0
+  sum = 0.0,
+  start_time :: integer()  % wall clock time in nanoseconds when histogram was created
 }).
 
 new_histogram(Name, Help) -> new_histogram(Name, Help, ?DEFAULT_BUCKETS).
@@ -82,11 +83,13 @@ mk_histogram(Buckets) ->
       Ref
     end, Buckets ++ [infinity]),
   {ok, Sum} =  instrument_nif:new_gauge(),
+  StartTime = erlang:system_time(nanosecond),
 
   #histogram{
     bucket_boundaries = Buckets,
     bucket_counts = list_to_tuple(Counts),
-    sum = Sum
+    sum = Sum,
+    start_time = StartTime
   }.
 
 validate_buckets([]) ->
@@ -190,13 +193,14 @@ collect(Info, Hist) ->
   #histogram{
     bucket_boundaries = Boundaries,
     bucket_counts = Counts,
-    sum = Sum
+    sum = Sum,
+    start_time = StartTime
   } = Hist,
   SumValue = instrument_nif:get_gauge(Sum),
   CountsList = [instrument_nif:get_gauge(C) || C <- tuple_to_list(Counts)],
   SampleCount = lists:foldl(fun(Count, Acc) ->  Acc + Count end, 0, CountsList),
   Buckets = cumulative_count(CountsList, Boundaries, 0.0, []),
-  
+
   %% Returns a complete histogram collection with all required fields for export.
   %% This format is compatible with Prometheus and OpenTelemetry metric exporters.
   #{name => Name,
@@ -204,5 +208,6 @@ collect(Info, Hist) ->
     type => histogram,
     count => SampleCount,
     sum => SumValue,
-    buckets => Buckets}.
+    buckets => Buckets,
+    start_time => StartTime}.
     
