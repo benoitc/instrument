@@ -279,12 +279,23 @@ pool_acquire_span(PoolName, System) ->
     Span.
 
 %% @doc Records pool resource release and ends the pool span.
-%% When called with a span record, adds release event and ends the span.
+%% When called with a span record, adds release event to the pool span and ends it.
 %% When called with just a pool name (legacy), adds release event to current span.
 -spec pool_release_span(binary() | #span{}) -> ok.
-pool_release_span(PoolSpan) when is_record(PoolSpan, span) ->
-    instrument_tracer:add_event(<<"pool.release">>, #{}),
-    instrument_tracer:end_span(PoolSpan);
+pool_release_span(#span{events = Events, is_recording = IsRecording} = PoolSpan) ->
+    %% Add event directly to the span record (avoids context manipulation)
+    UpdatedSpan = case IsRecording of
+        true ->
+            Event = #span_event{
+                name = <<"pool.release">>,
+                timestamp = erlang:monotonic_time(nanosecond),
+                attributes = #{}
+            },
+            PoolSpan#span{events = Events ++ [Event]};
+        false ->
+            PoolSpan
+    end,
+    instrument_tracer:end_span(UpdatedSpan);
 pool_release_span(PoolName) when is_binary(PoolName) ->
     %% Legacy: just add event if only name provided
     instrument_tracer:add_event(<<"pool.release">>, #{
@@ -490,14 +501,28 @@ format_trace_comment_from_ctx(#span_ctx{trace_id = TraceId, span_id = SpanId, tr
 
     IncludeSpanId = maps:get(include_span_id, Opts, false),
     IncludeSampled = maps:get(include_sampled, Opts, false),
+    Format = maps:get(format, Opts, sql),
 
-    Parts = [<<"traceparent='", Traceparent/binary, "'">>],
+    %% For URL format, use key=value without quotes (W3C style)
+    %% For SQL/custom formats, use key='value' with quotes
+    {TraceparentPart, SpanIdPart, SampledPart} = case Format of
+        url ->
+            {<<"traceparent=", Traceparent/binary>>,
+             <<"spanid=", SpanIdHex/binary>>,
+             <<"sampled=", Sampled/binary>>};
+        _ ->
+            {<<"traceparent='", Traceparent/binary, "'">>,
+             <<"spanid='", SpanIdHex/binary, "'">>,
+             <<"sampled='", Sampled/binary, "'">>}
+    end,
+
+    Parts = [TraceparentPart],
     Parts2 = case IncludeSpanId of
-        true -> Parts ++ [<<"spanid='", SpanIdHex/binary, "'">>];
+        true -> Parts ++ [SpanIdPart];
         false -> Parts
     end,
     Parts3 = case IncludeSampled of
-        true -> Parts2 ++ [<<"sampled='", Sampled/binary, "'">>];
+        true -> Parts2 ++ [SampledPart];
         false -> Parts2
     end,
 

@@ -161,6 +161,7 @@ shutdown() ->
 -spec shutdown(#state{}) -> ok.
 shutdown(#state{exporter = Exporter, exporter_state = ExporterState}) ->
   catch shutdown_exporter(Exporter, ExporterState),
+  persistent_term:erase(?STATE_KEY),
   ok.
 
 %% @doc Forces a flush. Delegates to exporter if configured.
@@ -309,17 +310,24 @@ init_exporter(Config) ->
 -spec export_span(#span{}, #state{}) -> ok.
 export_span(_Span, #state{exporter = undefined}) ->
   ok;
-export_span(Span, #state{exporter = Exporter, exporter_state = ExporterState}) ->
-  try
-    Exporter:export([Span], ExporterState)
+export_span(Span, #state{exporter = Exporter, exporter_state = ExporterState} = State) ->
+  NewExporterState = try
+    case Exporter:export([Span], ExporterState) of
+      {ok, NewState} -> NewState;
+      {error, _Reason, NewState} -> NewState;
+      _ -> ExporterState
+    end
   catch
     Class:Reason:Stacktrace ->
       logger:warning("Tail sampler export to ~p failed: ~p:~p",
                     [Exporter, Class, Reason],
                     #{error_logger => #{tag => warning_msg},
                       mfa => {Exporter, export, 2},
-                      stacktrace => Stacktrace})
+                      stacktrace => Stacktrace}),
+      ExporterState
   end,
+  %% Update persistent state with new exporter state
+  persistent_term:put(?STATE_KEY, State#state{exporter_state = NewExporterState}),
   ok.
 
 %% @private Shutdown exporter.
