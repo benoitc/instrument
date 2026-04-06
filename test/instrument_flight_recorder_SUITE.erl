@@ -292,7 +292,7 @@ trace_propagation(_Config) ->
     TraceIdBin = instrument_id:hex_to_trace_id(TraceIdHex),
 
     %% Spawn process that sends a message (set_on_spawn should propagate tracing)
-    Pid = spawn(fun() ->
+    ChildPid = spawn(fun() ->
       %% Process should be traced via set_on_spawn
       %% Send a message to trigger trace event
       Parent ! {child_ready, self()}
@@ -300,22 +300,29 @@ trace_propagation(_Config) ->
 
     %% Wait for child message
     receive
-      {child_ready, ChildPid} ->
-        ct:pal("Received child ready from ~p", [ChildPid]),
-        true = ChildPid =:= Pid
+      {child_ready, ReceivedPid} ->
+        ct:pal("Received child ready from ~p", [ReceivedPid]),
+        true = ReceivedPid =:= ChildPid
     after 1000 ->
       ct:fail(timeout)
     end,
 
-    %% Give trace events time to be processed
-    timer:sleep(50),
+    %% Give trace events time to be processed (flush interval is 50ms)
+    timer:sleep(100),
 
     %% Check that events from child process were captured
     Events = instrument_flight_recorder:get_trace(TraceIdBin),
     ct:pal("Trace events: ~p", [Events]),
 
-    %% Verify we have events (send from child, receive by parent)
-    true = length(Events) >= 1
+    %% Verify we have events and specifically that child's send was captured
+    %% Event format: {Timestamp, {send, SenderPid, Msg, ReceiverPid}}
+    ChildSendEvents = [E || {_, E} <- Events,
+                            is_tuple(E),
+                            tuple_size(E) >= 2,
+                            element(1, E) =:= send,
+                            element(2, E) =:= ChildPid],
+    ct:pal("Child send events: ~p", [ChildSendEvents]),
+    true = length(ChildSendEvents) >= 1
   end),
   ok.
 
@@ -517,10 +524,11 @@ tracer_bootstrap_filtered(_Config) ->
   ok = instrument_flight_recorder:enable(),
   instrument_flight_recorder:clear(),
 
-  TraceId = crypto:strong_rand_bytes(16),
+  %% Start span and spawn child, capturing the actual trace ID
+  TraceIdBin = instrument_tracer:with_span(<<"parent">>, fun() ->
+    TraceIdHex = instrument_tracer:trace_id(),
+    TraceId = instrument_id:hex_to_trace_id(TraceIdHex),
 
-  %% Start span and spawn child
-  instrument_tracer:with_span(<<"parent">>, #{trace_id => TraceId}, fun() ->
     %% Spawn child - this triggers tracer bootstrap message
     Child = spawn(fun() ->
       %% Child sends a normal message to itself
@@ -529,12 +537,16 @@ tracer_bootstrap_filtered(_Config) ->
       timer:sleep(10)
     end),
     timer:sleep(100),
-    exit(Child, kill)
+    exit(Child, kill),
+    TraceId
   end),
 
   timer:sleep(100),
-  Events = instrument_flight_recorder:get_trace(TraceId),
+  Events = instrument_flight_recorder:get_trace(TraceIdBin),
   ct:pal("Events (should not contain tracer bootstrap): ~p", [Events]),
+
+  %% Verify we actually captured some events (sanity check)
+  true = length(Events) > 0,
 
   %% Verify no tracer bootstrap messages in trace
   %% Pattern: {'receive', Pid, {Ref, {tracer, ...}}}

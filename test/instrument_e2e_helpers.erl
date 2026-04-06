@@ -18,15 +18,22 @@
   wait_for_prometheus_target/2,
   query_prometheus/2,
   query_jaeger_traces/2,
+  wait_for_jaeger_span/3,
   start_metrics_server/1,
   stop_metrics_server/1
 ]).
 
-%% @doc Checks if Docker is available on the system.
+%% @doc Checks if Docker is available and the daemon is running.
 -spec docker_available() -> boolean().
 docker_available() ->
+  %% First check if docker command exists
   case os:cmd("docker --version 2>&1") of
-    "Docker version" ++ _ -> true;
+    "Docker version" ++ _ ->
+      %% Then check if daemon is running by pinging it
+      case os:cmd("docker info >/dev/null 2>&1 && echo ok") of
+        "ok\n" -> true;
+        _ -> false
+      end;
     _ -> false
   end.
 
@@ -65,10 +72,7 @@ start_prometheus(Name, ScrapePort) ->
         "--config.file=/etc/prometheus/prometheus.yml "
         "--web.listen-address=0.0.0.0:9090 2>&1", [Name, TmpDir, HostFlag]),
       Result = os:cmd(lists:flatten(Cmd)),
-      case string:find(Result, "Error") of
-        nomatch -> {ok, Name};
-        _ -> {error, Result}
-      end;
+      parse_docker_result(Result, Name);
     {error, Reason} ->
       {error, Reason}
   end.
@@ -82,9 +86,22 @@ start_jaeger(Name) ->
     "-p 4318:4318 "
     "jaegertracing/all-in-one:latest 2>&1", [Name]),
   Result = os:cmd(lists:flatten(Cmd)),
-  case string:find(Result, "Error") of
-    nomatch -> {ok, Name};
-    _ -> {error, Result}
+  parse_docker_result(Result, Name).
+
+%% @doc Parse docker run result and return appropriate error.
+-spec parse_docker_result(string(), string()) -> {ok, string()} | {error, term()}.
+parse_docker_result(Result, Name) ->
+  case string:find(Result, "port is already allocated") of
+    nomatch ->
+      case string:find(Result, "address already in use") of
+        nomatch ->
+          case string:find(Result, "Error") of
+            nomatch -> {ok, Name};
+            _ -> {error, Result}
+          end;
+        _ -> {error, port_in_use}
+      end;
+    _ -> {error, port_in_use}
   end.
 
 %% @doc Stops and removes a Docker container.
@@ -222,6 +239,68 @@ query_jaeger_traces(BaseUrl, ServiceName, Retries) ->
       ct:pal("Jaeger query exception: ~p, retrying (~p left)", [Err, Retries - 1]),
       timer:sleep(1000),
       query_jaeger_traces(BaseUrl, ServiceName, Retries - 1)
+  end.
+
+%% @doc Waits for a specific span to appear in Jaeger, with retry logic.
+-spec wait_for_jaeger_span(binary(), binary(), binary()) -> {ok, map()} | {error, not_found}.
+wait_for_jaeger_span(BaseUrl, ServiceName, SpanName) ->
+  wait_for_jaeger_span(BaseUrl, ServiceName, SpanName, 15).
+
+-spec wait_for_jaeger_span(binary(), binary(), binary(), non_neg_integer()) -> {ok, map()} | {error, not_found}.
+wait_for_jaeger_span(_BaseUrl, _ServiceName, SpanName, 0) ->
+  ct:pal("Jaeger span ~s: exhausted retries", [SpanName]),
+  {error, not_found};
+wait_for_jaeger_span(BaseUrl, ServiceName, SpanName, Retries) ->
+  Url = <<BaseUrl/binary, "/api/traces?service=", ServiceName/binary, "&limit=100">>,
+  try
+    case hackney:request(get, Url, [], <<>>, [with_body, {pool, false}]) of
+      {ok, 200, _, Body} ->
+        Result = json:decode(Body),
+        case find_span_in_traces(Result, SpanName) of
+          {ok, Span} ->
+            ct:pal("Found span ~s", [SpanName]),
+            {ok, Span};
+          not_found ->
+            ct:pal("Span ~s not found, retrying (~p left)", [SpanName, Retries - 1]),
+            timer:sleep(1000),
+            wait_for_jaeger_span(BaseUrl, ServiceName, SpanName, Retries - 1)
+        end;
+      {ok, Status, _, _} ->
+        ct:pal("Jaeger HTTP error ~p, retrying (~p left)", [Status, Retries - 1]),
+        timer:sleep(1000),
+        wait_for_jaeger_span(BaseUrl, ServiceName, SpanName, Retries - 1);
+      {error, Reason} ->
+        ct:pal("Jaeger query error: ~p, retrying (~p left)", [Reason, Retries - 1]),
+        timer:sleep(1000),
+        wait_for_jaeger_span(BaseUrl, ServiceName, SpanName, Retries - 1)
+    end
+  catch
+    _:Err ->
+      ct:pal("Jaeger query exception: ~p, retrying (~p left)", [Err, Retries - 1]),
+      timer:sleep(1000),
+      wait_for_jaeger_span(BaseUrl, ServiceName, SpanName, Retries - 1)
+  end.
+
+find_span_in_traces(#{<<"data">> := Traces}, SpanName) ->
+  find_span_in_traces_list(Traces, SpanName);
+find_span_in_traces(_, _SpanName) ->
+  not_found.
+
+find_span_in_traces_list([], _SpanName) ->
+  not_found;
+find_span_in_traces_list([Trace | Rest], SpanName) ->
+  Spans = maps:get(<<"spans">>, Trace, []),
+  case find_span_by_name(Spans, SpanName) of
+    {ok, Span} -> {ok, Span};
+    not_found -> find_span_in_traces_list(Rest, SpanName)
+  end.
+
+find_span_by_name([], _SpanName) ->
+  not_found;
+find_span_by_name([Span | Rest], SpanName) ->
+  case maps:get(<<"operationName">>, Span, <<>>) of
+    SpanName -> {ok, Span};
+    _ -> find_span_by_name(Rest, SpanName)
   end.
 
 %% @doc Starts a simple HTTP server exposing /metrics endpoint.
