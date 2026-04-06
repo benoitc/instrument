@@ -24,7 +24,11 @@
   buffer_eviction/1,
   stats_reporting/1,
   trace_propagation/1,
-  disabled_no_capture/1
+  disabled_no_capture/1,
+  %% New tests for edge cases
+  enable_idempotent/1,
+  trace_flags_cleared_after_span/1,
+  async_parent_span_traced/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -40,7 +44,11 @@ all() ->
     buffer_eviction,
     stats_reporting,
     trace_propagation,
-    disabled_no_capture
+    disabled_no_capture,
+    %% Edge case tests
+    enable_idempotent,
+    trace_flags_cleared_after_span,
+    async_parent_span_traced
   ].
 
 init_per_suite(Config) ->
@@ -328,3 +336,130 @@ disabled_no_capture(_Config) ->
   %% No events should be captured when disabled
   0 = length(AllEvents),
   ok.
+
+enable_idempotent(_Config) ->
+  %% Test that enable/0 is idempotent and doesn't leak workers
+  ok = instrument_flight_recorder:enable(),
+  Stats1 = instrument_flight_recorder:stats(),
+  PoolSize1 = maps:get(pool_size, Stats1),
+  ct:pal("Pool size after first enable: ~p", [PoolSize1]),
+
+  %% Enable again - should not create more workers
+  ok = instrument_flight_recorder:enable(),
+  ok = instrument_flight_recorder:enable(),
+  ok = instrument_flight_recorder:enable(),
+
+  Stats2 = instrument_flight_recorder:stats(),
+  PoolSize2 = maps:get(pool_size, Stats2),
+  ct:pal("Pool size after multiple enables: ~p", [PoolSize2]),
+
+  %% Pool size should be the same
+  PoolSize1 = PoolSize2,
+
+  %% Check actual worker count via supervisor
+  Children = supervisor:which_children(instrument_tracer_pool),
+  ct:pal("Worker count: ~p", [length(Children)]),
+  true = length(Children) =:= PoolSize1,
+  ok.
+
+trace_flags_cleared_after_span(_Config) ->
+  %% Test that trace flags are fully cleared after span ends
+  ok = instrument_flight_recorder:enable(),
+
+  %% Start and end a span
+  instrument_tracer:with_span(<<"test_span">>, fun() ->
+    %% Verify tracing is active
+    {flags, Flags} = erlang:trace_info(self(), flags),
+    ct:pal("Flags during span: ~p", [Flags]),
+    true = lists:member(send, Flags),
+    true = lists:member('receive', Flags)
+  end),
+
+  %% After span ends, trace flags should be cleared
+  {flags, FlagsAfter} = erlang:trace_info(self(), flags),
+  ct:pal("Flags after span: ~p", [FlagsAfter]),
+
+  %% Should have no trace flags
+  false = lists:member(send, FlagsAfter),
+  false = lists:member('receive', FlagsAfter),
+  false = lists:member(set_on_spawn, FlagsAfter),
+
+  %% Tracer should be cleared too
+  {tracer, TracerAfter} = erlang:trace_info(self(), tracer),
+  ct:pal("Tracer after span: ~p", [TracerAfter]),
+  [] = TracerAfter,
+  ok.
+
+async_parent_span_traced(_Config) ->
+  %% Test that a pre-existing worker process using #{parent => SpanCtx}
+  %% gets traced and its events are captured
+  ok = instrument_flight_recorder:enable(),
+  Parent = self(),
+
+  %% Start a long-lived worker process BEFORE any span
+  Worker = spawn(fun() ->
+    worker_loop(Parent)
+  end),
+
+  %% Create a root span and get its context
+  SpanCtx = instrument_tracer:with_span(<<"root_span">>, fun() ->
+    instrument_tracer:span_ctx()
+  end),
+
+  %% Clear any events from root span
+  timer:sleep(100),
+  _ = instrument_flight_recorder:clear(),
+
+  %% Now tell worker to create a child span with the parent context
+  Worker ! {start_span, SpanCtx},
+  receive
+    {span_done, TraceIdBin} ->
+      ct:pal("Worker finished span, trace_id: ~p", [TraceIdBin]),
+
+      %% Wait for events to flush
+      timer:sleep(100),
+
+      %% Get events for this trace
+      Events = instrument_flight_recorder:get_trace(TraceIdBin),
+      ct:pal("Async parent events: ~p", [Events]),
+
+      %% Should have events from the worker process
+      %% At minimum: the worker's send and receive for the done message
+      true = length(Events) >= 1,
+
+      %% Verify worker's trace flags are cleared
+      Worker ! check_flags,
+      receive
+        {flags_result, WorkerFlags} ->
+          ct:pal("Worker flags after span: ~p", [WorkerFlags]),
+          false = lists:member(send, WorkerFlags),
+          false = lists:member('receive', WorkerFlags)
+      after 1000 ->
+        ct:fail(timeout_flags)
+      end
+  after 5000 ->
+    ct:fail(timeout_span)
+  end,
+
+  Worker ! stop,
+  ok.
+
+%% Helper for async_parent_span_traced test
+worker_loop(Parent) ->
+  receive
+    {start_span, SpanCtx} ->
+      %% Start a span with the given parent context
+      instrument_tracer:with_span(<<"worker_span">>, #{parent => SpanCtx}, fun() ->
+        TraceIdHex = instrument_tracer:trace_id(),
+        TraceIdBin = instrument_id:hex_to_trace_id(TraceIdHex),
+        %% Send a message to generate trace event
+        Parent ! {span_done, TraceIdBin}
+      end),
+      worker_loop(Parent);
+    check_flags ->
+      {flags, Flags} = erlang:trace_info(self(), flags),
+      Parent ! {flags_result, Flags},
+      worker_loop(Parent);
+    stop ->
+      ok
+  end.

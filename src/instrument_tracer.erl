@@ -222,36 +222,51 @@ start_span_impl(Name, Opts) ->
   %% Attach to context
   attach_span(FinalSpan),
 
-  %% Enable tracing if flight recorder is active (only for root spans)
-  case ParentSpanCtx of
-    undefined ->
-      case instrument_flight_recorder:is_enabled() of
-        true ->
-          %% Use trace_id as label for correlation
-          Label = binary:decode_unsigned(TraceId),
-          %% Store label in process dictionary for markers
-          put('$instrument_flight_label', Label),
-          %% Get tracer state with worker pool info
-          TracerState = instrument_flight_recorder:tracer_state(TraceId),
-          %% Enable tracing with NIF-based tracer
-          %% Catch errors if process is already being traced
-          try
-            erlang:trace(self(), true, [
-              send, 'receive', set_on_spawn,
-              {tracer, instrument_tracer_nif, TracerState}
-            ])
-          catch
-            error:badarg -> ok
-          end;
-        false ->
-          ok
+  %% Enable tracing if flight recorder is active
+  %% We need to trace if:
+  %% 1. This is a root span (no parent), OR
+  %% 2. This process doesn't already have tracing enabled (async parent case)
+  case instrument_flight_recorder:is_enabled() of
+    true ->
+      %% Check if this process already has tracing enabled
+      AlreadyTraced = get('$instrument_flight_label') =/= undefined,
+      case {ParentSpanCtx, AlreadyTraced} of
+        {_, true} ->
+          %% Already traced (either root or spawned child), just update label if needed
+          ok;
+        {undefined, false} ->
+          %% New root span - enable tracing
+          enable_flight_tracing(TraceId);
+        {#span_ctx{}, false} ->
+          %% Async parent case: pre-existing process starting span with remote parent
+          %% Enable tracing for this process too
+          enable_flight_tracing(TraceId)
       end;
-    _ ->
-      %% Child spans inherit tracing via set_on_spawn flag
+    false ->
       ok
   end,
 
   FinalSpan.
+
+%% @private Enable flight recorder tracing for this process.
+enable_flight_tracing(TraceId) ->
+  Label = binary:decode_unsigned(TraceId),
+  %% Store label in process dictionary for markers
+  put('$instrument_flight_label', Label),
+  %% Mark that THIS process enabled tracing (for cleanup in end_span)
+  put('$instrument_flight_owner', true),
+  %% Get tracer state with worker pool info
+  TracerState = instrument_flight_recorder:tracer_state(TraceId),
+  %% Enable tracing with NIF-based tracer
+  %% Catch errors if process is already being traced
+  try
+    erlang:trace(self(), true, [
+      send, 'receive', set_on_spawn,
+      {tracer, instrument_tracer_nif, TracerState}
+    ])
+  catch
+    error:badarg -> ok
+  end.
 
 %% @private Creates a minimal no-op span when tracing is disabled.
 noop_span(Name) ->
@@ -311,7 +326,7 @@ end_span(#span{is_recording = false} = Span) ->
   %% Non-recording spans still need to be detached from context
   detach_span(Span),
   ok;
-end_span(#span{ctx = #span_ctx{span_id = SpanId}, parent_ctx = ParentCtx} = OriginalSpan) ->
+end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
   %% Get the current span from context (may have been modified)
   %% Use the span_id to verify we're ending the right span
   SpanToEnd = case current_span() of
@@ -334,13 +349,14 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}, parent_ctx = ParentCtx} = Orig
   FinalSpan = SpanWithEndTime#span{is_recording = false},
   %% Export the span
   export_span(FinalSpan),
-  %% Disable tracing if this is root span
-  case ParentCtx of
-    undefined ->
+  %% Disable tracing if this process owns the trace (enabled it)
+  %% This handles both root spans and async parent spans
+  case erase('$instrument_flight_owner') of
+    true ->
       %% Clear label from process dictionary
       erase('$instrument_flight_label'),
-      %% Disable tracing for this process
-      catch erlang:trace(self(), false, [send, 'receive']);
+      %% Fully disable tracing for this process (all flags + tracer)
+      catch erlang:trace(self(), false, [send, 'receive', set_on_spawn, set_on_link]);
     _ ->
       ok
   end,

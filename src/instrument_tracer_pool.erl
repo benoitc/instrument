@@ -42,17 +42,26 @@ start_link() ->
   supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 %% @doc Starts all workers in the pool.
+%% Idempotent - does nothing if pool is already running.
 -spec start_pool() -> ok.
 start_pool() ->
-  PoolSize = pool_size(),
-  WorkersList = lists:map(fun(Index) ->
-    {ok, Pid} = supervisor:start_child(?SERVER, [Index]),
-    {Index, Pid}
-  end, lists:seq(0, PoolSize - 1)),
-  Workers = maps:from_list(WorkersList),
-  persistent_term:put(?POOL_SIZE_KEY, PoolSize),
-  persistent_term:put(?WORKERS_KEY, Workers),
-  ok.
+  %% Check if pool is already running
+  case persistent_term:get(?POOL_SIZE_KEY, 0) of
+    0 ->
+      %% Pool not running, start it
+      PoolSize = pool_size(),
+      WorkersList = lists:map(fun(Index) ->
+        {ok, Pid} = supervisor:start_child(?SERVER, [Index]),
+        {Index, Pid}
+      end, lists:seq(0, PoolSize - 1)),
+      Workers = maps:from_list(WorkersList),
+      persistent_term:put(?POOL_SIZE_KEY, PoolSize),
+      persistent_term:put(?WORKERS_KEY, Workers),
+      ok;
+    _ ->
+      %% Pool already running
+      ok
+  end.
 
 %% @doc Stops all workers in the pool.
 -spec stop_pool() -> ok.
