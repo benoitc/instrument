@@ -97,9 +97,57 @@ Despite this, instrument achieves ~400K spans/second for simple spans, which is 
 
 The logger integration adds minimal overhead. When trace context enrichment is enabled, logs inside spans are actually slightly faster due to context caching. The `instrument_logger:emit` function is slower because it creates a full OTel log record structure.
 
+### Client Tracing Strategies
+
+Comparing different approaches to client tracing.
+
+| Strategy | Throughput | Latency | Notes |
+|----------|------------|---------|-------|
+| No tracing (baseline) | 467M ops/sec | 0.002 us/op | Reference |
+| Manual `with_span` | 168K ops/sec | 5.97 us/op | Direct tracer use |
+| `instrument_client:with_span` | 163K ops/sec | 6.15 us/op | Helper overhead ~0.2 us |
+| Full options | 136K ops/sec | 7.35 us/op | With target, statement, attrs |
+| With sanitization | 75K ops/sec | 13.35 us/op | Regex-based sanitization |
+
+### Sanitization Performance
+
+| Strategy | Throughput | Latency | Notes |
+|----------|------------|---------|-------|
+| No sanitization | 521M ops/sec | 0.002 us/op | Reference |
+| Default (short SQL) | 173K ops/sec | 5.78 us/op | ~60 chars |
+| Default (long SQL) | 158K ops/sec | 6.31 us/op | ~200 chars |
+| Preserve patterns | 154K ops/sec | 6.50 us/op | Keep $1, $2 placeholders |
+| URL path sanitize | 436K ops/sec | 2.29 us/op | Simple pattern match |
+
+### Sampling Strategies
+
+| Strategy | Throughput | Latency | Notes |
+|----------|------------|---------|-------|
+| always_on (100%) | 192K ops/sec | 5.20 us/op | All spans recorded |
+| always_off (0%) | 2.0M ops/sec | 0.50 us/op | Dropped spans are cheap |
+| probability (50%) | 259K ops/sec | 3.87 us/op | Half sampled |
+| probability (10%) | 721K ops/sec | 1.39 us/op | Low sampling |
+| probability (1%) | 1.5M ops/sec | 0.67 us/op | Very low sampling |
+| attribute (no rules) | 733K ops/sec | 1.37 us/op | Default ratio only |
+| attribute (1 rule) | 252K ops/sec | 3.96 us/op | Single rule match |
+| attribute (7 rules) | 1.3M ops/sec | 0.75 us/op | Multiple rules, early exit |
+
+### Trace Context Injection
+
+| Strategy | Throughput | Latency | Notes |
+|----------|------------|---------|-------|
+| No injection | 449M ops/sec | 0.002 us/op | Reference |
+| SQL comment format | 2.4M ops/sec | 0.41 us/op | `/*traceparent=...*/` |
+| URL param format | 1.2M ops/sec | 0.86 us/op | `?traceparent=...` |
+| Custom format | 2.2M ops/sec | 0.45 us/op | User-defined delimiters |
+| format_trace_comment/0 | 2.7M ops/sec | 0.38 us/op | Format only, no append |
+
 ## Optimization Tips
 
 1. **Prefer counters over histograms** when you only need counts
 2. **Batch span operations** when possible rather than creating many small spans
 3. **Use sampling** in production to reduce tracing overhead
 4. **Pre-create instruments** at application startup rather than on-demand
+5. **Use attribute-based sampling** for fine-grained control with minimal overhead
+6. **Sanitization adds ~6-7 us** - consider if it's necessary for your use case
+7. **Dropped spans are 10x cheaper** than recorded spans - sampling helps significantly
