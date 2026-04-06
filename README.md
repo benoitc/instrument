@@ -28,6 +28,7 @@ Tested with:
 - **Labeled Metrics**: Vector metrics with dimension labels (attributes)
 - **Span Attributes**: Indexable metadata on spans for filtering and querying
 - **Export Options**: OTLP, Prometheus, Console exporters
+- **Test Framework**: Built-in collectors and assertions for testing instrumented code
 - **No External Dependencies**: Pure Erlang/OTP implementation
 
 ## Installation
@@ -246,7 +247,70 @@ instrument_tracer:with_span(<<"my_operation">>, fun() ->
 end).
 ```
 
+## Testing Instrumentation
+
+The `instrument_test` module provides collectors and assertions for testing instrumented code:
+
+```erlang
+-module(my_module_test).
+-include_lib("eunit/include/eunit.hrl").
+
+my_test_() ->
+    {setup,
+        fun() -> instrument_test:setup() end,
+        fun(_) -> instrument_test:cleanup() end,
+        [fun test_span_creation/0]
+    }.
+
+test_span_creation() ->
+    instrument_test:reset(),
+
+    %% Call instrumented code
+    my_module:process_request(#{id => 123}),
+
+    %% Assert span was created with correct attributes
+    instrument_test:assert_span_exists(<<"process_request">>),
+    instrument_test:assert_span_attribute(<<"process_request">>, <<"request.id">>, 123),
+    instrument_test:assert_span_status(<<"process_request">>, ok).
+```
+
+Test metrics and logs:
+
+```erlang
+%% Assert counter value
+instrument_test:assert_counter(requests_total, 5.0),
+
+%% Assert gauge value
+instrument_test:assert_gauge(active_connections, 42.0),
+
+%% Assert log exists with trace context
+instrument_test:assert_log_exists(<<"Processing request">>),
+instrument_test:assert_log_trace_context(<<"Processing request">>).
+```
+
+See the [Testing Instrumentation Guide](guides/testing_instrumentation.md) for details.
+
 ## Documentation
+
+### Erlang Observability Handbook
+
+A step-by-step guide to instrumenting Erlang applications:
+
+- [Introduction](book/00_introduction.md)
+- [Why Observability Matters](book/01_why_observability.md)
+- [Your First Metrics](book/02_first_metrics.md)
+- [Adding Dimensions with Labels](book/03_labels.md)
+- [Understanding Traces](book/04_understanding_traces.md)
+- [Building Effective Spans](book/05_effective_spans.md)
+- [Connecting Services](book/06_connecting_services.md)
+- [Logs That Tell the Story](book/07_logs.md)
+- [Getting Data Out](book/08_exporters.md)
+- [Sampling for Scale](book/09_sampling.md)
+- [Complete Example](book/10_complete_example.md)
+- [Quick Reference](book/appendix_a_quick_reference.md)
+- [Troubleshooting](book/appendix_b_troubleshooting.md)
+
+### Guides
 
 - [Getting Started Guide](guides/getting_started.md)
 - [Instrumentation Guide](guides/instrumentation_guide.md)
@@ -254,6 +318,15 @@ end).
 - [Sampling and Processing Guide](guides/sampling_and_processing.md)
 - [Exporters Guide](guides/exporters.md)
 - [Features Reference](guides/features.md)
+
+### Reference
+
+- [Metrics Reference](guides/metrics_reference.md)
+- [Tracing Reference](guides/tracing_reference.md)
+- [Semantic Conventions](guides/semantic_conventions.md)
+- [Testing Instrumentation](guides/testing_instrumentation.md)
+- [Production Operations](guides/production_operations.md)
+- [Migration Guide](guides/migration.md)
 
 ## Modules
 
@@ -265,6 +338,7 @@ end).
 | `instrument_context` | Context management |
 | `instrument_propagation` | Cross-process/service propagation |
 | `instrument_prometheus` | Prometheus export |
+| `instrument_test` | Test collectors and assertions |
 
 ## Configuration
 
