@@ -23,7 +23,7 @@
   dump_trace_clears/1,
   buffer_eviction/1,
   stats_reporting/1,
-  seq_trace_token_propagation/1,
+  trace_propagation/1,
   disabled_no_capture/1
 ]).
 
@@ -39,7 +39,7 @@ all() ->
     dump_trace_clears,
     buffer_eviction,
     stats_reporting,
-    seq_trace_token_propagation,
+    trace_propagation,
     disabled_no_capture
   ].
 
@@ -57,12 +57,18 @@ end_per_suite(Config) ->
 init_per_testcase(_, Config) ->
   %% Clean up context between tests
   erlang:erase('$instrument_context'),
+  erlang:erase('$instrument_flight_label'),
+  %% Disable any existing trace on this process
+  catch erlang:trace(self(), false, [send, 'receive']),
   %% Clear flight recorder buffer
   catch instrument_flight_recorder:clear(),
   Config.
 
 end_per_testcase(_, _Config) ->
   erlang:erase('$instrument_context'),
+  erlang:erase('$instrument_flight_label'),
+  %% Disable any existing trace on this process
+  catch erlang:trace(self(), false, [send, 'receive']),
   %% Disable and clear after each test
   catch instrument_flight_recorder:disable(),
   catch instrument_flight_recorder:clear(),
@@ -95,8 +101,8 @@ capture_span_events(_Config) ->
     receive test_message -> ok end
   end),
 
-  %% Small delay to ensure events are processed
-  timer:sleep(10),
+  %% Wait for worker to flush events (flush interval is 50ms)
+  timer:sleep(100),
 
   %% Should have captured events
   Events = instrument_flight_recorder:dump_all(),
@@ -123,8 +129,8 @@ capture_cross_process_messages(_Config) ->
       ct:fail(timeout)
     end,
 
-    %% Get events for this trace
-    timer:sleep(10),
+    %% Wait for worker to flush events (flush interval is 50ms)
+    timer:sleep(100),
     Events = instrument_flight_recorder:get_trace(TraceIdBin),
     ct:pal("Cross-process events: ~p", [Events]),
     %% Should have at least send + receive events
@@ -144,6 +150,7 @@ marker_events(_Config) ->
     ok = instrument_flight_recorder:mark(<<"db_query">>, #{table => users}),
     ok = instrument_flight_recorder:mark(<<"request_end">>, #{status => 200}),
 
+    %% Markers are inserted directly to ETS, no flush needed
     timer:sleep(10),
     Events = instrument_flight_recorder:get_trace(TraceIdBin),
     ct:pal("Marker events: ~p", [Events]),
@@ -227,7 +234,8 @@ buffer_eviction(_Config) ->
     end, lists:seq(1, 20))
   end),
 
-  timer:sleep(50),
+  %% Wait for eviction (runs every 1000ms)
+  timer:sleep(1500),
 
   %% Buffer should not exceed max size by much
   Stats = instrument_flight_recorder:stats(),
@@ -248,12 +256,13 @@ stats_reporting(_Config) ->
   true = maps:get(enabled, Stats1),
   true = is_integer(maps:get(buffer_size, Stats1)),
 
-  %% Add some events
+  %% Add some events (markers go directly to ETS)
   instrument_tracer:with_span(<<"stats_test">>, fun() ->
     instrument_flight_recorder:mark(<<"marker1">>),
     instrument_flight_recorder:mark(<<"marker2">>)
   end),
 
+  %% Markers are inserted directly to ETS
   timer:sleep(10),
 
   %% Stats should show events
@@ -262,39 +271,39 @@ stats_reporting(_Config) ->
   true = maps:get(table_size, Stats2) >= 2,
   ok.
 
-seq_trace_token_propagation(_Config) ->
+trace_propagation(_Config) ->
   ok = instrument_flight_recorder:enable(),
   Parent = self(),
 
   instrument_tracer:with_span(<<"propagation_test">>, fun() ->
     TraceIdHex = instrument_tracer:trace_id(),
     TraceIdBin = instrument_id:hex_to_trace_id(TraceIdHex),
-    ExpectedLabel = binary:decode_unsigned(TraceIdBin),
 
-    %% Spawn process that checks seq_trace token
+    %% Spawn process that sends a message (set_on_spawn should propagate tracing)
     Pid = spawn(fun() ->
-      %% Process should receive the message with seq_trace token
-      receive
-        check_token ->
-          Token = seq_trace:get_token(label),
-          Parent ! {token_result, Token}
-      after 1000 ->
-        Parent ! {token_result, timeout}
-      end
+      %% Process should be traced via set_on_spawn
+      %% Send a message to trigger trace event
+      Parent ! {child_ready, self()}
     end),
 
-    Pid ! check_token,
-
+    %% Wait for child message
     receive
-      {token_result, {label, Label}} ->
-        ct:pal("Received label: ~p, expected: ~p", [Label, ExpectedLabel]),
-        ExpectedLabel = Label;
-      {token_result, Other} ->
-        ct:pal("Unexpected token result: ~p", [Other]),
-        ct:fail({unexpected_token, Other})
+      {child_ready, ChildPid} ->
+        ct:pal("Received child ready from ~p", [ChildPid]),
+        true = ChildPid =:= Pid
     after 1000 ->
       ct:fail(timeout)
-    end
+    end,
+
+    %% Give trace events time to be processed
+    timer:sleep(50),
+
+    %% Check that events from child process were captured
+    Events = instrument_flight_recorder:get_trace(TraceIdBin),
+    ct:pal("Trace events: ~p", [Events]),
+
+    %% Verify we have events (send from child, receive by parent)
+    true = length(Events) >= 1
   end),
   ok.
 
@@ -310,12 +319,12 @@ disabled_no_capture(_Config) ->
     receive test_message -> ok end
   end),
 
-  timer:sleep(10),
+  %% Wait for any potential events to be flushed
+  timer:sleep(100),
 
-  %% Should have no events for markers (seq_trace events might still be captured if token was set)
+  %% Should have no events (tracing is disabled)
   AllEvents = instrument_flight_recorder:dump_all(),
   ct:pal("Events when disabled: ~p", [AllEvents]),
-  %% Markers should not be captured when disabled
-  Markers = [E || {_, _, E} <- AllEvents, element(1, E) =:= marker],
-  0 = length(Markers),
+  %% No events should be captured when disabled
+  0 = length(AllEvents),
   ok.

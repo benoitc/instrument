@@ -222,22 +222,32 @@ start_span_impl(Name, Opts) ->
   %% Attach to context
   attach_span(FinalSpan),
 
-  %% Enable seq_trace if flight recorder is active (only for root spans)
+  %% Enable tracing if flight recorder is active (only for root spans)
   case ParentSpanCtx of
     undefined ->
       case instrument_flight_recorder:is_enabled() of
         true ->
-          %% Use trace_id as label (convert to integer for seq_trace)
+          %% Use trace_id as label for correlation
           Label = binary:decode_unsigned(TraceId),
-          seq_trace:set_token(label, Label),
-          seq_trace:set_token(send, true),
-          seq_trace:set_token('receive', true),
-          seq_trace:set_token(timestamp, true);
+          %% Store label in process dictionary for markers
+          put('$instrument_flight_label', Label),
+          %% Get tracer state with worker pool info
+          TracerState = instrument_flight_recorder:tracer_state(TraceId),
+          %% Enable tracing with NIF-based tracer
+          %% Catch errors if process is already being traced
+          try
+            erlang:trace(self(), true, [
+              send, 'receive', set_on_spawn,
+              {tracer, instrument_tracer_nif, TracerState}
+            ])
+          catch
+            error:badarg -> ok
+          end;
         false ->
           ok
       end;
     _ ->
-      %% Child spans inherit the seq_trace token automatically
+      %% Child spans inherit tracing via set_on_spawn flag
       ok
   end,
 
@@ -324,10 +334,13 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}, parent_ctx = ParentCtx} = Orig
   FinalSpan = SpanWithEndTime#span{is_recording = false},
   %% Export the span
   export_span(FinalSpan),
-  %% Clear seq_trace token if this is root span
+  %% Disable tracing if this is root span
   case ParentCtx of
     undefined ->
-      seq_trace:reset_trace();
+      %% Clear label from process dictionary
+      erase('$instrument_flight_label'),
+      %% Disable tracing for this process
+      catch erlang:trace(self(), false, [send, 'receive']);
     _ ->
       ok
   end,
@@ -531,11 +544,6 @@ attach_span(Span) ->
   %% The tracer manages its own span stack via parent_ctx field.
   instrument_context:set_current(NewCtx2).
 
-detach_span(undefined) ->
-  %% No span to detach, but still clean up span_ctx if present
-  Ctx = instrument_context:current(),
-  NewCtx = instrument_context:remove_value(Ctx, span_ctx),
-  instrument_context:set_current(NewCtx);
 detach_span(#span{parent_ctx = undefined}) ->
   Ctx = instrument_context:current(),
   NewCtx = instrument_context:remove_value(Ctx, ?SPAN_KEY),

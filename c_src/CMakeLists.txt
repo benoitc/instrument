@@ -71,13 +71,35 @@ set_target_properties(instrument_nif PROPERTIES
     OUTPUT_NAME "instrument_nif"
 )
 
+# Tracer NIF library (erl_tracer behavior)
+add_library(instrument_tracer_nif MODULE
+    instrument_tracer_nif.c
+)
+
+# Set output name
+set_target_properties(instrument_tracer_nif PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "instrument_tracer_nif"
+)
+
 # Include directories
 target_include_directories(instrument_nif PRIVATE
     ${ERLANG_ERTS_INCLUDE_PATH}
 )
 
+target_include_directories(instrument_tracer_nif PRIVATE
+    ${ERLANG_ERTS_INCLUDE_PATH}
+)
+
 # Compiler flags
 target_compile_options(instrument_nif PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -fPIC
+)
+
+target_compile_options(instrument_tracer_nif PRIVATE
     -Wall
     -Wextra
     -Wpedantic
@@ -90,14 +112,24 @@ if(APPLE)
         -undefined dynamic_lookup
         -flat_namespace
     )
+    target_link_options(instrument_tracer_nif PRIVATE
+        -undefined dynamic_lookup
+        -flat_namespace
+    )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR
        CMAKE_SYSTEM_NAME STREQUAL "NetBSD" OR
        CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
     target_link_options(instrument_nif PRIVATE
         -Wl,--export-dynamic
     )
+    target_link_options(instrument_tracer_nif PRIVATE
+        -Wl,--export-dynamic
+    )
 elseif(UNIX)
     target_link_options(instrument_nif PRIVATE
+        -Wl,--export-dynamic
+    )
+    target_link_options(instrument_tracer_nif PRIVATE
         -Wl,--export-dynamic
     )
 endif()

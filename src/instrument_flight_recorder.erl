@@ -3,13 +3,13 @@
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
 
-%% @doc Flight recorder using Erlang's seq_trace for low-overhead message tracing.
+%% @doc Flight recorder for low-overhead message tracing.
 %%
 %% This module captures message passing events at VM level with minimal overhead,
 %% correlating them with OpenTelemetry spans via trace_id labels.
 %%
-%% seq_trace tokens propagate automatically with messages between processes,
-%% allowing full message flow visibility within a trace.
+%% Uses erlang:trace with a custom erl_tracer NIF that distributes events
+%% across a pool of workers, avoiding the single-process bottleneck of seq_trace.
 %%
 %% == Example Usage ==
 %% ```
@@ -36,6 +36,7 @@
   enable/0,
   disable/0,
   is_enabled/0,
+  tracer_state/1,
   get_trace/1,
   dump_trace/1,
   dump_all/0,
@@ -60,9 +61,11 @@
 -define(BUFFER_TABLE, instrument_flight_buffer).
 -define(DEFAULT_BUFFER_SIZE, 65536).  %% 64K events
 -define(ENABLED_KEY, '$instrument_flight_recorder_enabled').
+-define(LABEL_KEY, '$instrument_flight_label').
 
 -record(state, {
-  buffer_size :: pos_integer()
+  buffer_size :: pos_integer(),
+  pool_sup :: pid() | undefined
 }).
 
 %% ============================================================================
@@ -80,13 +83,13 @@ start_link(Args) ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, Args, []).
 
 %% @doc Enables the flight recorder.
-%% Registers as seq_trace system tracer and starts capturing events.
+%% Starts the worker pool and enables tracing.
 -spec enable() -> ok.
 enable() ->
   gen_server:call(?SERVER, enable).
 
 %% @doc Disables the flight recorder.
-%% Unregisters as seq_trace system tracer. Buffer is retained.
+%% Stops the worker pool. Buffer is retained.
 -spec disable() -> ok.
 disable() ->
   gen_server:call(?SERVER, disable).
@@ -95,6 +98,12 @@ disable() ->
 -spec is_enabled() -> boolean().
 is_enabled() ->
   persistent_term:get(?ENABLED_KEY, false).
+
+%% @doc Gets the tracer state for use with erlang:trace.
+-spec tracer_state(binary()) -> map().
+tracer_state(TraceId) when is_binary(TraceId) ->
+  Label = binary:decode_unsigned(TraceId),
+  instrument_tracer_pool:get_tracer_state(Label).
 
 %% @doc Gets all events for a trace ID.
 %% Returns events as a list of {Timestamp, Event} tuples.
@@ -156,20 +165,21 @@ mark(Name, Meta) when is_binary(Name), is_map(Meta) ->
   case is_enabled() of
     false -> ok;
     true ->
-      %% Get current trace label from seq_trace token
-      Label = case seq_trace:get_token(label) of
-        {label, L} -> L;
-        [] -> 0  %% No active trace
-      end,
-      Timestamp = erlang:monotonic_time(),
-      Key = {Timestamp, erlang:unique_integer([monotonic])},
-      Event = {marker, Name, Meta},
-      try
-        ets:insert(?BUFFER_TABLE, {Key, Label, Event})
-      catch
-        error:badarg -> ok
-      end,
-      ok
+      %% Get current trace label from process dictionary
+      Label = get(?LABEL_KEY),
+      case Label of
+        undefined -> ok;
+        _ ->
+          Timestamp = erlang:monotonic_time(),
+          Key = {Timestamp, erlang:unique_integer([monotonic])},
+          Event = {marker, Name, Meta},
+          try
+            ets:insert(?BUFFER_TABLE, {Key, Label, Event})
+          catch
+            error:badarg -> ok
+          end,
+          ok
+      end
   end.
 
 %% @doc Returns statistics about the flight recorder.
@@ -198,27 +208,33 @@ init(_Args) ->
     {write_concurrency, true}
   ]),
 
+  %% Start the tracer pool supervisor
+  {ok, PoolSup} = instrument_tracer_pool:start_link(),
+
   %% Initialize state
-  State = #state{buffer_size = BufferSize},
+  State = #state{buffer_size = BufferSize, pool_sup = PoolSup},
 
   %% Enable by default for production use
   case AutoEnable of
     true ->
-      seq_trace:set_system_tracer(self()),
+      instrument_tracer_pool:start_pool(),
       persistent_term:put(?ENABLED_KEY, true);
     false ->
       persistent_term:put(?ENABLED_KEY, false)
   end,
 
+  %% Schedule periodic eviction check
+  erlang:send_after(1000, self(), check_eviction),
+
   {ok, State}.
 
 handle_call(enable, _From, State) ->
-  seq_trace:set_system_tracer(self()),
+  instrument_tracer_pool:start_pool(),
   persistent_term:put(?ENABLED_KEY, true),
   {reply, ok, State};
 
 handle_call(disable, _From, State) ->
-  seq_trace:set_system_tracer(false),
+  instrument_tracer_pool:stop_pool(),
   persistent_term:put(?ENABLED_KEY, false),
   {reply, ok, State};
 
@@ -231,7 +247,8 @@ handle_call(stats, _From, #state{buffer_size = BufferSize} = State) ->
   Stats = #{
     enabled => is_enabled(),
     buffer_size => BufferSize,
-    table_size => TableSize
+    table_size => TableSize,
+    pool_size => instrument_tracer_pool:pool_size()
   },
   {reply, Stats, State};
 
@@ -244,25 +261,24 @@ handle_call(_Request, _From, State) ->
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
-%% Receive seq_trace events with timestamp
-handle_info({seq_trace, Label, Info, Timestamp}, State) ->
-  Key = {Timestamp, erlang:unique_integer([monotonic])},
-  ets:insert(?BUFFER_TABLE, {Key, Label, Info}),
-  maybe_evict(State);
-
-%% Receive seq_trace events without timestamp
-handle_info({seq_trace, Label, Info}, State) ->
-  Timestamp = erlang:monotonic_time(),
-  Key = {Timestamp, erlang:unique_integer([monotonic])},
-  ets:insert(?BUFFER_TABLE, {Key, Label, Info}),
-  maybe_evict(State);
+%% Periodic eviction check
+handle_info(check_eviction, #state{buffer_size = Max} = State) ->
+  TableSize = try ets:info(?BUFFER_TABLE, size) catch _:_ -> 0 end,
+  case TableSize > Max of
+    true ->
+      evict_oldest(TableSize - Max);
+    false ->
+      ok
+  end,
+  erlang:send_after(1000, self(), check_eviction),
+  {noreply, State};
 
 handle_info(_Info, State) ->
   {noreply, State}.
 
 terminate(_Reason, _State) ->
-  %% Unregister as system tracer
-  catch seq_trace:set_system_tracer(false),
+  %% Stop the pool
+  catch instrument_tracer_pool:stop_pool(),
   persistent_term:put(?ENABLED_KEY, false),
   ok.
 
@@ -272,18 +288,6 @@ code_change(_OldVsn, State, _Extra) ->
 %% ============================================================================
 %% Internal Functions
 %% ============================================================================
-
-%% @private Evicts oldest entries when buffer is full.
-maybe_evict(#state{buffer_size = Max} = State) ->
-  TableSize = ets:info(?BUFFER_TABLE, size),
-  case TableSize > Max of
-    true ->
-      %% Evict oldest entries until we're back at buffer size
-      evict_oldest(TableSize - Max),
-      {noreply, State};
-    false ->
-      {noreply, State}
-  end.
 
 %% @private Evicts N oldest entries from the buffer.
 evict_oldest(0) ->
