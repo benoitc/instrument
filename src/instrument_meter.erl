@@ -265,7 +265,8 @@ collect_observable(_) ->
   ok.
 
 %% @doc Unregisters an instrument by name.
-%% This removes the instrument from persistent_term and unregisters the underlying metric.
+%% This removes the instrument from persistent_term, unregisters the underlying metric,
+%% and cleans up any associated vec metrics created for attributed operations.
 -spec unregister_instrument(binary() | atom()) -> ok | {error, not_found}.
 unregister_instrument(Name) when is_atom(Name) ->
   unregister_instrument(atom_to_binary(Name, utf8));
@@ -275,8 +276,12 @@ unregister_instrument(Name) when is_binary(Name) ->
     undefined ->
       {error, not_found};
     #otel_instrument{handle = Handle} ->
+      %% Get the internal metric name for cleanup of associated vec metrics
+      InternalName = get_internal_metric_name(Handle),
       %% Unregister underlying metric
       _ = unregister_underlying_metric(Handle),
+      %% Clean up associated vec metrics created for attributes
+      _ = unregister_associated_vec_metrics(InternalName),
       %% Remove from persistent_term
       _ = persistent_term:erase(Key),
       %% Remove from names list
@@ -285,6 +290,22 @@ unregister_instrument(Name) when is_binary(Name) ->
       persistent_term:put(otel_instruments, NewNames),
       ok
   end.
+
+%% Get the internal metric name from a handle
+get_internal_metric_name(#metric{name = MetricName}) -> MetricName;
+get_internal_metric_name({observable, #metric{name = MetricName}, _}) -> MetricName;
+get_internal_metric_name(_) -> undefined.
+
+%% Unregister all vec metrics associated with an OTel instrument
+unregister_associated_vec_metrics(undefined) -> ok;
+unregister_associated_vec_metrics(BaseName) ->
+  Key = {otel_instrument_vecs, BaseName},
+  VecNames = persistent_term:get(Key, []),
+  lists:foreach(fun(VecName) ->
+    _ = instrument:unregister(VecName)
+  end, VecNames),
+  _ = persistent_term:erase(Key),
+  ok.
 
 %% @doc Unregisters all OTel instruments.
 -spec unregister_all_instruments() -> ok.
@@ -456,22 +477,50 @@ to_label_value(V) when is_float(V) -> float_to_binary(V, [{decimals, 6}, compact
 
 %% @doc Lazily create a vec metric if not exists.
 %% The vec name includes the label names to support different attribute schemas.
+%% This function is concurrency-safe - handles race conditions gracefully.
 ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
   VecName = make_vec_name(BaseName, LabelNames),
   case instrument_registry:lookup(VecName) of
     undefined ->
-      %% Create vec metric based on type
-      case Type of
-        counter ->
-          instrument:new_counter_vec(VecName, <<>>, LabelNames);
-        gauge ->
-          instrument:new_gauge_vec(VecName, <<>>, LabelNames);
-        histogram ->
-          instrument:new_histogram_vec(VecName, <<>>, LabelNames)
-      end,
-      VecName;
+      %% Try to create vec metric - handle race condition where another process
+      %% may create it first
+      try
+        case Type of
+          counter ->
+            instrument:new_counter_vec(VecName, <<>>, LabelNames);
+          gauge ->
+            instrument:new_gauge_vec(VecName, <<>>, LabelNames);
+          histogram ->
+            instrument:new_histogram_vec(VecName, <<>>, LabelNames)
+        end,
+        %% Track this vec metric for cleanup on unregister
+        track_vec_metric(BaseName, VecName),
+        VecName
+      catch
+        error:{badmatch, {error, already_exists}} ->
+          %% Another process created it first - that's fine
+          track_vec_metric(BaseName, VecName),
+          VecName;
+        _:_ ->
+          %% Re-check if it exists now (may have been created by another process)
+          case instrument_registry:lookup(VecName) of
+            undefined -> error({failed_to_create_vec_metric, VecName});
+            _ ->
+              track_vec_metric(BaseName, VecName),
+              VecName
+          end
+      end;
     _ ->
       VecName
+  end.
+
+%% Track a vec metric associated with a base OTel instrument for cleanup
+track_vec_metric(BaseName, VecName) ->
+  Key = {otel_instrument_vecs, BaseName},
+  Current = persistent_term:get(Key, []),
+  case lists:member(VecName, Current) of
+    true -> ok;
+    false -> persistent_term:put(Key, [VecName | Current])
   end.
 
 %% Include label names in the vec metric name to distinguish different attribute schemas

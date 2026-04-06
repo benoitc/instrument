@@ -30,7 +30,9 @@
   histogram_with_attributes_test/1,
   attribute_cardinality_test/1,
   unregister_instrument_test/1,
-  unregister_all_instruments_test/1
+  unregister_all_instruments_test/1,
+  unregister_cleans_vec_metrics_test/1,
+  concurrent_attribute_operations_test/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -52,7 +54,9 @@ all() ->
     histogram_with_attributes_test,
     attribute_cardinality_test,
     unregister_instrument_test,
-    unregister_all_instruments_test
+    unregister_all_instruments_test,
+    unregister_cleans_vec_metrics_test,
+    concurrent_attribute_operations_test
   ].
 
 init_per_suite(Config) ->
@@ -359,4 +363,81 @@ unregister_all_instruments_test(_Config) ->
   undefined = instrument_meter:get_instrument(<<"bulk_gauge">>),
   undefined = instrument_meter:get_instrument(<<"bulk_histogram">>),
 
+  ok.
+
+%% Test that unregistering an instrument also cleans up associated vec metrics
+unregister_cleans_vec_metrics_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"vec_cleanup_test">>),
+  Counter = instrument_meter:create_counter(Meter, <<"cleanup_counter">>, #{}),
+
+  %% Add with attributes to create vec metrics
+  ok = instrument_meter:add(Counter, 1, #{method => <<"GET">>}),
+  ok = instrument_meter:add(Counter, 2, #{method => <<"POST">>}),
+  ok = instrument_meter:add(Counter, 3, #{method => <<"GET">>, status => 200}),
+
+  %% Verify vec metrics were created by checking registry
+  AllMetrics1 = instrument_registry:collect_all(),
+  VecMetrics1 = [M || #{name := N} = M <- AllMetrics1,
+                      is_tuple(N) andalso element(1, N) =:= otel_vec],
+  true = length(VecMetrics1) >= 1,
+
+  %% Unregister the instrument
+  ok = instrument_meter:unregister_instrument(<<"cleanup_counter">>),
+
+  %% Verify the instrument is gone
+  undefined = instrument_meter:get_instrument(<<"cleanup_counter">>),
+
+  %% Verify vec metrics were also cleaned up
+  AllMetrics2 = instrument_registry:collect_all(),
+  VecMetrics2 = [M || #{name := N} = M <- AllMetrics2,
+                      is_tuple(N) andalso element(1, N) =:= otel_vec,
+                      case N of
+                        {otel_vec, Name} -> binary:match(Name, <<"cleanup_counter">>) =/= nomatch;
+                        _ -> false
+                      end],
+  0 = length(VecMetrics2),
+
+  %% Re-create the counter and verify it starts fresh (no stale state)
+  Counter2 = instrument_meter:create_counter(Meter, <<"cleanup_counter">>, #{}),
+  ok = instrument_meter:add(Counter2, 100, #{method => <<"GET">>}),
+
+  %% Should be able to use it without issues
+  ok = instrument_meter:add(Counter2, 50, #{method => <<"GET">>}),
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"cleanup_counter">>),
+  ok.
+
+%% Test that concurrent attribute operations don't crash due to race conditions
+concurrent_attribute_operations_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"concurrent_test">>),
+  Counter = instrument_meter:create_counter(Meter, <<"race_counter">>, #{}),
+
+  Parent = self(),
+  NumProcs = 100,
+
+  %% Spawn many processes that all try to create the same attribute schema
+  Pids = [spawn_link(fun() ->
+    try
+      %% All processes use the same attribute schema to maximize race chance
+      ok = instrument_meter:add(Counter, 1, #{method => <<"GET">>, status => 200}),
+      Parent ! {self(), ok}
+    catch
+      Class:Reason ->
+        Parent ! {self(), {error, Class, Reason}}
+    end
+  end) || _ <- lists:seq(1, NumProcs)],
+
+  %% Collect results
+  Results = [receive {Pid, Result} -> Result after 5000 -> timeout end || Pid <- Pids],
+
+  %% All should succeed (no crashes from race conditions)
+  Errors = [R || R <- Results, R =/= ok],
+  case Errors of
+    [] -> ok;
+    _ -> ct:fail({concurrent_operations_failed, Errors})
+  end,
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"race_counter">>),
   ok.
