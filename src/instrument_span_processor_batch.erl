@@ -109,8 +109,6 @@ init(Config) ->
         schedule_delay = ScheduleDelay,
         export_timeout = ExportTimeout
       },
-      %% Store state for on_end callback access
-      persistent_term:put({?MODULE, state}, State),
       %% Start export timer
       TimerRef = schedule_export(ScheduleDelay),
       {ok, State#state{timer_ref = TimerRef}};
@@ -170,8 +168,6 @@ handle_call(shutdown, _From, State) ->
   NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
   %% Shutdown exporter
   catch Exporter:shutdown(NewExporterState),
-  %% Clean up persistent_term
-  persistent_term:erase({?MODULE, state}),
   {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
 
 handle_call(force_flush, _From, State) ->
@@ -248,7 +244,6 @@ terminate(_Reason, State) ->
   cancel_timer(TimerRef),
   NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
   catch Exporter:shutdown(NewExporterState),
-  persistent_term:erase({?MODULE, state}),
   ok.
 
 code_change(_OldVsn, State, _Extra) ->
