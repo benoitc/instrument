@@ -29,7 +29,9 @@
   batch_processor_config_test/1,
   otlp_endpoint_test/1,
   otlp_signal_endpoints_test/1,
-  log_level_test/1
+  log_level_test/1,
+  has_span_processor_config_test/1,
+  has_span_processor_config_app_env_test/1
 ]).
 
 all() ->
@@ -45,7 +47,9 @@ all() ->
     batch_processor_config_test,
     otlp_endpoint_test,
     otlp_signal_endpoints_test,
-    log_level_test
+    log_level_test,
+    has_span_processor_config_test,
+    has_span_processor_config_app_env_test
   ].
 
 init_per_suite(Config) ->
@@ -79,9 +83,12 @@ clear_otel_env() ->
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
     "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
     "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-    "OTEL_LOG_LEVEL"
+    "OTEL_LOG_LEVEL",
+    "OTEL_EXPORTERS"
   ],
-  lists:foreach(fun(Var) -> os:unsetenv(Var) end, EnvVars).
+  lists:foreach(fun(Var) -> os:unsetenv(Var) end, EnvVars),
+  application:unset_env(instrument, span_processor),
+  application:unset_env(instrument, span_exporter).
 
 %% ============================================================================
 %% Test Cases
@@ -211,4 +218,41 @@ log_level_test(_Config) ->
   os:putenv("OTEL_LOG_LEVEL", "warn"),
   ok = application:start(instrument),
   ?assertEqual(warning, instrument_config:get_log_level()),
+  ok.
+
+%% Test has_span_processor_config/0 returns true when batch processor env vars are set
+has_span_processor_config_test(_Config) ->
+  ok = application:stop(instrument),
+  clear_otel_env(),
+
+  %% No config - should return false
+  ok = application:start(instrument),
+  ?assertEqual(false, instrument_config:has_span_processor_config()),
+
+  %% With BSP env vars but no exporter - should return false
+  ok = application:stop(instrument),
+  os:putenv("OTEL_BSP_SCHEDULE_DELAY", "1000"),
+  ok = application:start(instrument),
+  ?assertEqual(false, instrument_config:has_span_processor_config()),
+
+  %% With BSP env vars and OTLP exporter - should return true
+  ok = application:stop(instrument),
+  os:putenv("OTEL_EXPORTERS", "otlp"),
+  os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
+  ok = application:start(instrument),
+  ?assertEqual(true, instrument_config:has_span_processor_config()),
+  ok.
+
+%% Test has_span_processor_config/0 returns true when span_processor app env is set
+has_span_processor_config_app_env_test(_Config) ->
+  ok = application:stop(instrument),
+  clear_otel_env(),
+
+  %% Set span_processor in app env with a minimal valid config
+  %% Note: We only test that has_span_processor_config returns true,
+  %% not that the processor actually initializes (that's tested elsewhere).
+  %% Set env after instrument is stopped so it won't be registered automatically.
+  application:set_env(instrument, span_processor, {instrument_span_processor_simple, #{exporter => instrument_exporter_console}}),
+  ok = application:start(instrument),
+  ?assertEqual(true, instrument_config:has_span_processor_config()),
   ok.

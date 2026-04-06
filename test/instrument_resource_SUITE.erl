@@ -28,7 +28,9 @@
   host_detector_test/1,
   custom_detector_test/1,
   detect_all_test/1,
-  set_get_default_test/1
+  set_get_default_test/1,
+  service_detector_atom_keys_test/1,
+  service_detector_precedence_test/1
 ]).
 
 all() ->
@@ -42,7 +44,9 @@ all() ->
     host_detector_test,
     custom_detector_test,
     detect_all_test,
-    set_get_default_test
+    set_get_default_test,
+    service_detector_atom_keys_test,
+    service_detector_precedence_test
   ].
 
 init_per_suite(Config) ->
@@ -215,4 +219,60 @@ set_get_default_test(_Config) ->
   Retrieved = instrument_resource:get_default(),
   Attrs = instrument_resource:get_attributes(Retrieved),
   ?assertEqual(<<"custom-default-service">>, maps:get(<<"service.name">>, Attrs)),
+  ok.
+
+%% Test that service detector converts atom keys to OTEL binary attribute names (P2 fix)
+service_detector_atom_keys_test(_Config) ->
+  %% Set app config with atom keys
+  application:set_env(instrument, resource, #{
+    service_name => <<"my-service">>,
+    service_version => <<"1.2.3">>,
+    service_namespace => <<"production">>,
+    service_instance_id => <<"instance-1">>,
+    custom_attr => <<"custom-value">>
+  }),
+
+  Resource = instrument_resource_detector:detect_service(),
+  Attrs = instrument_resource:get_attributes(Resource),
+
+  %% Verify atom keys were converted to OTEL binary keys
+  ?assertEqual(<<"my-service">>, maps:get(<<"service.name">>, Attrs)),
+  ?assertEqual(<<"1.2.3">>, maps:get(<<"service.version">>, Attrs)),
+  ?assertEqual(<<"production">>, maps:get(<<"service.namespace">>, Attrs)),
+  ?assertEqual(<<"instance-1">>, maps:get(<<"service.instance.id">>, Attrs)),
+  %% Custom attrs should also be converted to binary keys
+  ?assertEqual(<<"custom-value">>, maps:get(<<"custom_attr">>, Attrs)),
+
+  %% Verify old atom keys are NOT present
+  ?assertEqual(error, maps:find(service_name, Attrs)),
+  ?assertEqual(error, maps:find(service_version, Attrs)),
+
+  %% Clean up
+  application:unset_env(instrument, resource),
+  ok.
+
+%% Test that OTEL_SERVICE_NAME takes precedence over OTEL_RESOURCE_ATTRIBUTES (P3 fix)
+service_detector_precedence_test(_Config) ->
+  %% Stop app so we can set env vars before it reads them
+  ok = application:stop(instrument),
+
+  %% Set both env vars with conflicting service.name values
+  os:putenv("OTEL_SERVICE_NAME", "from-service-name-env"),
+  os:putenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=from-resource-attrs,other.key=other-value"),
+
+  %% Restart app to pick up env vars
+  ok = application:start(instrument),
+
+  %% Detect all resources - service detector should run after env detector
+  Resource = instrument_resource_detector:detect_all(),
+  Attrs = instrument_resource:get_attributes(Resource),
+
+  %% OTEL_SERVICE_NAME should win (service detector runs last)
+  ?assertEqual(<<"from-service-name-env">>, maps:get(<<"service.name">>, Attrs)),
+  %% Other attributes from OTEL_RESOURCE_ATTRIBUTES should still be present
+  ?assertEqual(<<"other-value">>, maps:get(<<"other.key">>, Attrs)),
+
+  %% Clean up
+  os:unsetenv("OTEL_SERVICE_NAME"),
+  os:unsetenv("OTEL_RESOURCE_ATTRIBUTES"),
   ok.

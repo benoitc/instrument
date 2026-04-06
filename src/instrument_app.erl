@@ -24,8 +24,12 @@ start(_StartType, _StartArgs) ->
     ]),
     case instrument_sup:start_link() of
         {ok, Pid} ->
-            %% Auto-register exporters and processors from config/env
-            instrument_config:auto_register_exporters(),
+            %% Only register legacy exporters if no span processor is configured
+            %% to avoid dual export (spans exported by both paths)
+            case instrument_config:has_span_processor_config() of
+                true -> ok;
+                false -> instrument_config:auto_register_exporters()
+            end,
             instrument_config:auto_register_span_processor(),
             {ok, Pid};
         Error ->

@@ -50,6 +50,7 @@
   %% Exporter controls
   auto_register_exporters/0,
   auto_register_span_processor/0,
+  has_span_processor_config/0,
   enable_exporter/1,
   disable_exporter/1,
   is_exporter_enabled/1,
@@ -243,6 +244,18 @@ auto_register_span_processor() ->
       end
   end,
   ok.
+
+%% @doc Checks if a span processor will be registered.
+%% Returns true if either span_processor app config is set, or
+%% batch processor env vars are set with an available exporter.
+-spec has_span_processor_config() -> boolean().
+has_span_processor_config() ->
+  case application:get_env(instrument, span_processor) of
+    {ok, _} -> true;
+    _ ->
+      BatchConfig = get_batch_processor_config(),
+      map_size(BatchConfig) > 0 andalso get_default_exporter() =/= undefined
+  end.
 
 %% @doc Enables a specific exporter.
 -spec enable_exporter(module()) -> ok.

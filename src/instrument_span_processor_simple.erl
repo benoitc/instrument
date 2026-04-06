@@ -108,11 +108,11 @@ shutdown() ->
   ok.
 
 %% @doc Shuts down the processor with state.
+%% Ignores the passed state and uses current state from persistent_term,
+%% as the exporter state may have been updated during span exports.
 -spec shutdown(#state{}) -> ok.
-shutdown(#state{exporter = Exporter, exporter_state = ExporterState}) ->
-  catch Exporter:shutdown(ExporterState),
-  persistent_term:erase({?MODULE, state}),
-  ok.
+shutdown(#state{}) ->
+  shutdown().
 
 %% @doc Forces a flush. No-op for simple processor since it exports immediately.
 -spec force_flush() -> ok.

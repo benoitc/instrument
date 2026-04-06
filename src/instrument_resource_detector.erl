@@ -160,14 +160,23 @@ detect_host() ->
 -spec detect_service() -> #resource{}.
 detect_service() ->
   %% Start with resource attributes from application config
+  %% Convert known atom keys to OTEL binary attribute names
   ConfigAttrs = instrument_config:get_resource_config(),
+  MappedAttrs = maps:fold(fun
+    (service_name, V, Acc) -> Acc#{<<"service.name">> => to_binary(V)};
+    (service_version, V, Acc) -> Acc#{<<"service.version">> => to_binary(V)};
+    (service_namespace, V, Acc) -> Acc#{<<"service.namespace">> => to_binary(V)};
+    (service_instance_id, V, Acc) -> Acc#{<<"service.instance.id">> => to_binary(V)};
+    (K, V, Acc) when is_atom(K) -> Acc#{atom_to_binary(K, utf8) => to_binary(V)};
+    (K, V, Acc) -> Acc#{K => to_binary(V)}
+  end, #{}, ConfigAttrs),
+
   ServiceName = instrument_config:get_service_name(),
   ServiceVersion = instrument_config:get_service_version(),
 
-  Attrs0 = maps:merge(#{}, ConfigAttrs),
   Attrs1 = case ServiceName of
-    undefined -> Attrs0;
-    Name -> Attrs0#{<<"service.name">> => Name}
+    undefined -> MappedAttrs;
+    Name -> MappedAttrs#{<<"service.name">> => Name}
   end,
   Attrs2 = case ServiceVersion of
     undefined -> Attrs1;
@@ -181,10 +190,10 @@ detect_service() ->
 
 default_detectors() ->
   [
-    {service, fun detect_service/0},
     {env, fun detect_env/0},
     {process, fun detect_process/0},
-    {host, fun detect_host/0}
+    {host, fun detect_host/0},
+    {service, fun detect_service/0}  %% Last = highest precedence (OTEL_SERVICE_NAME wins)
   ].
 
 parse_env_attributes(Value) ->
@@ -199,3 +208,10 @@ parse_env_attributes(Value) ->
         Acc
     end
   end, #{}, Pairs).
+
+to_binary(V) when is_binary(V) -> V;
+to_binary(V) when is_list(V) -> list_to_binary(V);
+to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8);
+to_binary(V) when is_integer(V) -> integer_to_binary(V);
+to_binary(V) when is_float(V) -> float_to_binary(V);
+to_binary(V) -> iolist_to_binary(io_lib:format("~p", [V])).

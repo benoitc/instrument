@@ -23,6 +23,7 @@
   processor_list_test/1,
   simple_processor_test/1,
   simple_processor_state_persistence_test/1,
+  simple_processor_shutdown_uses_current_state_test/1,
   processor_chain_test/1,
   processor_integration_test/1,
   force_flush_test/1,
@@ -54,6 +55,7 @@ all() ->
     processor_list_test,
     simple_processor_test,
     simple_processor_state_persistence_test,
+    simple_processor_shutdown_uses_current_state_test,
     processor_chain_test,
     processor_integration_test,
     force_flush_test,
@@ -228,6 +230,52 @@ simple_processor_state_persistence_test(_Config) ->
   %% Cleanup
   instrument_span_processor:unregister(instrument_span_processor_simple),
   meck:unload(state_test_exporter),
+  ok.
+
+%% Test that shutdown/1 uses current state from persistent_term, not stale passed state (P4 fix)
+simple_processor_shutdown_uses_current_state_test(_Config) ->
+  Self = self(),
+  meck:new(shutdown_state_exporter, [non_strict]),
+  meck:expect(shutdown_state_exporter, init, fun(_) -> {ok, #{count => 0, pid => Self}} end),
+  meck:expect(shutdown_state_exporter, export, fun(Spans, #{count := C, pid := Pid} = State) ->
+    NewCount = C + length(Spans),
+    Pid ! {export_count, NewCount},
+    {ok, State#{count => NewCount}}
+  end),
+  meck:expect(shutdown_state_exporter, shutdown, fun(#{count := C, pid := Pid}) ->
+    Pid ! {shutdown_with_count, C},
+    ok
+  end),
+
+  %% Register simple processor
+  ok = instrument_span_processor:register(instrument_span_processor_simple, #{
+    exporter => shutdown_state_exporter
+  }),
+
+  %% Create and export several spans to update state
+  lists:foreach(fun(I) ->
+    Name = iolist_to_binary([<<"shutdown_state_span_">>, integer_to_binary(I)]),
+    Span = instrument_tracer:start_span(Name),
+    instrument_tracer:end_span(Span)
+  end, lists:seq(1, 5)),
+
+  %% Drain export messages
+  lists:foreach(fun(_) ->
+    receive {export_count, _} -> ok after 500 -> ok end
+  end, lists:seq(1, 5)),
+
+  %% Unregister calls shutdown which should use current state from persistent_term
+  ok = instrument_span_processor:unregister(instrument_span_processor_simple),
+
+  %% Verify shutdown received the updated count (not 0 from init state)
+  receive
+    {shutdown_with_count, Count} ->
+      ?assert(Count >= 5, io_lib:format("Expected count >= 5, got ~p", [Count]))
+  after 1000 ->
+    ct:fail(shutdown_not_called)
+  end,
+
+  meck:unload(shutdown_state_exporter),
   ok.
 
 processor_chain_test(_Config) ->
