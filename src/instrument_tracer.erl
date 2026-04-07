@@ -75,6 +75,7 @@
 -define(SPAN_KEY, '$instrument_span').
 -define(SPAN_STACK_KEY, '$instrument_span_stack').
 -define(TRACER_KEY, '$instrument_tracer').
+-define(EXPORTERS_CACHE_KEY, '$instrument_exporters').
 
 -type span_opts() :: #{
   kind => client | server | producer | consumer | internal,
@@ -208,10 +209,11 @@ start_span_impl(Name, Opts) ->
   },
 
   %% Notify span processors of span start (skip for non-recording spans)
+  %% Uses inline version to avoid gen_server hop
   FinalSpan = case IsRecording of
     true ->
       try
-        instrument_span_processor:on_start(Span, ParentSpanCtx)
+        instrument_span_processor:on_start_inline(Span, ParentSpanCtx)
       catch
         _:_ -> Span
       end;
@@ -344,9 +346,15 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
   end,
   EndTime = erlang:system_time(nanosecond),
   %% Call on_end while span still shows is_recording = true
-  SpanWithEndTime = SpanToEnd#span{end_time = EndTime},
+  %% Reverse events and links (were prepended for O(1) add, now restore order)
+  SpanWithEndTime = SpanToEnd#span{
+    end_time = EndTime,
+    events = lists:reverse(SpanToEnd#span.events),
+    links = lists:reverse(SpanToEnd#span.links)
+  },
+  %% Uses inline version to avoid gen_server hop
   try
-    instrument_span_processor:on_end(SpanWithEndTime)
+    instrument_span_processor:on_end_inline(SpanWithEndTime)
   catch
     _:_ -> ok
   end,
@@ -416,7 +424,7 @@ add_event(Name, Attrs) when is_binary(Name), is_map(Attrs) ->
     attributes = Attrs
   },
   update_current_span(fun(Span) ->
-    Span#span{events = Span#span.events ++ [Event]}
+    Span#span{events = [Event | Span#span.events]}
   end).
 
 %% @doc Sets the status of the current span to ok.
@@ -471,7 +479,7 @@ add_link(#span_ctx{} = SpanCtx, Attrs) ->
     attributes = Attrs
   },
   update_current_span(fun(Span) ->
-    Span#span{links = Span#span.links ++ [Link]}
+    Span#span{links = [Link | Span#span.links]}
   end).
 
 %% @doc Updates the name of the current span.
@@ -550,6 +558,7 @@ is_sampled() ->
 -spec register_exporter(fun((span()) -> ok)) -> ok.
 register_exporter(Exporter) when is_function(Exporter, 1) ->
   ets:insert(instrument_span_exporters, {exporter, Exporter}),
+  refresh_exporter_cache(),
   ok.
 
 %% @doc Unregisters a span exporter.
@@ -557,6 +566,7 @@ register_exporter(Exporter) when is_function(Exporter, 1) ->
 -spec unregister_exporter(fun((span()) -> ok)) -> ok.
 unregister_exporter(Exporter) ->
   ets:delete_object(instrument_span_exporters, {exporter, Exporter}),
+  refresh_exporter_cache(),
   ok.
 
 %% ============================================================================
@@ -622,12 +632,8 @@ update_current_span(UpdateFun) ->
   end.
 
 export_span(Span) ->
-  %% Get exporters from ETS (thread-safe read)
-  Exporters = try
-    [E || {exporter, E} <- ets:tab2list(instrument_span_exporters)]
-  catch
-    error:badarg -> []  %% Table doesn't exist yet
-  end,
+  %% Get exporters from cache (O(1) persistent_term read)
+  Exporters = persistent_term:get(?EXPORTERS_CACHE_KEY, []),
   lists:foreach(fun(Exporter) ->
     try
       Exporter(Span)
@@ -639,6 +645,15 @@ export_span(Span) ->
                         stacktrace => Stacktrace})
     end
   end, Exporters).
+
+%% @private Refresh the exporter cache in persistent_term.
+refresh_exporter_cache() ->
+  Exporters = try
+    [E || {exporter, E} <- ets:tab2list(instrument_span_exporters)]
+  catch
+    error:badarg -> []  %% Table doesn't exist yet
+  end,
+  persistent_term:put(?EXPORTERS_CACHE_KEY, Exporters).
 
 get_exception_type(Exception) when is_atom(Exception) ->
   atom_to_binary(Exception, utf8);

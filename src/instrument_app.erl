@@ -22,6 +22,8 @@ start(_StartType, _StartArgs) ->
         {read_concurrency, true},
         {write_concurrency, true}
     ]),
+    %% Initialize exporter cache (empty list initially)
+    persistent_term:put('$instrument_exporters', []),
     case instrument_sup:start_link() of
         {ok, Pid} ->
             %% Only register legacy exporters if no span processor is configured

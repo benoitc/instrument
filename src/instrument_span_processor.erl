@@ -55,6 +55,8 @@
   list/0,
   on_start/2,
   on_end/1,
+  on_start_inline/2,
+  on_end_inline/1,
   shutdown/0,
   force_flush/0
 ]).
@@ -70,6 +72,7 @@
 ]).
 
 -define(SERVER, ?MODULE).
+-define(PROCESSORS_CACHE_KEY, '$instrument_processors').
 
 %% Behavior callbacks
 %% WARNING: on_start and on_end execute in the span processor gen_server.
@@ -118,6 +121,38 @@ on_start(Span, ParentCtx) ->
 on_end(Span) ->
   gen_server:cast(?SERVER, {on_end, Span}).
 
+%% @doc Called when a span starts - inline version without gen_server hop.
+%% Uses cached processor list from persistent_term for O(1) access.
+-spec on_start_inline(#span{}, #span_ctx{} | undefined) -> #span{}.
+on_start_inline(Span, ParentCtx) ->
+  Processors = persistent_term:get(?PROCESSORS_CACHE_KEY, []),
+  lists:foldl(
+    fun({Module, _PState}, AccSpan) ->
+      try
+        Module:on_start(AccSpan, ParentCtx)
+      catch
+        _:_ -> AccSpan
+      end
+    end,
+    Span,
+    Processors).
+
+%% @doc Called when a span ends - inline version without gen_server hop.
+%% Uses cached processor list from persistent_term for O(1) access.
+-spec on_end_inline(#span{}) -> ok.
+on_end_inline(Span) ->
+  Processors = persistent_term:get(?PROCESSORS_CACHE_KEY, []),
+  lists:foreach(
+    fun({Module, _PState}) ->
+      try
+        Module:on_end(Span)
+      catch
+        _:_ -> ok
+      end
+    end,
+    Processors),
+  ok.
+
 %% @doc Shuts down all processors.
 -spec shutdown() -> ok.
 shutdown() ->
@@ -133,6 +168,8 @@ force_flush() ->
 %% ============================================================================
 
 init([]) ->
+  %% Initialize processor cache (empty list initially)
+  persistent_term:put(?PROCESSORS_CACHE_KEY, []),
   {ok, #state{processors = []}}.
 
 handle_call({register, ProcessorModule, Config}, _From, State) ->
@@ -143,7 +180,9 @@ handle_call({register, ProcessorModule, Config}, _From, State) ->
         {ok, _Pid} ->
           %% Store with a marker that it's externally managed
           NewProcessors = [{ProcessorModule, external} | State#state.processors],
-          {reply, ok, State#state{processors = NewProcessors}};
+          NewState = State#state{processors = NewProcessors},
+          refresh_processor_cache(NewState),
+          {reply, ok, NewState};
         {error, Reason} ->
           {reply, {error, Reason}, State}
       end;
@@ -151,7 +190,9 @@ handle_call({register, ProcessorModule, Config}, _From, State) ->
       case ProcessorModule:init(Config) of
         {ok, ProcessorState} ->
           NewProcessors = [{ProcessorModule, ProcessorState} | State#state.processors],
-          {reply, ok, State#state{processors = NewProcessors}};
+          NewState = State#state{processors = NewProcessors},
+          refresh_processor_cache(NewState),
+          {reply, ok, NewState};
         {error, Reason} ->
           {reply, {error, Reason}, State}
       end
@@ -164,11 +205,15 @@ handle_call({unregister, ProcessorModule}, _From, State) ->
       catch ProcessorModule:shutdown(),
       catch stop_batch_processor(),
       NewProcessors = lists:keydelete(ProcessorModule, 1, State#state.processors),
-      {reply, ok, State#state{processors = NewProcessors}};
+      NewState = State#state{processors = NewProcessors},
+      refresh_processor_cache(NewState),
+      {reply, ok, NewState};
     {ProcessorModule, ProcessorState} ->
       catch ProcessorModule:shutdown(ProcessorState),
       NewProcessors = lists:keydelete(ProcessorModule, 1, State#state.processors),
-      {reply, ok, State#state{processors = NewProcessors}};
+      NewState = State#state{processors = NewProcessors},
+      refresh_processor_cache(NewState),
+      {reply, ok, NewState};
     false ->
       {reply, ok, State}
   end;
@@ -288,3 +333,7 @@ start_batch_processor(Config) ->
 stop_batch_processor() ->
   supervisor:terminate_child(instrument_sup, instrument_span_processor_batch),
   supervisor:delete_child(instrument_sup, instrument_span_processor_batch).
+
+%% @private Refresh the processor cache in persistent_term.
+refresh_processor_cache(#state{processors = Processors}) ->
+  persistent_term:put(?PROCESSORS_CACHE_KEY, Processors).
