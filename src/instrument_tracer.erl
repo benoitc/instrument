@@ -251,18 +251,23 @@ start_span_impl(Name, Opts) ->
 %% @private Enable flight recorder tracing for this process.
 enable_flight_tracing(TraceId) ->
   Label = binary:decode_unsigned(TraceId),
-  %% Store label in process dictionary for markers
+  %% Create a session resource - children will inherit this via set_on_spawn
+  %% and will be able to detect when the session becomes inactive
+  SessionRef = instrument_tracer_nif:create_session_resource(),
+  %% Store label and session in process dictionary
   put('$instrument_flight_label', Label),
+  put('$instrument_flight_session_ref', SessionRef),
   %% Mark that THIS process enabled tracing (for cleanup in end_span)
   put('$instrument_flight_owner', true),
-  %% Get tracer state with worker pool info
+  %% Get tracer state with worker pool info and add session_ref
   TracerState = instrument_flight_recorder:tracer_state(TraceId),
+  TracerStateWithSession = TracerState#{session_ref => SessionRef},
   %% Enable tracing with NIF-based tracer
   %% Catch errors if process is already being traced
   try
     erlang:trace(self(), true, [
       send, 'receive', set_on_spawn,
-      {tracer, instrument_tracer_nif, TracerState}
+      {tracer, instrument_tracer_nif, TracerStateWithSession}
     ])
   catch
     error:badarg -> ok
@@ -358,6 +363,12 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
     true ->
       %% Clear label from process dictionary
       erase('$instrument_flight_label'),
+      %% Deactivate session resource - children will see this on their next
+      %% trace event and return 'remove' to stop being traced
+      case erase('$instrument_flight_session_ref') of
+        undefined -> ok;
+        SessionRef -> instrument_tracer_nif:deactivate_session_resource(SessionRef)
+      end,
       %% Fully disable tracing for this process (all flags + tracer)
       catch erlang:trace(self(), false, [send, 'receive', set_on_spawn, set_on_link]);
     _ ->

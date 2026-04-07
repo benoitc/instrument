@@ -24,6 +24,12 @@
   trace/5
 ]).
 
+%% Session resource management for child process cleanup
+-export([
+  create_session_resource/0,
+  deactivate_session_resource/1
+]).
+
 %% Optional specialized enabled callbacks
 -export([
   enabled_send/3,
@@ -74,6 +80,24 @@ enabled(_TraceTag, _TracerState, _Tracee) ->
 %% Hashes the tracee pid to select a worker and forwards the event.
 -spec trace(atom(), map(), pid() | port() | undefined, term(), map()) -> ok.
 trace(_TraceTag, _TracerState, _Tracee, _TraceTerm, _Opts) ->
+  erlang:nif_error({error, not_loaded}).
+
+%% ============================================================================
+%% Session Resource Management
+%% ============================================================================
+
+%% @doc Create a new session resource for tracking active tracing sessions.
+%% Returns a resource reference that can be included in tracer state.
+%% Spawned children inherit this reference via set_on_spawn.
+-spec create_session_resource() -> reference().
+create_session_resource() ->
+  erlang:nif_error({error, not_loaded}).
+
+%% @doc Deactivate a session resource.
+%% Called when parent span ends. Children will see the inactive session
+%% on their next trace event and return 'remove' to stop tracing.
+-spec deactivate_session_resource(reference()) -> ok.
+deactivate_session_resource(_SessionRef) ->
   erlang:nif_error({error, not_loaded}).
 
 %% ============================================================================

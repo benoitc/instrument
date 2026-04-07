@@ -31,7 +31,8 @@
   trace_flags_cleared_after_span/1,
   async_parent_span_traced/1,
   marker_in_spawned_child/1,
-  tracer_bootstrap_filtered/1
+  tracer_bootstrap_filtered/1,
+  spawned_child_cleanup_after_parent/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -54,7 +55,8 @@ all() ->
     trace_flags_cleared_after_span,
     async_parent_span_traced,
     marker_in_spawned_child,
-    tracer_bootstrap_filtered
+    tracer_bootstrap_filtered,
+    spawned_child_cleanup_after_parent
   ].
 
 init_per_suite(Config) ->
@@ -72,6 +74,7 @@ init_per_testcase(_, Config) ->
   %% Clean up context between tests
   erlang:erase('$instrument_context'),
   erlang:erase('$instrument_flight_label'),
+  erlang:erase('$instrument_flight_session_ref'),
   %% Disable any existing trace on this process
   catch erlang:trace(self(), false, [send, 'receive']),
   %% Clear flight recorder buffer
@@ -81,6 +84,7 @@ init_per_testcase(_, Config) ->
 end_per_testcase(_, _Config) ->
   erlang:erase('$instrument_context'),
   erlang:erase('$instrument_flight_label'),
+  erlang:erase('$instrument_flight_session_ref'),
   %% Disable any existing trace on this process
   catch erlang:trace(self(), false, [send, 'receive']),
   %% Disable and clear after each test
@@ -607,4 +611,62 @@ tracer_bootstrap_filtered(_Config) ->
                      element(1, element(2, element(3, E))) =:= tracer],
   ct:pal("Tracer bootstrap messages found (should be empty): ~p", [TracerMsgs]),
   [] = TracerMsgs,
+  ok.
+
+spawned_child_cleanup_after_parent(_Config) ->
+  %% Test that spawned children stop being traced after parent span ends.
+  %% The session-based cleanup should cause children to return 'remove'
+  %% on their next trace event, triggering automatic cleanup by the VM.
+  ok = instrument_flight_recorder:enable(),
+  Parent = self(),
+
+  %% Spawn a long-lived child DURING a span
+  ChildPid = instrument_tracer:with_span(<<"parent_span">>, fun() ->
+    spawn(fun() ->
+      Parent ! {child_ready, self()},
+      receive continue -> ok end,
+      %% This send should NOT be traced (session ended)
+      Parent ! {child_after_parent, self()}
+    end)
+  end),
+
+  receive {child_ready, ChildPid} -> ok after 1000 -> ct:fail(timeout_ready) end,
+
+  %% Parent span has ended, session is now inactive
+  %% Clear buffer to isolate child's later activity
+  timer:sleep(100),
+  _ = instrument_flight_recorder:clear(),
+
+  %% Tell child to continue - this should trigger lazy cleanup via 'remove'
+  ChildPid ! continue,
+  receive {child_after_parent, ChildPid} -> ok after 1000 -> ct:fail(timeout_after) end,
+
+  %% Give time for trace events (if any) to be processed
+  timer:sleep(100),
+
+  %% Should have NO events (child was untraced on first event after session deactivated)
+  Events = instrument_flight_recorder:dump_all(),
+  ct:pal("Events after parent ended: ~p", [Events]),
+
+  %% Expect zero or minimal events (the 'remove' happens on first event)
+  true = length(Events) =< 1,
+
+  %% Verify child is no longer traced
+  %% trace_info returns {flags, []} or undefined when not traced
+  TraceInfo = erlang:trace_info(ChildPid, flags),
+  ct:pal("Child trace info after parent span ended: ~p", [TraceInfo]),
+  case TraceInfo of
+    undefined ->
+      %% Not traced at all - success
+      ok;
+    {flags, []} ->
+      %% Explicitly no flags - success
+      ok;
+    {flags, ChildFlags} ->
+      %% Has flags but send/receive should not be among them
+      false = lists:member(send, ChildFlags),
+      false = lists:member('receive', ChildFlags)
+  end,
+
+  exit(ChildPid, kill),
   ok.

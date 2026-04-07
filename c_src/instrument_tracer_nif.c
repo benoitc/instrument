@@ -11,6 +11,18 @@
  */
 
 #include "erl_nif.h"
+#include <stdatomic.h>
+
+/* Session resource - tracks if a tracing session is still active.
+ * When parent span ends, it deactivates the session. Spawned children
+ * check this on their next trace event and return 'remove' if inactive,
+ * causing the VM to stop tracing them.
+ */
+typedef struct {
+    _Atomic int active;  /* 1 = active, 0 = inactive */
+} session_resource_t;
+
+static ErlNifResourceType* session_resource_type = NULL;
 
 /*
  * enabled/3 - Check if tracing is enabled for the given tracee.
@@ -57,46 +69,115 @@ enabled(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 }
 
 /*
+ * create_session_resource/0 - Create a new session resource.
+ * Returns a resource term that can be included in tracer state.
+ * The session starts as active (1).
+ */
+static ERL_NIF_TERM
+create_session_resource(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    (void)argv;
+    session_resource_t* res = enif_alloc_resource(session_resource_type,
+                                                   sizeof(session_resource_t));
+    if (res == NULL) {
+        return enif_make_badarg(env);
+    }
+    atomic_store(&res->active, 1);  /* Active initially */
+    ERL_NIF_TERM term = enif_make_resource(env, res);
+    enif_release_resource(res);
+    return term;
+}
+
+/*
+ * deactivate_session_resource/1 - Mark a session as inactive.
+ * Called when the parent span ends. Children will see this on their
+ * next trace event and stop being traced.
+ */
+static ERL_NIF_TERM
+deactivate_session_resource(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    session_resource_t* res;
+    if (!enif_get_resource(env, argv[0], session_resource_type, (void**)&res)) {
+        return enif_make_badarg(env);
+    }
+    atomic_store(&res->active, 0);  /* Mark inactive */
+    return enif_make_atom(env, "ok");
+}
+
+/*
+ * is_session_active - Helper to check if session is still active.
+ * Returns 1 if active (should trace), 0 if inactive (should remove).
+ * If no session_ref in tracer_state, returns 1 for backwards compatibility.
+ */
+static int
+is_session_active(ErlNifEnv* env, ERL_NIF_TERM tracer_state)
+{
+    ERL_NIF_TERM session_ref;
+    if (enif_get_map_value(env, tracer_state,
+            enif_make_atom(env, "session_ref"), &session_ref)) {
+        session_resource_t* res;
+        if (enif_get_resource(env, session_ref, session_resource_type, (void**)&res)) {
+            return atomic_load(&res->active);
+        }
+    }
+    return 1;  /* No session_ref = legacy behavior, allow tracing */
+}
+
+/*
  * enabled_send/3 - Check if send tracing is enabled.
+ * Returns 'remove' if session is inactive, triggering cleanup.
  */
 static ERL_NIF_TERM
 enabled_send(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
-    (void)argv;
+    if (!is_session_active(env, argv[1])) {
+        return enif_make_atom(env, "remove");
+    }
     return enif_make_atom(env, "trace");
 }
 
 /*
  * enabled_receive/3 - Check if receive tracing is enabled.
+ * Returns 'remove' if session is inactive, triggering cleanup.
  */
 static ERL_NIF_TERM
 enabled_receive(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
-    (void)argv;
+    if (!is_session_active(env, argv[1])) {
+        return enif_make_atom(env, "remove");
+    }
     return enif_make_atom(env, "trace");
 }
 
 /*
  * enabled_spawn/3 - Check if spawn tracing is enabled.
+ * Returns 'remove' if session is inactive, triggering cleanup.
  */
 static ERL_NIF_TERM
 enabled_spawn(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
-    (void)argv;
+    if (!is_session_active(env, argv[1])) {
+        return enif_make_atom(env, "remove");
+    }
     return enif_make_atom(env, "trace");
 }
 
 /*
  * enabled_procs/3 - Check if process tracing is enabled.
+ * Returns 'remove' if session is inactive, triggering cleanup.
  */
 static ERL_NIF_TERM
 enabled_procs(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
-    (void)argv;
+    if (!is_session_active(env, argv[1])) {
+        return enif_make_atom(env, "remove");
+    }
     return enif_make_atom(env, "trace");
 }
 
@@ -299,6 +380,10 @@ static ErlNifFunc nif_funcs[] = {
     {"enabled", 3, enabled, 0},
     {"trace", 5, trace, 0},
 
+    /* Session resource management for child process cleanup */
+    {"create_session_resource", 0, create_session_resource, 0},
+    {"deactivate_session_resource", 1, deactivate_session_resource, 0},
+
     /* Specialized enabled callbacks - optional, improves performance */
     {"enabled_send", 3, enabled_send, 0},
     {"enabled_receive", 3, enabled_receive, 0},
@@ -323,9 +408,15 @@ static void on_unload(ErlNifEnv *env, void *priv_data)
 
 static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 {
-    (void)env;
     (void)priv_data;
     (void)load_info;
+
+    /* Create session resource type for tracking active tracing sessions */
+    session_resource_type = enif_open_resource_type(env, NULL, "flight_session",
+        NULL, ERL_NIF_RT_CREATE, NULL);
+    if (session_resource_type == NULL) {
+        return -1;
+    }
     return 0;
 }
 
