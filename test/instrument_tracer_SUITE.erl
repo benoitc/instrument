@@ -35,7 +35,13 @@
   %% Throughput optimization tests
   events_chronological_order_on_export/1,
   links_chronological_order_on_export/1,
-  exporter_cache_invalidation/1
+  exporter_cache_invalidation/1,
+  %% Span limits tests (OTel spec compliance)
+  span_attribute_limit_test/1,
+  span_event_limit_test/1,
+  span_link_limit_test/1,
+  span_initial_limits_test/1,
+  span_dropped_counts_in_export_test/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -63,7 +69,13 @@ all() ->
     %% Throughput optimization tests
     events_chronological_order_on_export,
     links_chronological_order_on_export,
-    exporter_cache_invalidation
+    exporter_cache_invalidation,
+    %% Span limits tests (OTel spec compliance)
+    span_attribute_limit_test,
+    span_event_limit_test,
+    span_link_limit_test,
+    span_initial_limits_test,
+    span_dropped_counts_in_export_test
   ].
 
 init_per_suite(Config) ->
@@ -661,3 +673,184 @@ exporter_cache_invalidation(_Config) ->
   end,
 
   ok = instrument_tracer:unregister_exporter(Exporter2).
+
+%% ============================================================================
+%% Span Limits Tests (OTel Spec Compliance)
+%% ============================================================================
+
+%% Test that attribute count limit is enforced
+span_attribute_limit_test(_Config) ->
+  %% Set a custom limit via env var for this test
+  OldLimit = os:getenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT"),
+  os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "5"),
+  try
+    instrument_tracer:with_span(<<"attr_limit_test">>, fun() ->
+      %% Add attributes exceeding the limit
+      ok = instrument_tracer:set_attributes(#{
+        <<"key1">> => <<"value1">>,
+        <<"key2">> => <<"value2">>,
+        <<"key3">> => <<"value3">>
+      }),
+      ok = instrument_tracer:set_attributes(#{
+        <<"key4">> => <<"value4">>,
+        <<"key5">> => <<"value5">>,
+        <<"key6">> => <<"value6">>,  %% Should be dropped
+        <<"key7">> => <<"value7">>   %% Should be dropped
+      }),
+
+      Span = instrument_tracer:current_span(),
+      Attrs = Span#span.attributes,
+      DroppedCount = Span#span.dropped_attributes_count,
+
+      %% Should have at most 5 attributes
+      ?assert(maps:size(Attrs) =< 5),
+      %% Should track dropped attributes
+      ?assert(DroppedCount >= 2)
+    end)
+  after
+    case OldLimit of
+      false -> os:unsetenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT");
+      _ -> os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", OldLimit)
+    end
+  end,
+  ok.
+
+%% Test that event count limit is enforced
+span_event_limit_test(_Config) ->
+  OldLimit = os:getenv("OTEL_SPAN_EVENT_COUNT_LIMIT"),
+  os:putenv("OTEL_SPAN_EVENT_COUNT_LIMIT", "3"),
+  try
+    instrument_tracer:with_span(<<"event_limit_test">>, fun() ->
+      %% Add events exceeding the limit
+      ok = instrument_tracer:add_event(<<"event1">>),
+      ok = instrument_tracer:add_event(<<"event2">>),
+      ok = instrument_tracer:add_event(<<"event3">>),
+      ok = instrument_tracer:add_event(<<"event4">>),  %% Should be dropped
+      ok = instrument_tracer:add_event(<<"event5">>),  %% Should be dropped
+
+      Span = instrument_tracer:current_span(),
+      Events = Span#span.events,
+      DroppedCount = Span#span.dropped_events_count,
+
+      %% Should have at most 3 events
+      ?assertEqual(3, length(Events)),
+      %% Should track dropped events
+      ?assertEqual(2, DroppedCount)
+    end)
+  after
+    case OldLimit of
+      false -> os:unsetenv("OTEL_SPAN_EVENT_COUNT_LIMIT");
+      _ -> os:putenv("OTEL_SPAN_EVENT_COUNT_LIMIT", OldLimit)
+    end
+  end,
+  ok.
+
+%% Test that link count limit is enforced
+span_link_limit_test(_Config) ->
+  OldLimit = os:getenv("OTEL_SPAN_LINK_COUNT_LIMIT"),
+  os:putenv("OTEL_SPAN_LINK_COUNT_LIMIT", "2"),
+  try
+    Ctx1 = #span_ctx{trace_id = <<1:128>>, span_id = <<1:64>>, trace_flags = 1},
+    Ctx2 = #span_ctx{trace_id = <<2:128>>, span_id = <<2:64>>, trace_flags = 1},
+    Ctx3 = #span_ctx{trace_id = <<3:128>>, span_id = <<3:64>>, trace_flags = 1},
+    Ctx4 = #span_ctx{trace_id = <<4:128>>, span_id = <<4:64>>, trace_flags = 1},
+
+    instrument_tracer:with_span(<<"link_limit_test">>, fun() ->
+      ok = instrument_tracer:add_link(Ctx1),
+      ok = instrument_tracer:add_link(Ctx2),
+      ok = instrument_tracer:add_link(Ctx3),  %% Should be dropped
+      ok = instrument_tracer:add_link(Ctx4),  %% Should be dropped
+
+      Span = instrument_tracer:current_span(),
+      Links = Span#span.links,
+      DroppedCount = Span#span.dropped_links_count,
+
+      %% Should have at most 2 links
+      ?assertEqual(2, length(Links)),
+      %% Should track dropped links
+      ?assertEqual(2, DroppedCount)
+    end)
+  after
+    case OldLimit of
+      false -> os:unsetenv("OTEL_SPAN_LINK_COUNT_LIMIT");
+      _ -> os:putenv("OTEL_SPAN_LINK_COUNT_LIMIT", OldLimit)
+    end
+  end,
+  ok.
+
+%% Test that limits are applied at span creation for initial attributes/links
+span_initial_limits_test(_Config) ->
+  OldAttrLimit = os:getenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT"),
+  OldLinkLimit = os:getenv("OTEL_SPAN_LINK_COUNT_LIMIT"),
+  os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "3"),
+  os:putenv("OTEL_SPAN_LINK_COUNT_LIMIT", "2"),
+  try
+    %% Create large initial attributes
+    InitialAttrs = #{
+      <<"a1">> => 1, <<"a2">> => 2, <<"a3">> => 3,
+      <<"a4">> => 4, <<"a5">> => 5, <<"a6">> => 6
+    },
+
+    %% Create links
+    InitialLinks = [
+      #span_link{ctx = #span_ctx{trace_id = <<I:128>>, span_id = <<I:64>>, trace_flags = 1}}
+      || I <- lists:seq(1, 5)
+    ],
+
+    Span = instrument_tracer:start_span(<<"initial_limits_test">>, #{
+      attributes => InitialAttrs,
+      links => InitialLinks
+    }),
+
+    %% Verify limits applied at creation
+    ?assert(maps:size(Span#span.attributes) =< 3),
+    ?assert(Span#span.dropped_attributes_count >= 3),
+    ?assertEqual(2, length(Span#span.links)),
+    ?assertEqual(3, Span#span.dropped_links_count),
+
+    instrument_tracer:end_span(Span)
+  after
+    case OldAttrLimit of
+      false -> os:unsetenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT");
+      _ -> os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", OldAttrLimit)
+    end,
+    case OldLinkLimit of
+      false -> os:unsetenv("OTEL_SPAN_LINK_COUNT_LIMIT");
+      _ -> os:putenv("OTEL_SPAN_LINK_COUNT_LIMIT", OldLinkLimit)
+    end
+  end,
+  ok.
+
+%% Test that dropped counts are included in exported span
+span_dropped_counts_in_export_test(_Config) ->
+  OldLimit = os:getenv("OTEL_SPAN_EVENT_COUNT_LIMIT"),
+  os:putenv("OTEL_SPAN_EVENT_COUNT_LIMIT", "2"),
+
+  Self = self(),
+  Exporter = fun(Span) -> Self ! {exported, Span}, ok end,
+  ok = instrument_tracer:register_exporter(Exporter),
+
+  try
+    instrument_tracer:with_span(<<"dropped_counts_export_test">>, fun() ->
+      ok = instrument_tracer:add_event(<<"e1">>),
+      ok = instrument_tracer:add_event(<<"e2">>),
+      ok = instrument_tracer:add_event(<<"e3">>),  %% Dropped
+      ok = instrument_tracer:add_event(<<"e4">>)   %% Dropped
+    end),
+
+    receive
+      {exported, Span} ->
+        %% Verify dropped counts in exported span
+        ?assertEqual(2, Span#span.dropped_events_count),
+        ?assertEqual(2, length(Span#span.events))
+    after 1000 ->
+      ct:fail(timeout_waiting_for_export)
+    end
+  after
+    ok = instrument_tracer:unregister_exporter(Exporter),
+    case OldLimit of
+      false -> os:unsetenv("OTEL_SPAN_EVENT_COUNT_LIMIT");
+      _ -> os:putenv("OTEL_SPAN_EVENT_COUNT_LIMIT", OldLimit)
+    end
+  end,
+  ok.

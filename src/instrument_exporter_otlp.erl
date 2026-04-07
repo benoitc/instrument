@@ -185,7 +185,10 @@ encode_span(#span{
   attributes = Attributes,
   events = Events,
   links = Links,
-  status = Status
+  status = Status,
+  dropped_attributes_count = DroppedAttrsCount,
+  dropped_events_count = DroppedEventsCount,
+  dropped_links_count = DroppedLinksCount
 }) ->
   ParentSpanId = case ParentCtx of
     #span_ctx{span_id = PSpanId} -> binary:encode_hex(PSpanId, lowercase);
@@ -207,8 +210,11 @@ encode_span(#span{
     <<"endTimeUnixNano">> => integer_to_binary(EndTimeNano),
     <<"flags">> => TraceFlags,
     <<"attributes">> => encode_attributes(Attributes),
+    <<"droppedAttributesCount">> => DroppedAttrsCount,
     <<"events">> => encode_events(Events),
+    <<"droppedEventsCount">> => DroppedEventsCount,
     <<"links">> => encode_links(Links),
+    <<"droppedLinksCount">> => DroppedLinksCount,
     <<"status">> => encode_status(Status)
   }.
 

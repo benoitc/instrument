@@ -29,6 +29,7 @@
 %% ============================================================================
 
 %% @doc Injects trace context into a carrier using B3 single header format.
+%% Format: {TraceId}-{SpanId}-{SamplingState}[-{ParentSpanId}]
 -spec inject(map(), map()) -> map().
 inject(Ctx, Carrier) when is_map(Ctx), is_map(Carrier) ->
   case instrument_context:get_value(Ctx, span_ctx) of
@@ -38,9 +39,13 @@ inject(Ctx, Carrier) when is_map(Ctx), is_map(Carrier) ->
       TraceIdHex = instrument_id:trace_id_to_hex(TraceId),
       SpanIdHex = instrument_id:span_id_to_hex(SpanId),
       SamplingState = format_sampling_state(Flags),
-      %% Format: {TraceId}-{SpanId}-{SamplingState}
-      %% We don't include ParentSpanId on inject since we don't track it
-      Value = <<TraceIdHex/binary, "-", SpanIdHex/binary, "-", SamplingState/binary>>,
+      %% Try to get parent span ID from the full span record
+      ParentSpanIdPart = case get_parent_span_id(Ctx) of
+        undefined -> <<>>;
+        ParentSpanIdHex -> <<"-", ParentSpanIdHex/binary>>
+      end,
+      %% Format: {TraceId}-{SpanId}-{SamplingState}[-{ParentSpanId}]
+      Value = <<TraceIdHex/binary, "-", SpanIdHex/binary, "-", SamplingState/binary, ParentSpanIdPart/binary>>,
       maps:put(?B3_HEADER, Value, Carrier)
   end.
 
@@ -154,3 +159,13 @@ parse_sampling_state(_) -> 1.           %% Default to sampled
 %% Format OTel trace_flags to B3 sampling state
 format_sampling_state(0) -> <<"0">>;
 format_sampling_state(1) -> <<"1">>.
+
+%% Get parent span ID from the full span record in context
+get_parent_span_id(Ctx) ->
+  %% The full span is stored under '$instrument_span' key
+  case instrument_context:get_value(Ctx, '$instrument_span') of
+    #span{parent_ctx = #span_ctx{span_id = ParentSpanId}} when ParentSpanId =/= undefined ->
+      instrument_id:span_id_to_hex(ParentSpanId);
+    _ ->
+      undefined
+  end.

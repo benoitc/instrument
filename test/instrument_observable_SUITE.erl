@@ -24,7 +24,11 @@
   observable_up_down_counter_test/1,
   collect_observables_test/1,
   observable_callback_error_test/1,
-  multiple_observables_test/1
+  multiple_observables_test/1,
+  %% Observer callback tests (OTel spec compliance)
+  observable_observer_callback_test/1,
+  observable_legacy_callback_test/1,
+  observable_multi_attribute_test/1
 ]).
 
 all() ->
@@ -34,7 +38,11 @@ all() ->
     observable_up_down_counter_test,
     collect_observables_test,
     observable_callback_error_test,
-    multiple_observables_test
+    multiple_observables_test,
+    %% Observer callback tests (OTel spec compliance)
+    observable_observer_callback_test,
+    observable_legacy_callback_test,
+    observable_multi_attribute_test
   ].
 
 init_per_suite(Config) ->
@@ -197,4 +205,116 @@ multiple_observables_test(_Config) ->
   %% Collect again
   ok = instrument_meter:collect_observables(),
 
+  ok.
+
+%% ============================================================================
+%% Observer Callback Tests (OTel Spec Compliance)
+%% ============================================================================
+
+%% Test 1-arity observer callback pattern
+observable_observer_callback_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"observer_test">>),
+
+  %% Create observable gauge with 1-arity callback (observer pattern)
+  %% Callback receives an Observe function it calls for each value
+  _Gauge = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"observer_gauge">>,
+    fun(Observe) ->
+      %% Report multiple values with attributes
+      Observe(42.0, #{host => <<"server1">>}),
+      Observe(55.0, #{host => <<"server2">>}),
+      Observe(30.0, #{host => <<"server3">>}),
+      ok
+    end
+  ),
+
+  %% Collect observables - this invokes the callback
+  ok = instrument_meter:collect_observables(),
+
+  %% Collect metrics and verify observations were recorded
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find our gauge metrics (may have vec suffix due to attributes)
+  GaugeMetrics = [M || #{name := N} = M <- Metrics,
+                       binary:match(N, <<"observer_gauge">>) =/= nomatch],
+
+  %% Should have created metrics for the observations
+  ?assert(length(GaugeMetrics) >= 1),
+  ok.
+
+%% Test that 0-arity callback (legacy) still works
+observable_legacy_callback_test(_Config) ->
+  ValueRef = atomics:new(1, [{signed, true}]),
+  atomics:put(ValueRef, 1, 123),
+
+  Meter = instrument_meter:get_meter(<<"legacy_test">>),
+
+  %% Create observable with 0-arity callback (legacy pattern)
+  _Gauge = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"legacy_callback_gauge">>,
+    fun() -> atomics:get(ValueRef, 1) end
+  ),
+
+  %% Collect observables
+  ok = instrument_meter:collect_observables(),
+
+  %% Collect metrics
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find our gauge
+  GaugeMetrics = [M || #{name := N} = M <- Metrics,
+                       binary:match(N, <<"legacy_callback_gauge">>) =/= nomatch],
+
+  ?assert(length(GaugeMetrics) >= 1),
+
+  %% Update value and collect again
+  atomics:put(ValueRef, 1, 456),
+  ok = instrument_meter:collect_observables(),
+
+  ok.
+
+%% Test observing multiple hosts/entities with attributes
+observable_multi_attribute_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"multi_attr_test">>),
+
+  %% Simulate monitoring multiple hosts
+  HostData = #{
+    <<"host1.example.com">> => 75.5,
+    <<"host2.example.com">> => 82.3,
+    <<"host3.example.com">> => 45.0,
+    <<"host4.example.com">> => 91.2
+  },
+
+  %% Create observable gauge with observer callback
+  _CpuGauge = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"cpu_usage">>,
+    fun(Observe) ->
+      maps:foreach(fun(Host, Cpu) ->
+        Observe(Cpu, #{hostname => Host, region => <<"us-east">>})
+      end, HostData),
+      ok
+    end
+  ),
+
+  %% Collect observables
+  ok = instrument_meter:collect_observables(),
+
+  %% Collect metrics
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find CPU usage metrics
+  CpuMetrics = [M || #{name := N} = M <- Metrics,
+                     binary:match(N, <<"cpu_usage">>) =/= nomatch],
+
+  %% Should have created metrics for multi-attribute observations
+  ?assert(length(CpuMetrics) >= 1),
+
+  %% Verify we have data points (either in vec or base metric)
+  TotalDataPoints = lists:sum([length(maps:get(data_points, M, [])) || M <- CpuMetrics]),
+
+  %% Should have recorded observations (at least one data point)
+  ?assert(TotalDataPoints >= 1),
   ok.

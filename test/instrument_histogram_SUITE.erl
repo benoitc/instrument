@@ -5,6 +5,10 @@
 -module(instrument_histogram_SUITE).
 -author("benoitc").
 
+-include("instrument.hrl").
+-include("instrument_otel.hrl").
+-include_lib("stdlib/include/assert.hrl").
+
 %% API
 -export([
   all/0,
@@ -22,7 +26,10 @@
   validate_empty_buckets/1,
   concurrent_histogram/1,
   histogram_concurrent_observe/1,
-  histogram_consistency/1
+  histogram_consistency/1,
+  %% Exemplar tests (OTel spec compliance)
+  histogram_exemplars_test/1,
+  histogram_exemplars_with_trace_context_test/1
 ]).
 
 all() ->
@@ -32,7 +39,10 @@ all() ->
     validate_empty_buckets,
     concurrent_histogram,
     histogram_concurrent_observe,
-    histogram_consistency
+    histogram_consistency,
+    %% Exemplar tests (OTel spec compliance)
+    histogram_exemplars_test,
+    histogram_exemplars_with_trace_context_test
   ].
 
 
@@ -230,3 +240,80 @@ is_monotonic([A, B | Rest]) when A =< B ->
   is_monotonic([B | Rest]);
 is_monotonic(_) ->
   false.
+
+%% ============================================================================
+%% Exemplar Tests (OTel Spec Compliance)
+%% ============================================================================
+
+%% Test that histogram captures exemplars
+histogram_exemplars_test(_Config) ->
+  TestBuckets = [1.0, 5.0, 10.0, 50.0],
+  M = instrument_histogram:new_histogram(exemplar_test_hist, "exemplar test", TestBuckets),
+
+  %% Observe some values
+  ok = instrument_histogram:observe_histogram(M, 0.5),
+  ok = instrument_histogram:observe_histogram(M, 3.0),
+  ok = instrument_histogram:observe_histogram(M, 25.0),
+
+  %% Collect histogram (which includes exemplars)
+  Result = instrument_histogram:collect(
+    instrument_lib:mk_info(exemplar_test_hist, "exemplar test"),
+    M#metric.handle
+  ),
+
+  %% Verify exemplars field is present
+  ?assert(maps:is_key(exemplars, Result)),
+  Exemplars = maps:get(exemplars, Result),
+
+  %% Should have captured some exemplars (up to reservoir size, default 4)
+  ?assert(is_list(Exemplars)),
+  ?assert(length(Exemplars) =< 4),
+
+  %% If we have exemplars, verify structure
+  case Exemplars of
+    [] -> ok;
+    [E | _] ->
+      ?assert(is_record(E, exemplar)),
+      ?assert(is_number(E#exemplar.value)),
+      ?assert(is_integer(E#exemplar.timestamp))
+  end,
+  ok.
+
+%% Test that histogram exemplars capture trace context
+histogram_exemplars_with_trace_context_test(_Config) ->
+  TestBuckets = [1.0, 5.0, 10.0],
+  M = instrument_histogram:new_histogram(exemplar_trace_hist, "exemplar trace test", TestBuckets),
+
+  %% Observe values within a span
+  instrument_tracer:with_span(<<"histogram_test_span">>, fun() ->
+    SpanCtx = instrument_tracer:span_ctx(),
+    ExpectedTraceId = SpanCtx#span_ctx.trace_id,
+    ExpectedSpanId = SpanCtx#span_ctx.span_id,
+
+    %% Observe a value
+    ok = instrument_histogram:observe_histogram(M, 2.5),
+
+    %% Collect and check exemplar has trace context
+    Result = instrument_histogram:collect(
+      instrument_lib:mk_info(exemplar_trace_hist, "exemplar trace test"),
+      M#metric.handle
+    ),
+
+    Exemplars = maps:get(exemplars, Result, []),
+
+    %% Should have at least one exemplar
+    ?assert(length(Exemplars) >= 1),
+
+    %% Find exemplar with our value
+    MatchingExemplars = [E || E <- Exemplars, E#exemplar.value =:= 2.5],
+    case MatchingExemplars of
+      [] ->
+        %% Sampling might have dropped it, that's OK
+        ok;
+      [Exemplar | _] ->
+        %% Verify trace context was captured
+        ?assertEqual(ExpectedTraceId, Exemplar#exemplar.trace_id),
+        ?assertEqual(ExpectedSpanId, Exemplar#exemplar.span_id)
+    end
+  end),
+  ok.

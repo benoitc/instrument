@@ -70,7 +70,8 @@
 -type instrument_opts() :: #{
   description => binary(),
   unit => binary(),
-  boundaries => [number()]  %% for histograms
+  boundaries => [number()],  %% for histograms
+  temporality => cumulative | delta  %% aggregation temporality (default: cumulative)
 }.
 
 -export_type([meter/0, instrument/0, instrument_opts/0]).
@@ -156,18 +157,27 @@ create_gauge(Meter, Name, Opts) ->
   create_instrument(Meter, Name, gauge, Opts).
 
 %% @doc Creates an ObservableCounter with a callback.
--spec create_observable_counter(meter(), binary() | atom(), fun(() -> number())) -> instrument().
-create_observable_counter(Meter, Name, Callback) when is_function(Callback, 0) ->
+%% Callback can be:
+%% - 0-arity: fun() -> number() - returns a single value
+%% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+-spec create_observable_counter(meter(), binary() | atom(), fun()) -> instrument().
+create_observable_counter(Meter, Name, Callback) when is_function(Callback) ->
   create_observable_instrument(Meter, Name, observable_counter, Callback).
 
 %% @doc Creates an ObservableGauge with a callback.
--spec create_observable_gauge(meter(), binary() | atom(), fun(() -> number())) -> instrument().
-create_observable_gauge(Meter, Name, Callback) when is_function(Callback, 0) ->
+%% Callback can be:
+%% - 0-arity: fun() -> number() - returns a single value
+%% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+-spec create_observable_gauge(meter(), binary() | atom(), fun()) -> instrument().
+create_observable_gauge(Meter, Name, Callback) when is_function(Callback) ->
   create_observable_instrument(Meter, Name, observable_gauge, Callback).
 
 %% @doc Creates an ObservableUpDownCounter with a callback.
--spec create_observable_up_down_counter(meter(), binary() | atom(), fun(() -> number())) -> instrument().
-create_observable_up_down_counter(Meter, Name, Callback) when is_function(Callback, 0) ->
+%% Callback can be:
+%% - 0-arity: fun() -> number() - returns a single value
+%% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+-spec create_observable_up_down_counter(meter(), binary() | atom(), fun()) -> instrument().
+create_observable_up_down_counter(Meter, Name, Callback) when is_function(Callback) ->
   create_observable_instrument(Meter, Name, observable_up_down_counter, Callback).
 
 %% ============================================================================
@@ -243,26 +253,41 @@ collect_observables() ->
   lists:foreach(fun collect_observable/1, Instruments),
   ok.
 
-collect_observable(#otel_instrument{kind = Kind, handle = {observable, Handle, Callback}})
+collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observable, Handle, Callback}})
     when Kind =:= observable_counter;
          Kind =:= observable_gauge;
          Kind =:= observable_up_down_counter ->
   try
-    Value = Callback(),
-    case Kind of
-      observable_counter ->
-        %% For observable counter, we set the cumulative value
+    %% Check callback arity
+    case erlang:fun_info(Callback, arity) of
+      {arity, 0} ->
+        %% Legacy 0-arity callback - returns single value
+        Value = Callback(),
         do_set(Handle, Value, #{});
-      observable_gauge ->
-        do_set(Handle, Value, #{});
-      observable_up_down_counter ->
-        do_set(Handle, Value, #{})
+      {arity, 1} ->
+        %% Observer pattern callback - can observe multiple values with attributes
+        %% Create an observer function that the callback can call
+        Observer = fun(Value, Attrs) ->
+          %% Store observation with attributes
+          store_observable_observation(Name, Value, Attrs, Handle)
+        end,
+        Callback(Observer)
     end
   catch
     _:_ -> ok
   end;
 collect_observable(_) ->
   ok.
+
+%% Store an observable observation with attributes
+store_observable_observation(_Name, Value, Attrs, Handle) when map_size(Attrs) =:= 0 ->
+  %% No attributes - use base metric
+  do_set(Handle, Value, #{});
+store_observable_observation(_Name, Value, Attrs, Handle) ->
+  %% With attributes - use vec metric
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(get_internal_metric_name(Handle), gauge, LabelNames, Handle),
+  instrument:set_gauge_vec(VecName, LabelValues, Value).
 
 %% @doc Unregisters an instrument by name.
 %% This removes the instrument from persistent_term, unregisters the underlying metric,
@@ -332,6 +357,7 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_atom(Name) ->
 create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_map(Opts) ->
   Description = maps:get(description, Opts, undefined),
   Unit = maps:get(unit, Opts, undefined),
+  Temporality = maps:get(temporality, Opts, cumulative),
 
   %% Check if already exists
   case get_instrument(Name) of
@@ -344,7 +370,8 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_m
         description = Description,
         unit = Unit,
         meter = Meter,
-        handle = Handle
+        handle = Handle,
+        temporality = Temporality
       },
       %% Register the instrument
       register_instrument(Name, Instrument),
@@ -355,7 +382,14 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_m
 
 create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_atom(Name) ->
   create_observable_instrument(Meter, atom_to_binary(Name, utf8), Kind, Callback);
-create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_binary(Name), is_function(Callback, 0) ->
+create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_binary(Name), is_function(Callback) ->
+  %% Validate callback arity (0 or 1)
+  Arity = erlang:fun_info(Callback, arity),
+  case Arity of
+    {arity, 0} -> ok;
+    {arity, 1} -> ok;
+    _ -> error({invalid_callback_arity, Arity})
+  end,
   case get_instrument(Name) of
     undefined ->
       %% Create a gauge that will be updated by callback

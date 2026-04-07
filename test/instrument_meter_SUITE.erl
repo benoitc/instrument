@@ -33,7 +33,11 @@
   unregister_all_instruments_test/1,
   unregister_cleans_vec_metrics_test/1,
   concurrent_attribute_operations_test/1,
-  description_unit_preserved_test/1
+  description_unit_preserved_test/1,
+  %% Temporality tests (OTel spec compliance)
+  temporality_option_cumulative_test/1,
+  temporality_option_delta_test/1,
+  temporality_default_test/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -59,7 +63,11 @@ all() ->
     unregister_all_instruments_test,
     unregister_cleans_vec_metrics_test,
     concurrent_attribute_operations_test,
-    description_unit_preserved_test
+    description_unit_preserved_test,
+    %% Temporality tests (OTel spec compliance)
+    temporality_option_cumulative_test,
+    temporality_option_delta_test,
+    temporality_default_test
   ].
 
 init_per_suite(Config) ->
@@ -475,4 +483,71 @@ description_unit_preserved_test(_Config) ->
 
   %% Cleanup
   ok = instrument_meter:unregister_instrument(<<"preserved_counter">>),
+  ok.
+
+%% ============================================================================
+%% Temporality Tests (OTel Spec Compliance)
+%% ============================================================================
+
+%% Test creating counter with explicit cumulative temporality
+temporality_option_cumulative_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"temporality_test">>),
+
+  %% Create counter with explicit cumulative temporality
+  Counter = instrument_meter:create_counter(Meter, <<"cumulative_counter">>, #{
+    description => <<"Counter with cumulative temporality">>,
+    temporality => cumulative
+  }),
+
+  %% Verify instrument has cumulative temporality
+  ?assertEqual(cumulative, Counter#otel_instrument.temporality),
+  ?assertEqual(counter, Counter#otel_instrument.kind),
+
+  ok = instrument_meter:add(Counter, 5),
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"cumulative_counter">>),
+  ok.
+
+%% Test creating counter with delta temporality
+temporality_option_delta_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"temporality_test">>),
+
+  %% Create counter with delta temporality
+  Counter = instrument_meter:create_counter(Meter, <<"delta_counter">>, #{
+    description => <<"Counter with delta temporality">>,
+    temporality => delta
+  }),
+
+  %% Verify instrument has delta temporality
+  ?assertEqual(delta, Counter#otel_instrument.temporality),
+  ?assertEqual(counter, Counter#otel_instrument.kind),
+
+  ok = instrument_meter:add(Counter, 10),
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"delta_counter">>),
+  ok.
+
+%% Test that default temporality is cumulative (per OTel spec)
+temporality_default_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"temporality_test">>),
+
+  %% Create counter without specifying temporality
+  Counter = instrument_meter:create_counter(Meter, <<"default_temp_counter">>, #{
+    description => <<"Counter with default temporality">>
+  }),
+
+  %% Default should be cumulative per OTel spec
+  ?assertEqual(cumulative, Counter#otel_instrument.temporality),
+
+  %% Also verify for histogram
+  Histogram = instrument_meter:create_histogram(Meter, <<"default_temp_histogram">>, #{
+    description => <<"Histogram with default temporality">>
+  }),
+  ?assertEqual(cumulative, Histogram#otel_instrument.temporality),
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"default_temp_counter">>),
+  ok = instrument_meter:unregister_instrument(<<"default_temp_histogram">>),
   ok.

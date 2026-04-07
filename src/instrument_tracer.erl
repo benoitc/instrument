@@ -197,6 +197,13 @@ start_span_impl(Name, Opts) ->
   %% Merge sampler attributes with provided attributes
   MergedAttributes = maps:merge(SamplerAttrs, Attributes),
 
+  %% Apply limits to initial attributes and links
+  AttrLimit = instrument_config:get_span_attribute_count_limit(),
+  LinkLimit = instrument_config:get_span_link_count_limit(),
+
+  {LimitedAttrs, DroppedAttrsCount} = apply_attribute_limit(MergedAttributes, AttrLimit),
+  {LimitedLinks, DroppedLinksCount} = apply_link_limit(Links, LinkLimit),
+
   %% Create span
   Span = #span{
     name = Name,
@@ -205,10 +212,12 @@ start_span_impl(Name, Opts) ->
     tracer = Tracer,
     kind = Kind,
     start_time = StartTime,
-    attributes = MergedAttributes,
-    links = Links,
+    attributes = LimitedAttrs,
+    links = LimitedLinks,
     status = unset,
-    is_recording = IsRecording
+    is_recording = IsRecording,
+    dropped_attributes_count = DroppedAttrsCount,
+    dropped_links_count = DroppedLinksCount
   },
 
   %% Notify span processors of span start (skip for non-recording spans)
@@ -401,11 +410,43 @@ current_span() ->
 %% ============================================================================
 
 %% @doc Sets multiple attributes on the current span.
+%% Enforces span attribute count limit per OTel spec.
 -spec set_attributes(map()) -> ok.
 set_attributes(Attrs) when is_map(Attrs) ->
   update_current_span(fun(Span) ->
-    NewAttrs = maps:merge(Span#span.attributes, Attrs),
-    Span#span{attributes = NewAttrs}
+    Limit = instrument_config:get_span_attribute_count_limit(),
+    CurrentAttrs = Span#span.attributes,
+    CurrentCount = maps:size(CurrentAttrs),
+    MergedAttrs = maps:merge(CurrentAttrs, Attrs),
+    MergedCount = maps:size(MergedAttrs),
+    %% Only count newly added attributes (not updates to existing keys)
+    NewKeys = maps:size(Attrs) - maps:size(maps:with(maps:keys(Attrs), CurrentAttrs)),
+    case CurrentCount + NewKeys > Limit of
+      true ->
+        %% At or over limit - only allow updates to existing keys
+        AllowedAttrs = maps:with(maps:keys(CurrentAttrs), Attrs),
+        DroppedCount = NewKeys,
+        Span#span{
+          attributes = maps:merge(CurrentAttrs, AllowedAttrs),
+          dropped_attributes_count = Span#span.dropped_attributes_count + DroppedCount
+        };
+      false when MergedCount > Limit ->
+        %% Would exceed limit - take what we can
+        CanAdd = Limit - CurrentCount,
+        NewKeysToAdd = lists:sublist(
+          [K || K <- maps:keys(Attrs), not maps:is_key(K, CurrentAttrs)],
+          CanAdd
+        ),
+        AllowedNewAttrs = maps:with(NewKeysToAdd, Attrs),
+        UpdatedExisting = maps:with(maps:keys(CurrentAttrs), Attrs),
+        DroppedCount = NewKeys - length(NewKeysToAdd),
+        Span#span{
+          attributes = maps:merge(maps:merge(CurrentAttrs, AllowedNewAttrs), UpdatedExisting),
+          dropped_attributes_count = Span#span.dropped_attributes_count + DroppedCount
+        };
+      false ->
+        Span#span{attributes = MergedAttrs}
+    end
   end).
 
 %% @doc Sets a single attribute on the current span.
@@ -419,6 +460,7 @@ add_event(Name) ->
   add_event(Name, #{}).
 
 %% @doc Adds an event with attributes to the current span.
+%% Enforces span event count limit per OTel spec.
 -spec add_event(binary(), map()) -> ok.
 add_event(Name, Attrs) when is_binary(Name), is_map(Attrs) ->
   Event = #span_event{
@@ -428,7 +470,15 @@ add_event(Name, Attrs) when is_binary(Name), is_map(Attrs) ->
     attributes = Attrs
   },
   update_current_span(fun(Span) ->
-    Span#span{events = [Event | Span#span.events]}
+    Limit = instrument_config:get_span_event_count_limit(),
+    CurrentCount = length(Span#span.events),
+    case CurrentCount >= Limit of
+      true ->
+        %% At limit - drop the event
+        Span#span{dropped_events_count = Span#span.dropped_events_count + 1};
+      false ->
+        Span#span{events = [Event | Span#span.events]}
+    end
   end).
 
 %% @doc Sets the status of the current span to ok.
@@ -483,7 +533,15 @@ add_link(#span_ctx{} = SpanCtx, Attrs) ->
     attributes = Attrs
   },
   update_current_span(fun(Span) ->
-    Span#span{links = [Link | Span#span.links]}
+    Limit = instrument_config:get_span_link_count_limit(),
+    CurrentCount = length(Span#span.links),
+    case CurrentCount >= Limit of
+      true ->
+        %% At limit - drop the link
+        Span#span{dropped_links_count = Span#span.dropped_links_count + 1};
+      false ->
+        Span#span{links = [Link | Span#span.links]}
+    end
   end).
 
 %% @doc Updates the name of the current span.
@@ -688,3 +746,25 @@ format_stack_entry({M, F, A, Loc}) when is_list(A) ->
   format_stack_entry({M, F, length(A), Loc});
 format_stack_entry(Entry) ->
   iolist_to_binary(io_lib:format("~p", [Entry])).
+
+%% @private Apply attribute count limit to initial attributes.
+apply_attribute_limit(Attrs, Limit) ->
+  Count = maps:size(Attrs),
+  case Count > Limit of
+    true ->
+      %% Take first Limit keys (arbitrary but deterministic order)
+      Keys = lists:sublist(maps:keys(Attrs), Limit),
+      {maps:with(Keys, Attrs), Count - Limit};
+    false ->
+      {Attrs, 0}
+  end.
+
+%% @private Apply link count limit to initial links.
+apply_link_limit(Links, Limit) ->
+  Count = length(Links),
+  case Count > Limit of
+    true ->
+      {lists:sublist(Links, Limit), Count - Limit};
+    false ->
+      {Links, 0}
+  end.

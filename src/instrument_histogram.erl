@@ -60,7 +60,8 @@
   bucket_boundaries = [],
   bucket_counts = [],
   sum = 0.0,
-  start_time :: integer()  % wall clock time in nanoseconds when histogram was created
+  start_time :: integer(),  % wall clock time in nanoseconds when histogram was created
+  exemplar_key :: reference() | undefined  % Key for ETS-stored exemplar reservoir
 }).
 
 new_histogram(Name, Help) -> new_histogram(Name, Help, ?DEFAULT_BUCKETS).
@@ -84,12 +85,14 @@ mk_histogram(Buckets) ->
     end, Buckets ++ [infinity]),
   {ok, Sum} =  instrument_nif:new_gauge(),
   StartTime = erlang:system_time(nanosecond),
+  ExemplarKey = instrument_exemplar:new_reservoir_ref(),
 
   #histogram{
     bucket_boundaries = Buckets,
     bucket_counts = list_to_tuple(Counts),
     sum = Sum,
-    start_time = StartTime
+    start_time = StartTime,
+    exemplar_key = ExemplarKey
   }.
 
 validate_buckets([]) ->
@@ -112,7 +115,8 @@ validate_buckets([], _) ->
 observe_histogram(#metric{handle=Hist}, Value) ->
   #histogram{bucket_boundaries = Boundaries,
     bucket_counts = Counts,
-    sum = Sum} = Hist,
+    sum = Sum,
+    exemplar_key = ExemplarKey} = Hist,
 
   %% Find bucket index (1-based), or use +Inf bucket (last one) if above all boundaries
   Idx = case find(Boundaries, Value, 1) of
@@ -120,7 +124,12 @@ observe_histogram(#metric{handle=Hist}, Value) ->
     I -> I
   end,
   instrument_nif:inc_gauge(element(Idx, Counts)),
-  instrument_nif:inc_gauge(Sum, float(Value)).
+  instrument_nif:inc_gauge(Sum, float(Value)),
+  %% Capture exemplar with trace context
+  case ExemplarKey of
+    undefined -> ok;
+    _ -> instrument_exemplar:offer_ref(ExemplarKey, Value, #{})
+  end.
 
 %% Linear search is efficient for typical histogram bucket counts (10-15 buckets).
 %% For the default OTel bucket configuration, linear search outperforms binary
@@ -194,12 +203,14 @@ collect(Info, Hist) ->
     bucket_boundaries = Boundaries,
     bucket_counts = Counts,
     sum = Sum,
-    start_time = StartTime
+    start_time = StartTime,
+    exemplar_key = ExemplarKey
   } = Hist,
   SumValue = instrument_nif:get_gauge(Sum),
   CountsList = [instrument_nif:get_gauge(C) || C <- tuple_to_list(Counts)],
   SampleCount = lists:foldl(fun(Count, Acc) ->  Acc + Count end, 0, CountsList),
   Buckets = cumulative_count(CountsList, Boundaries, 0.0, []),
+  Exemplars = instrument_exemplar:collect_ref(ExemplarKey),
 
   %% Returns a complete histogram collection with all required fields for export.
   %% This format is compatible with Prometheus and OpenTelemetry metric exporters.
@@ -209,5 +220,6 @@ collect(Info, Hist) ->
     count => SampleCount,
     sum => SumValue,
     buckets => Buckets,
-    start_time => StartTime}.
+    start_time => StartTime,
+    exemplars => Exemplars}.
     

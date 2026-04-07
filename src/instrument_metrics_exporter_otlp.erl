@@ -169,36 +169,49 @@ encode_resource_attributes() ->
 encode_metric(#{name := Name, type := Type, data_points := DataPoints} = Metric) ->
   Description = maps:get(description, Metric, <<>>),
   Unit = maps:get(unit, Metric, <<"1">>),
+  %% Look up instrument to get temporality
+  Temporality = get_instrument_temporality(Name),
   Base = #{
     <<"name">> => Name,
     <<"description">> => Description,
     <<"unit">> => Unit
   },
-  maps:merge(Base, encode_metric_data(Type, DataPoints)).
+  maps:merge(Base, encode_metric_data(Type, DataPoints, Temporality)).
 
-encode_metric_data(counter, DataPoints) ->
+encode_metric_data(counter, DataPoints, Temporality) ->
   #{
     <<"sum">> => #{
       <<"dataPoints">> => [encode_number_data_point(DP) || DP <- DataPoints],
-      <<"aggregationTemporality">> => 2,  %% CUMULATIVE
+      <<"aggregationTemporality">> => temporality_to_int(Temporality),
       <<"isMonotonic">> => true
     }
   };
 
-encode_metric_data(gauge, DataPoints) ->
+encode_metric_data(gauge, DataPoints, _Temporality) ->
   #{
     <<"gauge">> => #{
       <<"dataPoints">> => [encode_number_data_point(DP) || DP <- DataPoints]
     }
   };
 
-encode_metric_data(histogram, DataPoints) ->
+encode_metric_data(histogram, DataPoints, Temporality) ->
   #{
     <<"histogram">> => #{
       <<"dataPoints">> => [encode_histogram_data_point(DP) || DP <- DataPoints],
-      <<"aggregationTemporality">> => 2  %% CUMULATIVE
+      <<"aggregationTemporality">> => temporality_to_int(Temporality)
     }
   }.
+
+%% Get instrument temporality, defaulting to cumulative
+get_instrument_temporality(Name) ->
+  case instrument_meter:get_instrument(Name) of
+    #otel_instrument{temporality = Temporality} -> Temporality;
+    _ -> cumulative
+  end.
+
+%% Convert temporality atom to OTLP integer
+temporality_to_int(delta) -> 1;       %% DELTA
+temporality_to_int(cumulative) -> 2.  %% CUMULATIVE
 
 encode_number_data_point(#{attributes := Attrs, value := Value, timestamp := Ts} = DP) ->
   ValueField = case is_integer(Value) of
@@ -224,13 +237,15 @@ encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := 
   %% ExplicitBounds excludes +Inf
   ExplicitBounds = [maps:get(upper_bound, B) || B <- Buckets,
                     maps:get(upper_bound, B) =/= infinity],
+  Exemplars = maps:get(exemplars, Value, []),
   Base = #{
     <<"attributes">> => encode_attributes(Attrs),
     <<"timeUnixNano">> => integer_to_binary(Ts),
     <<"count">> => encode_uint64(Count),
     <<"sum">> => Sum,
     <<"bucketCounts">> => [encode_uint64(C) || C <- BucketCounts],
-    <<"explicitBounds">> => ExplicitBounds
+    <<"explicitBounds">> => ExplicitBounds,
+    <<"exemplars">> => [encode_exemplar(E) || E <- Exemplars]
   },
   %% Add startTimeUnixNano for cumulative histograms
   case maps:get(start_time, DP, undefined) of
@@ -241,6 +256,37 @@ encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := 
 %% Encode count as string (OTLP uses fixed64/string for counts)
 encode_uint64(V) when is_integer(V) -> integer_to_binary(V);
 encode_uint64(V) when is_float(V) -> integer_to_binary(trunc(V)).
+
+-include("instrument_otel.hrl").
+
+%% Encode an exemplar record to OTLP format
+encode_exemplar(#exemplar{
+  filtered_attributes = FilteredAttrs,
+  value = Value,
+  timestamp = Timestamp,
+  span_id = SpanId,
+  trace_id = TraceId
+}) ->
+  ValueField = case is_integer(Value) of
+    true -> #{<<"asInt">> => integer_to_binary(Value)};
+    false -> #{<<"asDouble">> => Value}
+  end,
+  Base = #{
+    <<"filteredAttributes">> => encode_attributes(FilteredAttrs),
+    <<"timeUnixNano">> => integer_to_binary(Timestamp)
+  },
+  Base2 = maps:merge(Base, ValueField),
+  %% Add trace context if available
+  Base3 = case SpanId of
+    undefined -> Base2;
+    _ -> Base2#{<<"spanId">> => binary:encode_hex(SpanId, lowercase)}
+  end,
+  case TraceId of
+    undefined -> Base3;
+    _ -> Base3#{<<"traceId">> => binary:encode_hex(TraceId, lowercase)}
+  end;
+encode_exemplar(_) ->
+  #{}.
 
 encode_attributes(Attrs) ->
   maps:fold(fun(K, V, Acc) ->

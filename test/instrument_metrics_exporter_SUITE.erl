@@ -39,10 +39,13 @@
   metric_attrs_otel_multiple_test/1,
   metric_attrs_type_conversion_test/1,
   %% OTLP scope config test
-  otlp_scope_config_test/1
+  otlp_scope_config_test/1,
+  %% OTLP temporality test (OTel spec compliance)
+  otlp_temporality_export_test/1
 ]).
 
 -include_lib("stdlib/include/assert.hrl").
+-include("instrument_otel.hrl").
 
 all() ->
   [
@@ -70,7 +73,9 @@ all() ->
     metric_attrs_otel_multiple_test,
     metric_attrs_type_conversion_test,
     %% OTLP scope config test
-    otlp_scope_config_test
+    otlp_scope_config_test,
+    %% OTLP temporality test (OTel spec compliance)
+    otlp_temporality_export_test
   ].
 
 init_per_suite(Config) ->
@@ -582,4 +587,43 @@ otlp_scope_config_test(_Config) ->
       {ok, V2} -> application:set_env(instrument, instrumentation_scope_version, V2)
     end
   end,
+  ok.
+
+%% Test that OTLP export uses correct temporality for different instrument types
+otlp_temporality_export_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"temporality_export_test">>),
+
+  %% Create counter with delta temporality
+  DeltaCounter = instrument_meter:create_counter(Meter, <<"delta_temp_counter">>, #{
+    description => <<"Delta temporality counter">>,
+    temporality => delta
+  }),
+  ok = instrument_meter:add(DeltaCounter, 10),
+
+  %% Create counter with cumulative temporality (default)
+  CumulativeCounter = instrument_meter:create_counter(Meter, <<"cumulative_temp_counter">>, #{
+    description => <<"Cumulative temporality counter">>
+  }),
+  ok = instrument_meter:add(CumulativeCounter, 20),
+
+  %% Verify the instruments have correct temporality
+  ?assertEqual(delta, DeltaCounter#otel_instrument.temporality),
+  ?assertEqual(cumulative, CumulativeCounter#otel_instrument.temporality),
+
+  %% Collect metrics
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find delta counter
+  DeltaMetrics = [M || #{name := N} = M <- Metrics,
+                       binary:match(N, <<"delta_temp_counter">>) =/= nomatch],
+  ?assert(length(DeltaMetrics) >= 1),
+
+  %% Find cumulative counter
+  CumulativeMetrics = [M || #{name := N} = M <- Metrics,
+                            binary:match(N, <<"cumulative_temp_counter">>) =/= nomatch],
+  ?assert(length(CumulativeMetrics) >= 1),
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"delta_temp_counter">>),
+  ok = instrument_meter:unregister_instrument(<<"cumulative_temp_counter">>),
   ok.

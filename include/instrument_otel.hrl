@@ -69,7 +69,11 @@
   events = [] :: [#span_event{}],
   links = [] :: [#span_link{}],
   status = unset :: unset | ok | {error, binary()},
-  is_recording = true :: boolean()
+  is_recording = true :: boolean(),
+  %% Dropped counts per OTel spec (max 128 each by default)
+  dropped_attributes_count = 0 :: non_neg_integer(),
+  dropped_events_count = 0 :: non_neg_integer(),
+  dropped_links_count = 0 :: non_neg_integer()
 }).
 
 %% Meter record for metrics
@@ -88,7 +92,18 @@
   unit :: binary() | undefined,
   meter :: #meter{} | undefined,
   %% Internal handle to the underlying metric
-  handle :: term()
+  handle :: term(),
+  %% Aggregation temporality (cumulative or delta)
+  temporality = cumulative :: cumulative | delta
+}).
+
+%% Exemplar record for metrics (captures trace context at measurement time)
+-record(exemplar, {
+  filtered_attributes = #{} :: map(),
+  value :: number(),
+  timestamp :: integer(),                      % wall clock time in nanoseconds
+  span_id :: <<_:64>> | undefined,
+  trace_id :: <<_:128>> | undefined
 }).
 
 %% Metric view for transformation and filtering

@@ -56,7 +56,11 @@
   is_exporter_enabled/1,
   get_exporters/0,
   %% SDK version
-  get_sdk_version/0
+  get_sdk_version/0,
+  %% Span limits (OTel spec defaults: 128 each)
+  get_span_attribute_count_limit/0,
+  get_span_event_count_limit/0,
+  get_span_link_count_limit/0
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
@@ -332,9 +336,37 @@ version_to_binary(V) when is_binary(V) -> V;
 version_to_binary(V) when is_list(V) -> list_to_binary(V);
 version_to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8).
 
+%% @doc Gets the span attribute count limit.
+%% Reads from OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT env var, defaults to 128.
+-spec get_span_attribute_count_limit() -> pos_integer().
+get_span_attribute_count_limit() ->
+  read_span_limit("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", 128).
+
+%% @doc Gets the span event count limit.
+%% Reads from OTEL_SPAN_EVENT_COUNT_LIMIT env var, defaults to 128.
+-spec get_span_event_count_limit() -> pos_integer().
+get_span_event_count_limit() ->
+  read_span_limit("OTEL_SPAN_EVENT_COUNT_LIMIT", 128).
+
+%% @doc Gets the span link count limit.
+%% Reads from OTEL_SPAN_LINK_COUNT_LIMIT env var, defaults to 128.
+-spec get_span_link_count_limit() -> pos_integer().
+get_span_link_count_limit() ->
+  read_span_limit("OTEL_SPAN_LINK_COUNT_LIMIT", 128).
+
 %% ============================================================================
 %% Internal Functions
 %% ============================================================================
+
+read_span_limit(EnvVar, Default) ->
+  case os:getenv(EnvVar) of
+    false -> Default;
+    Value ->
+      case catch list_to_integer(Value) of
+        Int when is_integer(Int), Int > 0 -> Int;
+        _ -> Default
+      end
+  end.
 
 read_service_name() ->
   case os:getenv("OTEL_SERVICE_NAME") of

@@ -31,7 +31,12 @@
   otlp_signal_endpoints_test/1,
   log_level_test/1,
   has_span_processor_config_test/1,
-  has_span_processor_config_app_env_test/1
+  has_span_processor_config_app_env_test/1,
+  %% Span limit config tests (OTel spec compliance)
+  span_attribute_limit_config_test/1,
+  span_event_limit_config_test/1,
+  span_link_limit_config_test/1,
+  span_limit_invalid_values_test/1
 ]).
 
 all() ->
@@ -49,7 +54,12 @@ all() ->
     otlp_signal_endpoints_test,
     log_level_test,
     has_span_processor_config_test,
-    has_span_processor_config_app_env_test
+    has_span_processor_config_app_env_test,
+    %% Span limit config tests (OTel spec compliance)
+    span_attribute_limit_config_test,
+    span_event_limit_config_test,
+    span_link_limit_config_test,
+    span_limit_invalid_values_test
   ].
 
 init_per_suite(Config) ->
@@ -84,7 +94,10 @@ clear_otel_env() ->
     "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
     "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
     "OTEL_LOG_LEVEL",
-    "OTEL_EXPORTERS"
+    "OTEL_EXPORTERS",
+    "OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT",
+    "OTEL_SPAN_EVENT_COUNT_LIMIT",
+    "OTEL_SPAN_LINK_COUNT_LIMIT"
   ],
   lists:foreach(fun(Var) -> os:unsetenv(Var) end, EnvVars),
   application:unset_env(instrument, span_processor),
@@ -255,4 +268,70 @@ has_span_processor_config_app_env_test(_Config) ->
   application:set_env(instrument, span_processor, {instrument_span_processor_simple, #{exporter => instrument_exporter_console}}),
   ok = application:start(instrument),
   ?assertEqual(true, instrument_config:has_span_processor_config()),
+  ok.
+
+%% ============================================================================
+%% Span Limit Config Tests (OTel Spec Compliance)
+%% ============================================================================
+
+%% Test OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT config
+span_attribute_limit_config_test(_Config) ->
+  %% Default value should be 128 (OTel spec)
+  ?assertEqual(128, instrument_config:get_span_attribute_count_limit()),
+
+  %% Test with custom value via env var
+  os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "50"),
+  ?assertEqual(50, instrument_config:get_span_attribute_count_limit()),
+
+  %% Cleanup
+  os:unsetenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT"),
+  ok.
+
+%% Test OTEL_SPAN_EVENT_COUNT_LIMIT config
+span_event_limit_config_test(_Config) ->
+  %% Default value should be 128 (OTel spec)
+  ?assertEqual(128, instrument_config:get_span_event_count_limit()),
+
+  %% Test with custom value via env var
+  os:putenv("OTEL_SPAN_EVENT_COUNT_LIMIT", "64"),
+  ?assertEqual(64, instrument_config:get_span_event_count_limit()),
+
+  %% Cleanup
+  os:unsetenv("OTEL_SPAN_EVENT_COUNT_LIMIT"),
+  ok.
+
+%% Test OTEL_SPAN_LINK_COUNT_LIMIT config
+span_link_limit_config_test(_Config) ->
+  %% Default value should be 128 (OTel spec)
+  ?assertEqual(128, instrument_config:get_span_link_count_limit()),
+
+  %% Test with custom value via env var
+  os:putenv("OTEL_SPAN_LINK_COUNT_LIMIT", "32"),
+  ?assertEqual(32, instrument_config:get_span_link_count_limit()),
+
+  %% Cleanup
+  os:unsetenv("OTEL_SPAN_LINK_COUNT_LIMIT"),
+  ok.
+
+%% Test that invalid limit values fall back to defaults
+span_limit_invalid_values_test(_Config) ->
+  %% Negative value should fall back to default
+  os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "-5"),
+  ?assertEqual(128, instrument_config:get_span_attribute_count_limit()),
+  os:unsetenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT"),
+
+  %% Zero value should fall back to default (must be positive)
+  os:putenv("OTEL_SPAN_EVENT_COUNT_LIMIT", "0"),
+  ?assertEqual(128, instrument_config:get_span_event_count_limit()),
+  os:unsetenv("OTEL_SPAN_EVENT_COUNT_LIMIT"),
+
+  %% Non-numeric value should fall back to default
+  os:putenv("OTEL_SPAN_LINK_COUNT_LIMIT", "invalid"),
+  ?assertEqual(128, instrument_config:get_span_link_count_limit()),
+  os:unsetenv("OTEL_SPAN_LINK_COUNT_LIMIT"),
+
+  %% Float value should fall back to default (only integers allowed)
+  os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10.5"),
+  ?assertEqual(128, instrument_config:get_span_attribute_count_limit()),
+  os:unsetenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT"),
   ok.

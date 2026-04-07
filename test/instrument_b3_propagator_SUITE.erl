@@ -33,7 +33,10 @@
   %% Roundtrip and Edge Cases
   b3_roundtrip_test/1,
   b3_invalid_ids_rejected_test/1,
-  b3_config_propagator_test/1
+  b3_config_propagator_test/1,
+  %% B3 ParentSpanId injection tests (OTel spec compliance)
+  b3_single_inject_parent_spanid_test/1,
+  b3_single_inject_no_parent_test/1
 ]).
 
 all() ->
@@ -52,7 +55,10 @@ all() ->
     %% Roundtrip and Edge Cases
     b3_roundtrip_test,
     b3_invalid_ids_rejected_test,
-    b3_config_propagator_test
+    b3_config_propagator_test,
+    %% B3 ParentSpanId injection tests (OTel spec compliance)
+    b3_single_inject_parent_spanid_test,
+    b3_single_inject_no_parent_test
   ].
 
 init_per_suite(Config) ->
@@ -317,4 +323,70 @@ b3_config_propagator_test(_Config) ->
       _ -> os:putenv("OTEL_PROPAGATORS", OldValue)
     end
   end,
+  ok.
+
+%% ============================================================================
+%% B3 ParentSpanId Injection Tests (OTel Spec Compliance)
+%% ============================================================================
+
+%% Test that inject includes parent span ID for nested spans
+b3_single_inject_parent_spanid_test(_Config) ->
+  %% Create a parent span
+  instrument_tracer:with_span(<<"parent_span">>, fun() ->
+    ParentCtx = instrument_tracer:span_ctx(),
+    ParentSpanId = instrument_tracer:span_id(),
+
+    %% Create a child span
+    instrument_tracer:with_span(<<"child_span">>, fun() ->
+      %% Get the child's context
+      _ChildCtx = instrument_tracer:span_ctx(),
+      ChildSpanId = instrument_tracer:span_id(),
+
+      %% Create full context with the span record
+      FullCtx = instrument_context:current(),
+
+      %% Inject B3 header
+      Carrier = instrument_propagator_b3:inject(FullCtx, #{}),
+
+      ?assert(maps:is_key(<<"b3">>, Carrier)),
+      B3Header = maps:get(<<"b3">>, Carrier),
+
+      %% Header format should be: {TraceId}-{SpanId}-{SamplingState}-{ParentSpanId}
+      Parts = binary:split(B3Header, <<"-">>, [global]),
+
+      %% Should have 4 parts when parent exists
+      ?assertEqual(4, length(Parts)),
+
+      [TraceIdHex, SpanIdHex, SamplingState, ParentSpanIdHex] = Parts,
+
+      %% Verify IDs
+      ?assertEqual(instrument_id:trace_id_to_hex(ParentCtx#span_ctx.trace_id), TraceIdHex),
+      ?assertEqual(ChildSpanId, SpanIdHex),
+      ?assertEqual(<<"1">>, SamplingState),
+      ?assertEqual(ParentSpanId, ParentSpanIdHex)
+    end)
+  end),
+  ok.
+
+%% Test that inject without parent (root span) has 3 parts only
+b3_single_inject_no_parent_test(_Config) ->
+  %% Create a root span (no parent)
+  instrument_tracer:with_span(<<"root_span">>, fun() ->
+    FullCtx = instrument_context:current(),
+
+    %% Inject B3 header
+    Carrier = instrument_propagator_b3:inject(FullCtx, #{}),
+
+    ?assert(maps:is_key(<<"b3">>, Carrier)),
+    B3Header = maps:get(<<"b3">>, Carrier),
+
+    %% Header format should be: {TraceId}-{SpanId}-{SamplingState} (no parent)
+    Parts = binary:split(B3Header, <<"-">>, [global]),
+
+    %% Should have 3 parts when no parent
+    ?assertEqual(3, length(Parts)),
+
+    [_TraceIdHex, _SpanIdHex, SamplingState] = Parts,
+    ?assertEqual(<<"1">>, SamplingState)
+  end),
   ok.
