@@ -145,15 +145,29 @@ encode_resource_attributes() ->
   end, [], Attrs).
 
 group_by_scope(Spans) ->
-  %% For simplicity, put all spans in a single scope
+  %% Group spans by their tracer's instrumentation scope
+  Grouped = lists:foldl(fun(#span{tracer = T} = S, Acc) ->
+    Key = tracer_scope_key(T),
+    maps:update_with(Key, fun(L) -> [S|L] end, [S], Acc)
+  end, #{}, Spans),
+  [encode_scope_spans(K, lists:reverse(V)) || {K, V} <- maps:to_list(Grouped)].
+
+tracer_scope_key(undefined) ->
   {ScopeName, ScopeVersion} = get_instrumentation_scope(),
-  [#{
-    <<"scope">> => #{
-      <<"name">> => ScopeName,
-      <<"version">> => ScopeVersion
-    },
-    <<"spans">> => [encode_span(S) || S <- Spans]
-  }].
+  {ScopeName, ScopeVersion, undefined};
+tracer_scope_key(#tracer{name = N, version = V, schema_url = S}) ->
+  {N, to_binary(V, <<>>), S}.
+
+encode_scope_spans({Name, Version, SchemaUrl}, Spans) ->
+  Scope = #{<<"name">> => Name, <<"version">> => Version},
+  Scope2 = maybe_add_schema_url(Scope, SchemaUrl),
+  #{<<"scope">> => Scope2, <<"spans">> => [encode_span(S) || S <- Spans]}.
+
+maybe_add_schema_url(Scope, undefined) -> Scope;
+maybe_add_schema_url(Scope, SchemaUrl) -> Scope#{<<"schemaUrl">> => SchemaUrl}.
+
+to_binary(undefined, Default) -> Default;
+to_binary(V, _Default) -> to_binary(V).
 
 %% Get instrumentation scope from config or defaults
 get_instrumentation_scope() ->

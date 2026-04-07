@@ -32,22 +32,8 @@
   attributes = #{} :: map()
 }).
 
-%% Span record for tracing
--record(span, {
-  name :: binary(),
-  ctx :: #span_ctx{},
-  parent_ctx :: #span_ctx{} | undefined,
-  kind = internal :: client | server | producer | consumer | internal,
-  start_time :: integer(),                     % wall clock time in nanoseconds (Unix epoch)
-  end_time :: integer() | undefined,
-  attributes = #{} :: map(),
-  events = [] :: [#span_event{}],
-  links = [] :: [#span_link{}],
-  status = unset :: unset | ok | {error, binary()},
-  is_recording = true :: boolean()
-}).
-
 %% Resource (describes the entity producing telemetry)
+%% Must be defined before tracer record
 -record(resource, {
   attributes = #{} :: map(),
   schema_url :: binary() | undefined
@@ -62,11 +48,28 @@
 }).
 
 %% Tracer record
+%% Must be defined before span record
 -record(tracer, {
   name :: binary(),
   version :: binary() | undefined,
   schema_url :: binary() | undefined,
   resource :: #resource{} | undefined
+}).
+
+%% Span record for tracing
+-record(span, {
+  name :: binary(),
+  ctx :: #span_ctx{},
+  parent_ctx :: #span_ctx{} | undefined,
+  tracer :: #tracer{} | undefined,
+  kind = internal :: client | server | producer | consumer | internal,
+  start_time :: integer(),                     % wall clock time in nanoseconds (Unix epoch)
+  end_time :: integer() | undefined,
+  attributes = #{} :: map(),
+  events = [] :: [#span_event{}],
+  links = [] :: [#span_link{}],
+  status = unset :: unset | ok | {error, binary()},
+  is_recording = true :: boolean()
 }).
 
 %% Meter record for metrics

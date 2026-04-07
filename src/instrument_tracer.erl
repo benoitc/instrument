@@ -83,7 +83,8 @@
   links => [#span_link{}],
   start_time => integer(),
   parent => #span_ctx{} | undefined,
-  span_id => binary()     %% Custom 8-byte span ID or 16-char hex string
+  span_id => binary(),    %% Custom 8-byte span ID or 16-char hex string
+  tracer => #tracer{} | undefined  %% Tracer that created this span (for scope info)
 }.
 
 -type tracer() :: #tracer{}.
@@ -145,6 +146,7 @@ start_span_impl(Name, Opts) ->
   Attributes = maps:get(attributes, Opts, #{}),
   Links = maps:get(links, Opts, []),
   StartTime = maps:get(start_time, Opts, erlang:system_time(nanosecond)),
+  Tracer = maps:get(tracer, Opts, undefined),
 
   %% Get parent context
   ParentCtx = case maps:get(parent, Opts, undefined) of
@@ -200,6 +202,7 @@ start_span_impl(Name, Opts) ->
     name = Name,
     ctx = SpanCtx,
     parent_ctx = ParentSpanCtx,
+    tracer = Tracer,
     kind = Kind,
     start_time = StartTime,
     attributes = MergedAttributes,
@@ -287,6 +290,7 @@ noop_span(Name) ->
       is_remote = false
     },
     parent_ctx = undefined,
+    tracer = undefined,
     kind = internal,
     start_time = 0,
     end_time = undefined,
