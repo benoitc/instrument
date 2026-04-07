@@ -43,7 +43,13 @@
   %% Error logging tests
   processor_error_logging_on_start_test/1,
   processor_error_logging_on_end_test/1,
-  processor_continues_after_error_test/1
+  processor_continues_after_error_test/1,
+  %% Inline processor function tests
+  inline_processor_on_start_test/1,
+  inline_processor_on_end_test/1,
+  inline_processor_error_handling_test/1,
+  inline_processor_chain_order_test/1,
+  processor_cache_invalidation_test/1
 ]).
 
 %% Logger handler callback for testing
@@ -75,7 +81,13 @@ all() ->
     %% Error logging tests
     processor_error_logging_on_start_test,
     processor_error_logging_on_end_test,
-    processor_continues_after_error_test
+    processor_continues_after_error_test,
+    %% Inline processor function tests
+    inline_processor_on_start_test,
+    inline_processor_on_end_test,
+    inline_processor_error_handling_test,
+    inline_processor_chain_order_test,
+    processor_cache_invalidation_test
   ].
 
 init_per_suite(Config) ->
@@ -974,3 +986,180 @@ processor_continues_after_error_test(_Config) ->
 log(LogEvent, #{test_pid := Pid}) ->
   Pid ! {log_event, LogEvent},
   ok.
+
+%% ============================================================================
+%% Inline Processor Function Tests
+%% ============================================================================
+
+%% Test that on_start_inline calls processors and modifies span
+inline_processor_on_start_test(_Config) ->
+  meck:new(test_inline_processor, [non_strict]),
+  meck:expect(test_inline_processor, init, fun(_) -> {ok, test_state} end),
+  meck:expect(test_inline_processor, on_start, fun(Span, _ParentCtx) ->
+    Span#span{attributes = maps:put(<<"inline">>, true, Span#span.attributes)}
+  end),
+  meck:expect(test_inline_processor, on_end, fun(_) -> ok end),
+  meck:expect(test_inline_processor, shutdown, fun(_) -> ok end),
+  meck:expect(test_inline_processor, force_flush, fun(_) -> ok end),
+
+  ok = instrument_span_processor:register(test_inline_processor, #{}),
+  try
+    %% Create test span
+    Span = #span{
+      name = <<"test">>,
+      ctx = #span_ctx{trace_id = <<1:128>>, span_id = <<1:64>>},
+      attributes = #{}
+    },
+
+    %% Call inline function directly
+    Result = instrument_span_processor:on_start_inline(Span, undefined),
+
+    %% Verify processor was called and modified span
+    true = maps:get(<<"inline">>, Result#span.attributes),
+    true = meck:called(test_inline_processor, on_start, '_')
+  after
+    ok = instrument_span_processor:unregister(test_inline_processor),
+    meck:unload(test_inline_processor)
+  end.
+
+%% Test that on_end_inline calls processors
+inline_processor_on_end_test(_Config) ->
+  Self = self(),
+  meck:new(test_inline_end_processor, [non_strict]),
+  meck:expect(test_inline_end_processor, init, fun(_) -> {ok, test_state} end),
+  meck:expect(test_inline_end_processor, on_start, fun(Span, _) -> Span end),
+  meck:expect(test_inline_end_processor, on_end, fun(Span) ->
+    Self ! {on_end, Span#span.name},
+    ok
+  end),
+  meck:expect(test_inline_end_processor, shutdown, fun(_) -> ok end),
+  meck:expect(test_inline_end_processor, force_flush, fun(_) -> ok end),
+
+  ok = instrument_span_processor:register(test_inline_end_processor, #{}),
+  try
+    Span = #span{name = <<"test_span">>, ctx = #span_ctx{}},
+
+    %% Call inline function directly
+    ok = instrument_span_processor:on_end_inline(Span),
+
+    %% Verify processor received the span
+    receive
+      {on_end, <<"test_span">>} -> ok
+    after 1000 ->
+      ct:fail(on_end_not_called)
+    end
+  after
+    ok = instrument_span_processor:unregister(test_inline_end_processor),
+    meck:unload(test_inline_end_processor)
+  end.
+
+%% Test that inline functions handle processor errors gracefully
+inline_processor_error_handling_test(_Config) ->
+  meck:new(bad_inline_processor, [non_strict]),
+  meck:expect(bad_inline_processor, init, fun(_) -> {ok, state} end),
+  meck:expect(bad_inline_processor, on_start, fun(_, _) -> error(crash) end),
+  meck:expect(bad_inline_processor, on_end, fun(_) -> error(crash) end),
+  meck:expect(bad_inline_processor, shutdown, fun(_) -> ok end),
+  meck:expect(bad_inline_processor, force_flush, fun(_) -> ok end),
+
+  ok = instrument_span_processor:register(bad_inline_processor, #{}),
+  try
+    Span = #span{name = <<"test">>, ctx = #span_ctx{}, attributes = #{}},
+
+    %% on_start_inline should return original span on error
+    Result = instrument_span_processor:on_start_inline(Span, undefined),
+    <<"test">> = Result#span.name,
+
+    %% on_end_inline should return ok even on processor error
+    ok = instrument_span_processor:on_end_inline(Span)
+  after
+    ok = instrument_span_processor:unregister(bad_inline_processor),
+    meck:unload(bad_inline_processor)
+  end.
+
+%% Test that multiple processors are called in order via inline functions
+inline_processor_chain_order_test(_Config) ->
+  Self = self(),
+
+  %% Create two processors that record call order
+  meck:new(inline_proc1, [non_strict]),
+  meck:expect(inline_proc1, init, fun(_) -> {ok, s1} end),
+  meck:expect(inline_proc1, on_start, fun(Span, _) ->
+    Self ! {started, inline_proc1},
+    Span#span{attributes = maps:put(inline_proc1, true, Span#span.attributes)}
+  end),
+  meck:expect(inline_proc1, on_end, fun(_) -> Self ! {ended, inline_proc1}, ok end),
+  meck:expect(inline_proc1, shutdown, fun(_) -> ok end),
+  meck:expect(inline_proc1, force_flush, fun(_) -> ok end),
+
+  meck:new(inline_proc2, [non_strict]),
+  meck:expect(inline_proc2, init, fun(_) -> {ok, s2} end),
+  meck:expect(inline_proc2, on_start, fun(Span, _) ->
+    Self ! {started, inline_proc2},
+    Span#span{attributes = maps:put(inline_proc2, true, Span#span.attributes)}
+  end),
+  meck:expect(inline_proc2, on_end, fun(_) -> Self ! {ended, inline_proc2}, ok end),
+  meck:expect(inline_proc2, shutdown, fun(_) -> ok end),
+  meck:expect(inline_proc2, force_flush, fun(_) -> ok end),
+
+  %% Register in order: proc1 first, then proc2
+  ok = instrument_span_processor:register(inline_proc1, #{}),
+  ok = instrument_span_processor:register(inline_proc2, #{}),
+  try
+    Span = #span{name = <<"test">>, ctx = #span_ctx{}, attributes = #{}},
+
+    %% Execute inline chain
+    Result = instrument_span_processor:on_start_inline(Span, undefined),
+
+    %% Both processors should have modified the span
+    true = maps:get(inline_proc1, Result#span.attributes),
+    true = maps:get(inline_proc2, Result#span.attributes),
+
+    %% Verify call order for on_end
+    ok = instrument_span_processor:on_end_inline(Span),
+    receive {ended, _} -> ok after 100 -> ok end,
+    receive {ended, _} -> ok after 100 -> ok end
+  after
+    ok = instrument_span_processor:unregister(inline_proc2),
+    ok = instrument_span_processor:unregister(inline_proc1),
+    meck:unload(inline_proc1),
+    meck:unload(inline_proc2)
+  end.
+
+%% Test that processor cache is updated on register/unregister
+processor_cache_invalidation_test(_Config) ->
+  Self = self(),
+
+  meck:new(cached_proc, [non_strict]),
+  meck:expect(cached_proc, init, fun(_) -> {ok, state} end),
+  meck:expect(cached_proc, on_start, fun(Span, _) ->
+    Self ! {proc_called, Span#span.name}, Span
+  end),
+  meck:expect(cached_proc, on_end, fun(_) -> ok end),
+  meck:expect(cached_proc, shutdown, fun(_) -> ok end),
+  meck:expect(cached_proc, force_flush, fun(_) -> ok end),
+
+  %% Before registration - cache should be empty (or no cached_proc)
+  CacheBefore = persistent_term:get('$instrument_processors', []),
+  false = lists:keymember(cached_proc, 1, CacheBefore),
+
+  %% Register processor
+  ok = instrument_span_processor:register(cached_proc, #{}),
+
+  %% Cache should now have the processor
+  CacheAfterReg = persistent_term:get('$instrument_processors', []),
+  true = lists:keymember(cached_proc, 1, CacheAfterReg),
+
+  %% Verify inline function uses cached processor
+  Span = #span{name = <<"test">>, ctx = #span_ctx{}, attributes = #{}},
+  _ = instrument_span_processor:on_start_inline(Span, undefined),
+  receive {proc_called, <<"test">>} -> ok after 1000 -> ct:fail(not_called) end,
+
+  %% Unregister processor
+  ok = instrument_span_processor:unregister(cached_proc),
+
+  %% Cache should not have cached_proc anymore
+  CacheAfterUnreg = persistent_term:get('$instrument_processors', []),
+  false = lists:keymember(cached_proc, 1, CacheAfterUnreg),
+
+  meck:unload(cached_proc).

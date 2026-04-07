@@ -31,7 +31,11 @@
   tracing_disabled/1,
   custom_span_id/1,
   concurrent_exporter_registration/1,
-  record_only_no_export_test/1
+  record_only_no_export_test/1,
+  %% Throughput optimization tests
+  events_chronological_order_on_export/1,
+  links_chronological_order_on_export/1,
+  exporter_cache_invalidation/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -55,7 +59,11 @@ all() ->
     tracing_disabled,
     custom_span_id,
     concurrent_exporter_registration,
-    record_only_no_export_test
+    record_only_no_export_test,
+    %% Throughput optimization tests
+    events_chronological_order_on_export,
+    links_chronological_order_on_export,
+    exporter_cache_invalidation
   ].
 
 init_per_suite(Config) ->
@@ -211,8 +219,10 @@ span_events(_Config) ->
     %% Add event with attributes
     ok = instrument_tracer:add_event(<<"event2">>, #{<<"key">> => <<"value">>}),
 
+    %% Events are stored in reverse order (prepended for O(1) add)
+    %% They are reversed to chronological order at end_span before export
     Span = instrument_tracer:current_span(),
-    [Event1, Event2] = Span#span.events,
+    [Event2, Event1] = Span#span.events,
     <<"event1">> = Event1#span_event.name,
     <<"event2">> = Event2#span_event.name,
     #{<<"key">> := <<"value">>} = Event2#span_event.attributes
@@ -550,3 +560,104 @@ record_only_no_export_test(_Config) ->
     ok = instrument_sampler:set_sampler(OriginalSampler, #{})
   end,
   ok.
+
+%% ============================================================================
+%% Throughput Optimization Tests
+%% ============================================================================
+
+%% Test that events are in chronological order when passed to exporters
+%% (reversed from internal prepend order)
+events_chronological_order_on_export(_Config) ->
+  Self = self(),
+  Exporter = fun(Span) -> Self ! {exported, Span}, ok end,
+  ok = instrument_tracer:register_exporter(Exporter),
+  try
+    instrument_tracer:with_span(<<"test">>, fun() ->
+      ok = instrument_tracer:add_event(<<"event1">>),
+      timer:sleep(1),
+      ok = instrument_tracer:add_event(<<"event2">>),
+      timer:sleep(1),
+      ok = instrument_tracer:add_event(<<"event3">>)
+    end),
+    receive
+      {exported, Span} ->
+        [E1, E2, E3] = Span#span.events,
+        %% Verify chronological order (oldest first)
+        <<"event1">> = E1#span_event.name,
+        <<"event2">> = E2#span_event.name,
+        <<"event3">> = E3#span_event.name,
+        %% Verify timestamps are ascending
+        true = E1#span_event.timestamp =< E2#span_event.timestamp,
+        true = E2#span_event.timestamp =< E3#span_event.timestamp
+    after 1000 ->
+      ct:fail(timeout_waiting_for_export)
+    end
+  after
+    ok = instrument_tracer:unregister_exporter(Exporter)
+  end.
+
+%% Test that links are in chronological order when passed to exporters
+links_chronological_order_on_export(_Config) ->
+  Self = self(),
+  Exporter = fun(Span) -> Self ! {exported, Span}, ok end,
+  ok = instrument_tracer:register_exporter(Exporter),
+  try
+    %% Create span contexts for links
+    Ctx1 = #span_ctx{trace_id = <<1:128>>, span_id = <<1:64>>, trace_flags = 1},
+    Ctx2 = #span_ctx{trace_id = <<2:128>>, span_id = <<2:64>>, trace_flags = 1},
+    Ctx3 = #span_ctx{trace_id = <<3:128>>, span_id = <<3:64>>, trace_flags = 1},
+
+    instrument_tracer:with_span(<<"test">>, fun() ->
+      ok = instrument_tracer:add_link(Ctx1),
+      ok = instrument_tracer:add_link(Ctx2),
+      ok = instrument_tracer:add_link(Ctx3)
+    end),
+    receive
+      {exported, Span} ->
+        [L1, L2, L3] = Span#span.links,
+        %% Verify chronological order (first added is first in list)
+        Ctx1 = L1#span_link.ctx,
+        Ctx2 = L2#span_link.ctx,
+        Ctx3 = L3#span_link.ctx
+    after 1000 ->
+      ct:fail(timeout_waiting_for_export)
+    end
+  after
+    ok = instrument_tracer:unregister_exporter(Exporter)
+  end.
+
+%% Test that the exporter cache is properly invalidated when
+%% exporters are registered/unregistered
+exporter_cache_invalidation(_Config) ->
+  Self = self(),
+  Exporter1 = fun(Span) -> Self ! {exp1, Span#span.name}, ok end,
+  Exporter2 = fun(Span) -> Self ! {exp2, Span#span.name}, ok end,
+
+  %% Register first exporter
+  ok = instrument_tracer:register_exporter(Exporter1),
+
+  %% Create span - should be seen by exporter1 only
+  instrument_tracer:with_span(<<"span1">>, fun() -> ok end),
+  receive {exp1, <<"span1">>} -> ok after 1000 -> ct:fail(exp1_not_called) end,
+
+  %% Register second exporter
+  ok = instrument_tracer:register_exporter(Exporter2),
+
+  %% Create span - should be seen by both exporters
+  instrument_tracer:with_span(<<"span2">>, fun() -> ok end),
+  receive {exp1, <<"span2">>} -> ok after 1000 -> ct:fail(exp1_not_called_span2) end,
+  receive {exp2, <<"span2">>} -> ok after 1000 -> ct:fail(exp2_not_called) end,
+
+  %% Unregister first exporter
+  ok = instrument_tracer:unregister_exporter(Exporter1),
+
+  %% Create span - should be seen by exporter2 only
+  instrument_tracer:with_span(<<"span3">>, fun() -> ok end),
+  receive {exp2, <<"span3">>} -> ok after 1000 -> ct:fail(exp2_not_called_span3) end,
+
+  %% Verify exporter1 not called for span3
+  receive {exp1, <<"span3">>} -> ct:fail(exp1_should_not_be_called)
+  after 100 -> ok
+  end,
+
+  ok = instrument_tracer:unregister_exporter(Exporter2).
