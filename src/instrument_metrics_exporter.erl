@@ -272,7 +272,7 @@ convert_metric(#{type := counter, name := Name, help := Help, val := Val} = Metr
   #{
     name => to_binary(Name),
     description => extract_help(Help),
-    unit => <<"1">>,
+    unit => get_instrument_unit(Name),
     type => counter,
     data_points => [#{
       attributes => #{},
@@ -286,7 +286,7 @@ convert_metric(#{type := counter, name := Name, help := Help, labels := Labels, 
   #{
     name => to_binary(Name),
     description => extract_help(Help),
-    unit => <<"1">>,
+    unit => get_instrument_unit(Name),
     type => counter,
     data_points => [#{
       attributes => make_attributes(Labels, LabelVals),
@@ -299,7 +299,7 @@ convert_metric(#{type := gauge, name := Name, help := Help, val := Val}, Timesta
   #{
     name => to_binary(Name),
     description => extract_help(Help),
-    unit => <<"1">>,
+    unit => get_instrument_unit(Name),
     type => gauge,
     data_points => [#{
       attributes => #{},
@@ -312,7 +312,7 @@ convert_metric(#{type := gauge, name := Name, help := Help, labels := Labels, da
   #{
     name => to_binary(Name),
     description => extract_help(Help),
-    unit => <<"1">>,
+    unit => get_instrument_unit(Name),
     type => gauge,
     data_points => [#{
       attributes => make_attributes(Labels, LabelVals),
@@ -326,7 +326,7 @@ convert_metric(#{type := histogram, name := Name, help := Help, count := Count, 
   #{
     name => to_binary(Name),
     description => extract_help(Help),
-    unit => <<"1">>,
+    unit => get_instrument_unit(Name),
     type => histogram,
     data_points => [#{
       attributes => #{},
@@ -344,7 +344,7 @@ convert_metric(#{type := histogram, name := Name, help := Help, labels := Labels
   #{
     name => to_binary(Name),
     description => extract_help(Help),
-    unit => <<"1">>,
+    unit => get_instrument_unit(Name),
     type => histogram,
     data_points => [#{
       attributes => make_attributes(Labels, LabelVals),
@@ -374,6 +374,20 @@ make_attributes(Labels, LabelVals) ->
   lists:foldl(fun({Label, Val}, Acc) ->
     maps:put(to_binary(Label), to_binary(Val), Acc)
   end, #{}, lists:zip(Labels, LabelVals)).
+
+%% Get unit from otel_instrument if available, otherwise default to "1"
+get_instrument_unit({otel, Name}) when is_binary(Name) ->
+  get_instrument_unit(Name);
+get_instrument_unit({otel_vec, Name}) when is_binary(Name) ->
+  %% For vec metrics, strip the label suffix to get base name
+  get_instrument_unit(Name);
+get_instrument_unit(Name) when is_binary(Name) ->
+  case instrument_meter:get_instrument(Name) of
+    #otel_instrument{unit = Unit} when Unit =/= undefined -> Unit;
+    _ -> <<"1">>
+  end;
+get_instrument_unit(_) ->
+  <<"1">>.
 
 to_binary({otel, Name}) when is_binary(Name) -> Name;
 to_binary({otel_vec, Name}) when is_binary(Name) -> Name;

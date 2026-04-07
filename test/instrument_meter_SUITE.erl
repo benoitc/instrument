@@ -32,10 +32,12 @@
   unregister_instrument_test/1,
   unregister_all_instruments_test/1,
   unregister_cleans_vec_metrics_test/1,
-  concurrent_attribute_operations_test/1
+  concurrent_attribute_operations_test/1,
+  description_unit_preserved_test/1
 ]).
 
 -include("instrument_otel.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 all() ->
   [
@@ -56,7 +58,8 @@ all() ->
     unregister_instrument_test,
     unregister_all_instruments_test,
     unregister_cleans_vec_metrics_test,
-    concurrent_attribute_operations_test
+    concurrent_attribute_operations_test,
+    description_unit_preserved_test
   ].
 
 init_per_suite(Config) ->
@@ -440,4 +443,36 @@ concurrent_attribute_operations_test(_Config) ->
 
   %% Cleanup
   ok = instrument_meter:unregister_instrument(<<"race_counter">>),
+  ok.
+
+%% Test that description and unit are preserved when collecting metrics
+description_unit_preserved_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"desc_unit_test">>),
+
+  %% Create counter with description and unit
+  Counter = instrument_meter:create_counter(Meter, <<"preserved_counter">>, #{
+    description => <<"My custom description">>,
+    unit => <<"requests">>
+  }),
+  ok = instrument_meter:add(Counter, 10),
+
+  %% Collect metrics
+  Metrics = instrument_metrics_exporter:collect(),
+
+  %% Find our counter (may have otel prefix)
+  CounterMetrics = [M || #{name := N} = M <- Metrics,
+                         binary:match(N, <<"preserved_counter">>) =/= nomatch],
+  ?assert(length(CounterMetrics) >= 1),
+
+  %% Verify description is preserved
+  [CounterMetric | _] = CounterMetrics,
+  Description = maps:get(description, CounterMetric, maps:get(help, CounterMetric, <<>>)),
+  ?assertEqual(<<"My custom description">>, Description),
+
+  %% Verify unit is preserved (not hardcoded "1")
+  Unit = maps:get(unit, CounterMetric, <<"1">>),
+  ?assertEqual(<<"requests">>, Unit),
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"preserved_counter">>),
   ok.

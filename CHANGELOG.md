@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Tail-based sampling span processor
+- Generic client tracing utilities and attribute-based sampling
+- Flight recorder using erl_tracer NIF for low-overhead message tracing
+- Global tracing enable flag for performance optimization
+- Custom span_id support to tracer API
+- `instrument_test` module for validating instrumentation
+- `startTimeUnixNano` to OTLP metrics export
+- Debug logging to broad exception handlers
+- Error logging to span processor callbacks
+- Benchmarks for OpenTelemetry APIs and client tracing strategies
+- Design and internals documentation
+- Book chapters and reference guides
+- Elixir users guide
+- Runnable cross-process tracing and logging examples
+- Tests for metric names and attributes in exporter
+- Tests for tracing disabled and custom span_id
+- Regression tests for 4 bug fixes (record_only sampling, metric description/unit, histogram view boundaries, OTLP scope config)
+
+### Fixed
+- Critical tracing and OTLP spec compliance issues
+- Histogram and OTLP spec compliance issues
+- Empty bucket validation crash in histogram
+- Tuple metric name handling for OTEL metrics
+- Race condition in tracer exporter list
+- Race condition in metric index updates
+- Vec metric cleanup and concurrent attribute race condition
+- `mark/1,2` not working in spawned child processes
+- erl_tracer issues: teardown, idempotency, async parent spans
+- Multiple bugs in client and tail sampler
+- 5 bugs in span processors, metrics, and context propagation
+- 5 client tracing issues
+- Test failures in metrics exporter and span processor
+- E2E test skip behavior and timing issues
+
+### Changed
+- Replaced seq_trace with erl_tracer NIF for flight recorder performance
+- Improved flight recorder eviction performance
+- Improved config auto-registration and processor shutdown handling
+- Improved edge case handling in tail sampler
+- Renamed exporter callbacks to avoid gen_server conflicts
+- Added xref checks
+- Documented processor callback restrictions
+- Filter internal tracer bootstrap messages in trace_receive
+
 ## [0.3.0] - 2026-04-01
 
 ### Added

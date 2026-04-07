@@ -374,11 +374,12 @@ create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_bin
       Existing
   end.
 
-create_underlying_metric(Name, counter, _Opts) ->
+create_underlying_metric(Name, counter, Opts) ->
   %% Use gauge NIF for counter (monotonic increments only)
   {ok, Ref} = instrument_nif:new_gauge(),
   StartTime = erlang:system_time(nanosecond),
-  Info = instrument_lib:mk_info(Name, <<>>),
+  Description = maps:get(description, Opts, <<>>),
+  Info = instrument_lib:mk_info(Name, Description),
   Metric = #metric{
     name = {otel, Name},
     handle = {Ref, StartTime},
@@ -387,10 +388,11 @@ create_underlying_metric(Name, counter, _Opts) ->
   ok = instrument:register(Metric),
   Metric;
 
-create_underlying_metric(Name, up_down_counter, _Opts) ->
+create_underlying_metric(Name, up_down_counter, Opts) ->
   %% Use gauge NIF for up_down_counter
   {ok, Ref} = instrument_nif:new_gauge(),
-  Info = instrument_lib:mk_info(Name, <<>>),
+  Description = maps:get(description, Opts, <<>>),
+  Info = instrument_lib:mk_info(Name, Description),
   Metric = #metric{
     name = {otel, Name},
     handle = Ref,
@@ -401,15 +403,22 @@ create_underlying_metric(Name, up_down_counter, _Opts) ->
 
 create_underlying_metric(Name, histogram, Opts) ->
   %% Use histogram NIF
-  Boundaries = maps:get(boundaries, Opts, default_boundaries()),
-  Metric = instrument_histogram:new_histogram(Name, <<>>, Boundaries),
+  %% Check registered views for boundaries first, then Opts, then defaults
+  ViewBoundaries = find_view_boundaries(Name),
+  Boundaries = case ViewBoundaries of
+    undefined -> maps:get(boundaries, Opts, default_boundaries());
+    B -> B
+  end,
+  Description = maps:get(description, Opts, <<>>),
+  Metric = instrument_histogram:new_histogram(Name, Description, Boundaries),
   ok = instrument:register(Metric),
   Metric;
 
-create_underlying_metric(Name, gauge, _Opts) ->
+create_underlying_metric(Name, gauge, Opts) ->
   %% Use gauge NIF
   {ok, Ref} = instrument_nif:new_gauge(),
-  Info = instrument_lib:mk_info(Name, <<>>),
+  Description = maps:get(description, Opts, <<>>),
+  Info = instrument_lib:mk_info(Name, Description),
   Metric = #metric{
     name = {otel, Name},
     handle = Ref,
@@ -567,3 +576,13 @@ label_suffix(LabelNames) ->
     <<Acc/binary, "_", LBin/binary>>
   end, <<>>, Sorted),
   Joined.
+
+%% Find histogram boundaries from registered views
+find_view_boundaries(Name) ->
+  Views = instrument_metric_view:list(),
+  %% Find first matching view with boundaries defined
+  case [V || #metric_view{instrument_name = N, boundaries = B} = V <- Views,
+             (N =:= Name orelse N =:= '_'), B =/= undefined] of
+    [#metric_view{boundaries = B} | _] -> B;
+    [] -> undefined
+  end.

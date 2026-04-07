@@ -28,7 +28,8 @@
   wildcard_match_test/1,
   type_match_test/1,
   multiple_views_test/1,
-  no_views_passthrough_test/1
+  no_views_passthrough_test/1,
+  histogram_view_boundaries_test/1
 ]).
 
 all() ->
@@ -42,7 +43,8 @@ all() ->
     wildcard_match_test,
     type_match_test,
     multiple_views_test,
-    no_views_passthrough_test
+    no_views_passthrough_test,
+    histogram_view_boundaries_test
   ].
 
 init_per_suite(Config) ->
@@ -250,4 +252,40 @@ no_views_passthrough_test(_Config) ->
 
   [Result] = instrument_metric_view:apply_views([Metric]),
   ?assertEqual(Metric, Result),
+  ok.
+
+%% Test that histogram view boundaries are applied when creating histogram
+histogram_view_boundaries_test(_Config) ->
+  %% Register view with custom boundaries BEFORE creating histogram
+  CustomBoundaries = [1.0, 5.0, 10.0, 50.0, 100.0],
+  View = #metric_view{
+    instrument_name = <<"view_bounded_hist">>,
+    boundaries = CustomBoundaries
+  },
+  ok = instrument_metric_view:register(View),
+
+  %% Clean up any existing instrument
+  _ = instrument_meter:unregister_instrument(<<"view_bounded_hist">>),
+
+  %% Create histogram WITHOUT explicit boundaries - should use view boundaries
+  Meter = instrument_meter:get_meter(<<"view_test">>),
+  Histogram = instrument_meter:create_histogram(Meter, <<"view_bounded_hist">>, #{
+    description => <<"Histogram with view boundaries">>
+    %% Note: NO boundaries in Opts
+  }),
+
+  %% Record some values
+  ok = instrument_meter:record(Histogram, 2.5),
+  ok = instrument_meter:record(Histogram, 25.0),
+  ok = instrument_meter:record(Histogram, 75.0),
+
+  %% Get the underlying metric and check boundaries
+  #otel_instrument{handle = Handle} = Histogram,
+  ActualBoundaries = instrument_histogram:get_bucket_boundaries(Handle),
+
+  %% Verify view boundaries were used
+  ?assertEqual(CustomBoundaries, ActualBoundaries),
+
+  %% Cleanup
+  ok = instrument_meter:unregister_instrument(<<"view_bounded_hist">>),
   ok.

@@ -37,8 +37,12 @@
   metric_attrs_vec_labels_test/1,
   metric_attrs_otel_single_test/1,
   metric_attrs_otel_multiple_test/1,
-  metric_attrs_type_conversion_test/1
+  metric_attrs_type_conversion_test/1,
+  %% OTLP scope config test
+  otlp_scope_config_test/1
 ]).
+
+-include_lib("stdlib/include/assert.hrl").
 
 all() ->
   [
@@ -64,7 +68,9 @@ all() ->
     metric_attrs_vec_labels_test,
     metric_attrs_otel_single_test,
     metric_attrs_otel_multiple_test,
-    metric_attrs_type_conversion_test
+    metric_attrs_type_conversion_test,
+    %% OTLP scope config test
+    otlp_scope_config_test
   ].
 
 init_per_suite(Config) ->
@@ -532,4 +538,48 @@ metric_attrs_type_conversion_test(_Config) ->
   %% Verify we can collect without errors (types were converted)
   [#{data_points := DataPoints} | _] = CounterMetrics,
   true = length(DataPoints) >= 1,
+  ok.
+
+%% Test that OTLP instrumentation scope is configurable via application env
+otlp_scope_config_test(_Config) ->
+  %% Save original values
+  OldName = application:get_env(instrument, instrumentation_scope_name),
+  OldVersion = application:get_env(instrument, instrumentation_scope_version),
+
+  %% Set custom scope in application env
+  application:set_env(instrument, instrumentation_scope_name, <<"my_custom_scope">>),
+  application:set_env(instrument, instrumentation_scope_version, <<"2.0.0">>),
+
+  try
+    %% Initialize OTLP exporter
+    {ok, State} = instrument_metrics_exporter_otlp:exporter_init(#{
+      endpoint => "http://localhost:4318"
+    }),
+
+    %% Create a metric
+    Meter = instrument_meter:get_meter(<<"scope_test">>),
+    Counter = instrument_meter:create_counter(Meter, <<"scope_test_counter">>, #{}),
+    ok = instrument_meter:add(Counter, 5),
+
+    %% Verify scope config is readable
+    ScopeName = application:get_env(instrument, instrumentation_scope_name, <<"default">>),
+    ScopeVersion = application:get_env(instrument, instrumentation_scope_version, <<"0.0.0">>),
+
+    ?assertEqual(<<"my_custom_scope">>, ScopeName),
+    ?assertEqual(<<"2.0.0">>, ScopeVersion),
+
+    %% Cleanup
+    ok = instrument_metrics_exporter_otlp:exporter_shutdown(State),
+    ok = instrument_meter:unregister_instrument(<<"scope_test_counter">>)
+  after
+    %% Restore original values
+    case OldName of
+      undefined -> application:unset_env(instrument, instrumentation_scope_name);
+      {ok, V} -> application:set_env(instrument, instrumentation_scope_name, V)
+    end,
+    case OldVersion of
+      undefined -> application:unset_env(instrument, instrumentation_scope_version);
+      {ok, V2} -> application:set_env(instrument, instrumentation_scope_version, V2)
+    end
+  end,
   ok.

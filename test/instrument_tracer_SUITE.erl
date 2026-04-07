@@ -30,7 +30,8 @@
   spans_no_context_leak/1,
   tracing_disabled/1,
   custom_span_id/1,
-  concurrent_exporter_registration/1
+  concurrent_exporter_registration/1,
+  record_only_no_export_test/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -53,7 +54,8 @@ all() ->
     spans_no_context_leak,
     tracing_disabled,
     custom_span_id,
-    concurrent_exporter_registration
+    concurrent_exporter_registration,
+    record_only_no_export_test
   ].
 
 init_per_suite(Config) ->
@@ -502,4 +504,49 @@ concurrent_exporter_registration(_Config) ->
     false = lists:member(E, FinalExporters)
   end, RegisteredExporters),
 
+  ok.
+
+%% Test that spans with trace_flags=0 (record_only) are NOT exported
+record_only_no_export_test(_Config) ->
+  %% Save original sampler and set parent-based sampler
+  OriginalSampler = instrument_sampler:get_sampler(),
+  ok = instrument_sampler:set_sampler(instrument_sampler_parent_based, #{}),
+
+  Parent = self(),
+  Exporter = fun(Span) ->
+    Parent ! {exported, Span}
+  end,
+  ok = instrument_tracer:register_exporter(Exporter),
+
+  try
+    %% Create a custom parent with trace_flags=0 (not sampled)
+    TraceId = instrument_id:generate_trace_id(),
+    ParentCtx = #span_ctx{
+      trace_id = TraceId,
+      span_id = instrument_id:generate_span_id(),
+      trace_flags = 0,  %% not sampled - should NOT be exported
+      is_remote = false
+    },
+
+    %% Start span with this parent context
+    Span = instrument_tracer:start_span(<<"record_only_span">>, #{parent => ParentCtx}),
+
+    %% Span should inherit trace_flags=0 from unsampled parent
+    ?assertEqual(0, (Span#span.ctx)#span_ctx.trace_flags),
+
+    instrument_tracer:end_span(Span),
+
+    %% Should NOT receive export message for non-sampled span
+    receive
+      {exported, #span{name = <<"record_only_span">>}} ->
+        ct:fail(should_not_export_record_only_span)
+    after 100 ->
+      %% Expected: no export
+      ok
+    end
+  after
+    ok = instrument_tracer:unregister_exporter(Exporter),
+    %% Restore original sampler
+    ok = instrument_sampler:set_sampler(OriginalSampler, #{})
+  end,
   ok.

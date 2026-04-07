@@ -347,8 +347,11 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
   end,
   %% Now mark as not recording for final state
   FinalSpan = SpanWithEndTime#span{is_recording = false},
-  %% Export the span
-  export_span(FinalSpan),
+  %% Export only if sampled (trace_flags=1), not for record_only spans
+  case SpanWithEndTime#span.ctx of
+    #span_ctx{trace_flags = 1} -> export_span(FinalSpan);
+    _ -> ok
+  end,
   %% Disable tracing if this process owns the trace (enabled it)
   %% This handles both root spans and async parent spans
   case erase('$instrument_flight_owner') of

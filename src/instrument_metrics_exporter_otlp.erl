@@ -134,13 +134,20 @@ encode_resource_attributes() ->
   end, [], Attrs).
 
 encode_scope_metrics(Metrics) ->
+  {ScopeName, ScopeVersion} = get_instrumentation_scope(),
   #{
     <<"scope">> => #{
-      <<"name">> => <<"instrument">>,
-      <<"version">> => <<"0.3.0">>
+      <<"name">> => ScopeName,
+      <<"version">> => ScopeVersion
     },
     <<"metrics">> => [encode_metric(M) || M <- Metrics]
   }.
+
+%% Get instrumentation scope from config or defaults
+get_instrumentation_scope() ->
+  Name = application:get_env(instrument, instrumentation_scope_name, <<"instrument">>),
+  Version = application:get_env(instrument, instrumentation_scope_version, <<"0.3.0">>),
+  {to_binary(Name), to_binary(Version)}.
 
 encode_metric(#{name := Name, type := Type, data_points := DataPoints} = Metric) ->
   Description = maps:get(description, Metric, <<>>),

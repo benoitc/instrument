@@ -146,13 +146,20 @@ encode_resource_attributes() ->
 
 group_by_scope(Spans) ->
   %% For simplicity, put all spans in a single scope
+  {ScopeName, ScopeVersion} = get_instrumentation_scope(),
   [#{
     <<"scope">> => #{
-      <<"name">> => <<"instrument">>,
-      <<"version">> => <<"0.3.0">>
+      <<"name">> => ScopeName,
+      <<"version">> => ScopeVersion
     },
     <<"spans">> => [encode_span(S) || S <- Spans]
   }].
+
+%% Get instrumentation scope from config or defaults
+get_instrumentation_scope() ->
+  Name = application:get_env(instrument, instrumentation_scope_name, <<"instrument">>),
+  Version = application:get_env(instrument, instrumentation_scope_version, <<"0.3.0">>),
+  {to_binary(Name), to_binary(Version)}.
 
 encode_span(#span{
   name = Name,
