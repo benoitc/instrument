@@ -22,6 +22,7 @@
   get_trace_by_id/1,
   dump_trace_clears/1,
   buffer_eviction/1,
+  buffer_eviction_large_batch/1,
   stats_reporting/1,
   trace_propagation/1,
   disabled_no_capture/1,
@@ -44,6 +45,7 @@ all() ->
     get_trace_by_id,
     dump_trace_clears,
     buffer_eviction,
+    buffer_eviction_large_batch,
     stats_reporting,
     trace_propagation,
     disabled_no_capture,
@@ -254,6 +256,50 @@ buffer_eviction(_Config) ->
   ct:pal("Stats after overflow: ~p", [Stats]),
   TableSize = maps:get(table_size, Stats),
   true = TableSize =< 15,  %% Allow some margin for async eviction
+
+  %% Reset buffer size to default
+  ok = instrument_flight_recorder:set_buffer_size(65536),
+  ok.
+
+buffer_eviction_large_batch(_Config) ->
+  %% Test that large batch eviction works efficiently
+  ok = instrument_flight_recorder:enable(),
+  ok = instrument_flight_recorder:clear(),
+
+  %% Set buffer size to 100
+  ok = instrument_flight_recorder:set_buffer_size(100),
+
+  %% Generate 1000 events (10x buffer size)
+  instrument_tracer:with_span(<<"large_eviction_test">>, fun() ->
+    lists:foreach(fun(N) ->
+      instrument_flight_recorder:mark(<<"marker">>, #{n => N})
+    end, lists:seq(1, 1000))
+  end),
+
+  %% Wait for eviction
+  timer:sleep(1500),
+
+  %% Buffer should be trimmed to near max size
+  Stats = instrument_flight_recorder:stats(),
+  ct:pal("Stats after large overflow: ~p", [Stats]),
+  TableSize = maps:get(table_size, Stats),
+
+  %% Should be close to 100 (allow margin for timing)
+  true = TableSize =< 150,
+
+  %% Verify oldest entries were removed (newer markers should remain)
+  AllEvents = instrument_flight_recorder:dump_all(),
+  MarkerNs = [N || {_, _, {marker, _, #{n := N}}} <- AllEvents],
+  ct:pal("Remaining marker Ns: ~p", [lists:sort(MarkerNs)]),
+
+  %% The remaining markers should be the newest ones
+  %% (i.e., higher N values since older ones were evicted)
+  case MarkerNs of
+    [] -> ok;  %% Acceptable if all cleared
+    _ ->
+      MinN = lists:min(MarkerNs),
+      true = MinN > 500  %% Oldest half should be evicted
+  end,
 
   %% Reset buffer size to default
   ok = instrument_flight_recorder:set_buffer_size(65536),

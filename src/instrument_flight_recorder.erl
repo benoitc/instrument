@@ -319,13 +319,17 @@ extract_label_from_tracer() ->
   end.
 
 %% @private Evicts N oldest entries from the buffer.
+%% Uses batch selection for better performance on large evictions.
 evict_oldest(0) ->
   ok;
 evict_oldest(N) when N > 0 ->
-  case ets:first(?BUFFER_TABLE) of
+  %% Select N oldest keys using ordered_set property (keys are in order)
+  %% ets:select with limit is more efficient than repeated first/delete
+  MatchSpec = [{{'$1', '_', '_'}, [], ['$1']}],
+  case ets:select(?BUFFER_TABLE, MatchSpec, N) of
+    {Keys, _Continuation} ->
+      %% Delete all selected keys
+      lists:foreach(fun(Key) -> ets:delete(?BUFFER_TABLE, Key) end, Keys);
     '$end_of_table' ->
-      ok;
-    Key ->
-      ets:delete(?BUFFER_TABLE, Key),
-      evict_oldest(N - 1)
+      ok
   end.
