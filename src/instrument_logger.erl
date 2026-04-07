@@ -156,6 +156,9 @@ make_log_record(Level, Msg, Meta) ->
   %% Extract attributes from metadata (excluding standard fields)
   Attributes = extract_attributes(Meta),
 
+  %% Get scope from active tracer if available
+  Scope = get_log_scope(),
+
   #log_record{
     timestamp = Timestamp,
     observed_timestamp = ObservedTimestamp,
@@ -167,8 +170,17 @@ make_log_record(Level, Msg, Meta) ->
     span_id = SpanId,
     trace_flags = TraceFlags,
     resource = undefined,
-    scope = undefined
+    scope = Scope
   }.
+
+%% Get scope from current span's tracer if available
+get_log_scope() ->
+  case instrument_tracer:current_span() of
+    #span{tracer = #tracer{name = N, version = V, schema_url = S}} ->
+      #scope{name = N, version = V, schema_url = S};
+    _ ->
+      #scope{name = <<"instrument">>, version = instrument_config:get_sdk_version()}
+  end.
 
 %% ============================================================================
 %% Logger Handler Callbacks

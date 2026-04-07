@@ -41,6 +41,8 @@
 %% Exporter callbacks
 -export([exporter_init/1, exporter_export/2, exporter_shutdown/1]).
 
+-include("instrument_otel.hrl").
+
 -record(state, {
   endpoint :: binary(),
   metrics_path :: binary(),
@@ -118,7 +120,7 @@ encode_metrics(Metrics) ->
   json:encode(Payload).
 
 group_metrics(Metrics) ->
-  ScopeMetrics = [encode_scope_metrics(Metrics)],
+  ScopeMetrics = group_by_scope(Metrics),
   [#{
     <<"resource">> => #{
       <<"attributes">> => encode_resource_attributes()
@@ -126,28 +128,43 @@ group_metrics(Metrics) ->
     <<"scopeMetrics">> => ScopeMetrics
   }].
 
+group_by_scope(Metrics) ->
+  %% Group metrics by their meter's instrumentation scope
+  Grouped = lists:foldl(fun(Metric, Acc) ->
+    Key = get_meter_scope_key(Metric),
+    maps:update_with(Key, fun(L) -> [Metric|L] end, [Metric], Acc)
+  end, #{}, Metrics),
+  [encode_scope_metrics_grouped(K, lists:reverse(V)) || {K, V} <- maps:to_list(Grouped)].
+
+get_meter_scope_key(#{name := Name}) ->
+  case instrument_meter:get_instrument(Name) of
+    #otel_instrument{meter = #meter{name = N, version = V, schema_url = S}} ->
+      {N, meter_version_to_binary(V, <<>>), S};
+    _ ->
+      %% Fallback to default scope
+      {<<"instrument">>, instrument_config:get_sdk_version(), undefined}
+  end;
+get_meter_scope_key(_) ->
+  {<<"instrument">>, instrument_config:get_sdk_version(), undefined}.
+
+encode_scope_metrics_grouped({Name, Version, SchemaUrl}, Metrics) ->
+  Scope = #{<<"name">> => Name, <<"version">> => Version},
+  Scope2 = maybe_add_schema_url(Scope, SchemaUrl),
+  #{<<"scope">> => Scope2, <<"metrics">> => [encode_metric(M) || M <- Metrics]}.
+
+maybe_add_schema_url(Scope, undefined) -> Scope;
+maybe_add_schema_url(Scope, SchemaUrl) -> Scope#{<<"schemaUrl">> => SchemaUrl}.
+
+meter_version_to_binary(undefined, Default) -> Default;
+meter_version_to_binary(V, _Default) when is_binary(V) -> V;
+meter_version_to_binary(V, _Default) when is_list(V) -> list_to_binary(V).
+
 encode_resource_attributes() ->
   Resource = instrument_resource:get_default(),
   Attrs = instrument_resource:get_attributes(Resource),
   maps:fold(fun(K, V, Acc) ->
     [#{<<"key">> => to_binary(K), <<"value">> => encode_attr_value(V)} | Acc]
   end, [], Attrs).
-
-encode_scope_metrics(Metrics) ->
-  {ScopeName, ScopeVersion} = get_instrumentation_scope(),
-  #{
-    <<"scope">> => #{
-      <<"name">> => ScopeName,
-      <<"version">> => ScopeVersion
-    },
-    <<"metrics">> => [encode_metric(M) || M <- Metrics]
-  }.
-
-%% Get instrumentation scope from config or defaults
-get_instrumentation_scope() ->
-  Name = application:get_env(instrument, instrumentation_scope_name, <<"instrument">>),
-  Version = application:get_env(instrument, instrumentation_scope_version, <<"0.3.0">>),
-  {to_binary(Name), to_binary(Version)}.
 
 encode_metric(#{name := Name, type := Type, data_points := DataPoints} = Metric) ->
   Description = maps:get(description, Metric, <<>>),

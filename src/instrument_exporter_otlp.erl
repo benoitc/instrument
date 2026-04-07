@@ -172,8 +172,8 @@ to_binary(V, _Default) -> to_binary(V).
 %% Get instrumentation scope from config or defaults
 get_instrumentation_scope() ->
   Name = application:get_env(instrument, instrumentation_scope_name, <<"instrument">>),
-  Version = application:get_env(instrument, instrumentation_scope_version, <<"0.3.0">>),
-  {to_binary(Name), to_binary(Version)}.
+  Version = instrument_config:get_sdk_version(),
+  {to_binary(Name), Version}.
 
 encode_span(#span{
   name = Name,

@@ -82,7 +82,7 @@ default() ->
   SdkResource = create(#{
     ?TELEMETRY_SDK_NAME => <<"instrument">>,
     ?TELEMETRY_SDK_LANGUAGE => <<"erlang">>,
-    ?TELEMETRY_SDK_VERSION => <<"0.3.0">>
+    ?TELEMETRY_SDK_VERSION => instrument_config:get_sdk_version()
   }),
 
   %% Run all registered detectors

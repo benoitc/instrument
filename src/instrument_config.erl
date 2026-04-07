@@ -54,7 +54,9 @@
   enable_exporter/1,
   disable_exporter/1,
   is_exporter_enabled/1,
-  get_exporters/0
+  get_exporters/0,
+  %% SDK version
+  get_sdk_version/0
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
@@ -312,6 +314,23 @@ get_exporters() ->
       Names = string:tokens(Value, ","),
       lists:filtermap(fun parse_exporter_name/1, Names)
   end.
+
+%% @doc Gets the SDK version dynamically from app metadata.
+%% Checks instrumentation_scope_version env first, then app vsn, then fallback.
+-spec get_sdk_version() -> binary().
+get_sdk_version() ->
+  case application:get_env(instrument, instrumentation_scope_version) of
+    {ok, Version} -> version_to_binary(Version);
+    undefined ->
+      case application:get_key(instrument, vsn) of
+        {ok, Vsn} -> version_to_binary(Vsn);
+        undefined -> <<"0.4.0">>
+      end
+  end.
+
+version_to_binary(V) when is_binary(V) -> V;
+version_to_binary(V) when is_list(V) -> list_to_binary(V);
+version_to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8).
 
 %% ============================================================================
 %% Internal Functions

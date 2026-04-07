@@ -147,14 +147,29 @@ encode_resource_attributes() ->
   end, [], Attrs).
 
 group_by_scope(LogRecords) ->
-  %% For simplicity, put all logs in a single scope
-  [#{
-    <<"scope">> => #{
-      <<"name">> => <<"instrument">>,
-      <<"version">> => <<"0.3.0">>
-    },
-    <<"logRecords">> => [encode_log_record(L) || L <- LogRecords]
-  }].
+  %% Group logs by their scope
+  Grouped = lists:foldl(fun(#log_record{scope = S} = L, Acc) ->
+    Key = log_scope_key(S),
+    maps:update_with(Key, fun(Ls) -> [L|Ls] end, [L], Acc)
+  end, #{}, LogRecords),
+  [encode_scope_logs(K, lists:reverse(V)) || {K, V} <- maps:to_list(Grouped)].
+
+log_scope_key(undefined) ->
+  {<<"instrument">>, instrument_config:get_sdk_version(), undefined};
+log_scope_key(#scope{name = N, version = V, schema_url = S}) ->
+  {N, scope_version_to_binary(V, <<>>), S}.
+
+encode_scope_logs({Name, Version, SchemaUrl}, Logs) ->
+  Scope = #{<<"name">> => Name, <<"version">> => Version},
+  Scope2 = maybe_add_schema_url(Scope, SchemaUrl),
+  #{<<"scope">> => Scope2, <<"logRecords">> => [encode_log_record(L) || L <- Logs]}.
+
+maybe_add_schema_url(Scope, undefined) -> Scope;
+maybe_add_schema_url(Scope, SchemaUrl) -> Scope#{<<"schemaUrl">> => SchemaUrl}.
+
+scope_version_to_binary(undefined, Default) -> Default;
+scope_version_to_binary(V, _Default) when is_binary(V) -> V;
+scope_version_to_binary(V, _Default) when is_list(V) -> list_to_binary(V).
 
 encode_log_record(#log_record{
   timestamp = Timestamp,
