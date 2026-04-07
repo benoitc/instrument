@@ -138,7 +138,12 @@ shutdown() ->
 %% @doc Shuts down the processor with state.
 -spec shutdown(#state{}) -> ok.
 shutdown(#state{exporter = Exporter, exporter_state = ExporterState}) ->
-  catch Exporter:shutdown(ExporterState),
+  try
+    Exporter:shutdown(ExporterState)
+  catch
+    Class:Reason:Stack ->
+      logger:debug("Exporter shutdown failed: ~p:~p~n~p", [Class, Reason, Stack])
+  end,
   ok.
 
 %% @doc Forces an immediate export of all queued spans.
@@ -168,7 +173,12 @@ handle_call(shutdown, _From, State) ->
   %% Export remaining spans with configured timeout
   NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
   %% Shutdown exporter
-  catch Exporter:shutdown(NewExporterState),
+  try
+    Exporter:shutdown(NewExporterState)
+  catch
+    Class:Reason:Stack ->
+      logger:debug("Exporter shutdown failed: ~p:~p~n~p", [Class, Reason, Stack])
+  end,
   {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
 
 handle_call(force_flush, _From, State) ->
@@ -245,7 +255,12 @@ terminate(_Reason, State) ->
   cancel_timer(TimerRef),
   %% Use configured export timeout for shutdown
   NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
-  catch Exporter:shutdown(NewExporterState),
+  try
+    Exporter:shutdown(NewExporterState)
+  catch
+    Class:Reason:Stack ->
+      logger:debug("Exporter shutdown failed in terminate: ~p:~p~n~p", [Class, Reason, Stack])
+  end,
   ok.
 
 code_change(_OldVsn, State, _Extra) ->

@@ -131,7 +131,10 @@ parse_traceparent(Value, Ctx) ->
         Ctx
     end
   catch
-    _:_ -> Ctx
+    Class:Reason:Stack ->
+      logger:debug("Failed to parse traceparent ~p: ~p:~p~n~p",
+                   [Value, Class, Reason, Stack]),
+      Ctx
   end.
 
 format_trace_flags(0) -> <<"00">>;

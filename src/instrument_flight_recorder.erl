@@ -315,7 +315,10 @@ extract_label_from_tracer() ->
         undefined
     end
   catch
-    _:_ -> undefined
+    Class:Reason:Stack ->
+      logger:debug("Failed to extract label from tracer: ~p:~p~n~p",
+                   [Class, Reason, Stack]),
+      undefined
   end.
 
 %% @private Evicts N oldest entries from the buffer.
