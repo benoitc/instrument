@@ -58,7 +58,7 @@ all() ->
 
 groups() ->
   [
-    {stress, [parallel], [
+    {stress, [], [
       counter_concurrent_increments,
       counter_vec_high_cardinality,
       gauge_concurrent_updates,
