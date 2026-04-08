@@ -5,7 +5,7 @@
 
 {application, instrument,
  [{description, "Fast metrics library for Erlang with Prometheus export and OpenTelemetry support"},
-  {vsn, "0.4.0"},
+  {vsn, "1.0.0"},
   {registered, []},
   {mod, {instrument_app, []}},
   {applications, [kernel, stdlib]},

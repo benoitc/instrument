@@ -37,14 +37,14 @@ Tested with:
 
 ```erlang
 {deps, [
-    {instrument, "0.3.0"}
+    {instrument, "1.0.0"}
 ]}.
 ```
 
 ### mix (Elixir)
 
 ```elixir
-{:instrument, "~> 0.3.0"}
+{:instrument, "~> 1.0.0"}
 ```
 
 ## Quick Start

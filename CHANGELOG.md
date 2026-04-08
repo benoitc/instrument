@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-04-08
+
+### Added
+- OTel spec compliance features: span limits, dropped counts tracking, exemplar support
+- B3 ParentSpanId injection for nested spans
+- Aggregation temporality support (cumulative/delta)
+- Observable instrument 1-arity callbacks with attributes
+- Tests for OTel spec compliance (30 new test cases)
+- Throughput optimizations for exporter and processor lookup
+- Updated benchmarks documentation
+
+### Fixed
+- Spawned-child trace leak with session-based cleanup
+- OpenTelemetry spec compliance issues in OTLP export
+- Preserved tracer scope in OTLP span export
+
 ## [0.4.0] - 2026-04-07
 
 ### Added
