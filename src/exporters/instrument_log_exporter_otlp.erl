@@ -168,8 +168,7 @@ maybe_add_schema_url(Scope, undefined) -> Scope;
 maybe_add_schema_url(Scope, SchemaUrl) -> Scope#{<<"schemaUrl">> => SchemaUrl}.
 
 scope_version_to_binary(undefined, Default) -> Default;
-scope_version_to_binary(V, _Default) when is_binary(V) -> V;
-scope_version_to_binary(V, _Default) when is_list(V) -> list_to_binary(V).
+scope_version_to_binary(V, _Default) when is_binary(V) -> V.
 
 encode_log_record(#log_record{
   timestamp = Timestamp,

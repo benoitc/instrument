@@ -156,8 +156,7 @@ maybe_add_schema_url(Scope, undefined) -> Scope;
 maybe_add_schema_url(Scope, SchemaUrl) -> Scope#{<<"schemaUrl">> => SchemaUrl}.
 
 meter_version_to_binary(undefined, Default) -> Default;
-meter_version_to_binary(V, _Default) when is_binary(V) -> V;
-meter_version_to_binary(V, _Default) when is_list(V) -> list_to_binary(V).
+meter_version_to_binary(V, _Default) when is_binary(V) -> V.
 
 encode_resource_attributes() ->
   Resource = instrument_resource:get_default(),
