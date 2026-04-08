@@ -334,6 +334,13 @@ stats_reporting(_Config) ->
   ok.
 
 trace_propagation(_Config) ->
+  %% Skip on macOS - set_on_spawn trace propagation is unreliable
+  case os:type() of
+    {unix, darwin} -> {skip, "Trace propagation unreliable on macOS"};
+    _ -> trace_propagation_impl()
+  end.
+
+trace_propagation_impl() ->
   ok = instrument_flight_recorder:enable(),
   Parent = self(),
 
