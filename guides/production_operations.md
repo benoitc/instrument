@@ -173,11 +173,11 @@ When the queue is full, new spans are dropped. Monitor this:
 
 ```erlang
 %% Create metric for dropped spans
-instrument:new_counter(otel_dropped_spans_total, <<"Dropped spans due to backpressure">>).
+instrument_metric:new_counter(otel_dropped_spans_total, <<"Dropped spans due to backpressure">>).
 
 %% In your batch processor wrapper
 handle_queue_full(Span) ->
-    instrument:inc_counter(otel_dropped_spans_total),
+    instrument_metric:inc_counter(otel_dropped_spans_total),
     logger:warning("Span dropped due to queue full").
 ```
 
@@ -267,13 +267,13 @@ handle_signal(sigterm) ->
 ```erlang
 init_self_monitoring() ->
     %% Spans
-    instrument:new_counter(otel_spans_created_total, <<"Total spans created">>),
-    instrument:new_counter(otel_spans_exported_total, <<"Total spans exported">>),
-    instrument:new_counter(otel_spans_dropped_total, <<"Total spans dropped">>),
-    instrument:new_histogram(otel_export_duration_seconds, <<"Export duration">>),
+    instrument_metric:new_counter(otel_spans_created_total, <<"Total spans created">>),
+    instrument_metric:new_counter(otel_spans_exported_total, <<"Total spans exported">>),
+    instrument_metric:new_counter(otel_spans_dropped_total, <<"Total spans dropped">>),
+    instrument_metric:new_histogram(otel_export_duration_seconds, <<"Export duration">>),
 
     %% Queue
-    instrument:new_gauge(otel_queue_size, <<"Current queue size">>),
+    instrument_metric:new_gauge(otel_queue_size, <<"Current queue size">>),
 
     ok.
 ```

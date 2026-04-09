@@ -18,7 +18,7 @@ The "Vec" (vector) API creates metrics with label dimensions:
 
 ```erlang
 %% Create a counter with labels
-instrument:new_counter_vec(
+instrument_metric:new_counter_vec(
     http_requests_total,
     <<"HTTP requests by method and status">>,
     [method, status]
@@ -33,44 +33,44 @@ The third argument is a list of label names. Each measurement includes values fo
 
 ```erlang
 %% Create the metric once
-instrument:new_counter_vec(http_requests_total, <<"HTTP requests">>, [method, status]).
+instrument_metric:new_counter_vec(http_requests_total, <<"HTTP requests">>, [method, status]).
 
 %% Record with label values
-instrument:inc_counter_vec(http_requests_total, [<<"GET">>, <<"200">>]).
-instrument:inc_counter_vec(http_requests_total, [<<"POST">>, <<"201">>]).
-instrument:inc_counter_vec(http_requests_total, [<<"GET">>, <<"404">>]).
+instrument_metric:inc_counter_vec(http_requests_total, [<<"GET">>, <<"200">>]).
+instrument_metric:inc_counter_vec(http_requests_total, [<<"POST">>, <<"201">>]).
+instrument_metric:inc_counter_vec(http_requests_total, [<<"GET">>, <<"404">>]).
 
 %% Increment by more than 1
-instrument:inc_counter_vec(http_requests_total, [<<"GET">>, <<"200">>], 5).
+instrument_metric:inc_counter_vec(http_requests_total, [<<"GET">>, <<"200">>], 5).
 
 %% Get a specific combination
-Value = instrument:get_counter_vec(http_requests_total, [<<"GET">>, <<"200">>]).
+Value = instrument_metric:get_counter_vec(http_requests_total, [<<"GET">>, <<"200">>]).
 ```
 
 ### Gauges with Labels
 
 ```erlang
-instrument:new_gauge_vec(connection_pool_size, <<"Pool connections">>, [pool, state]).
+instrument_metric:new_gauge_vec(connection_pool_size, <<"Pool connections">>, [pool, state]).
 
 %% Track different pools and states
-instrument:set_gauge_vec(connection_pool_size, [<<"default">>, <<"active">>], 10).
-instrument:set_gauge_vec(connection_pool_size, [<<"default">>, <<"idle">>], 5).
-instrument:set_gauge_vec(connection_pool_size, [<<"secondary">>, <<"active">>], 3).
+instrument_metric:set_gauge_vec(connection_pool_size, [<<"default">>, <<"active">>], 10).
+instrument_metric:set_gauge_vec(connection_pool_size, [<<"default">>, <<"idle">>], 5).
+instrument_metric:set_gauge_vec(connection_pool_size, [<<"secondary">>, <<"active">>], 3).
 ```
 
 ### Histograms with Labels
 
 ```erlang
-instrument:new_histogram_vec(
+instrument_metric:new_histogram_vec(
     db_query_duration_seconds,
     <<"Database query duration">>,
     [operation]
 ).
 
 %% Record by operation type
-instrument:observe_histogram_vec(db_query_duration_seconds, [<<"SELECT">>], 0.05).
-instrument:observe_histogram_vec(db_query_duration_seconds, [<<"INSERT">>], 0.02).
-instrument:observe_histogram_vec(db_query_duration_seconds, [<<"UPDATE">>], 0.08).
+instrument_metric:observe_histogram_vec(db_query_duration_seconds, [<<"SELECT">>], 0.05).
+instrument_metric:observe_histogram_vec(db_query_duration_seconds, [<<"INSERT">>], 0.02).
+instrument_metric:observe_histogram_vec(db_query_duration_seconds, [<<"UPDATE">>], 0.08).
 ```
 
 ## The labels/2 Function
@@ -79,11 +79,11 @@ For repeated operations, get a reference to a specific label combination:
 
 ```erlang
 %% Get a metric handle for specific labels
-Metric = instrument:labels(http_requests_total, [<<"GET">>, <<"200">>]).
+Metric = instrument_metric:labels(http_requests_total, [<<"GET">>, <<"200">>]).
 
 %% Use like a regular metric
-instrument:inc_counter(Metric).
-instrument:inc_counter(Metric, 5).
+instrument_metric:inc_counter(Metric).
+instrument_metric:inc_counter(Metric, 5).
 ```
 
 This is more efficient when you will update the same combination multiple times.
@@ -94,11 +94,11 @@ Every unique combination of label values creates a new time series. This is call
 
 ```erlang
 %% Labels: method (3 values) x status (5 values) = 15 combinations
-instrument:new_counter_vec(http_requests_total, <<"">>, [method, status]).
+instrument_metric:new_counter_vec(http_requests_total, <<"">>, [method, status]).
 
 %% Labels: method x status x user_id = potentially millions!
 %% DON'T DO THIS
-instrument:new_counter_vec(http_requests_total, <<"">>, [method, status, user_id]).
+instrument_metric:new_counter_vec(http_requests_total, <<"">>, [method, status, user_id]).
 ```
 
 ### High Cardinality Labels to Avoid
@@ -122,11 +122,11 @@ instrument:new_counter_vec(http_requests_total, <<"">>, [method, status, user_id
 
 ```erlang
 %% BAD: Creates a series for every endpoint path
-instrument:inc_counter_vec(requests, [<<"/users/123">>]).
-instrument:inc_counter_vec(requests, [<<"/users/456">>]).
+instrument_metric:inc_counter_vec(requests, [<<"/users/123">>]).
+instrument_metric:inc_counter_vec(requests, [<<"/users/456">>]).
 
 %% GOOD: Use the route pattern instead
-instrument:inc_counter_vec(requests, [<<"/users/{id}">>]).
+instrument_metric:inc_counter_vec(requests, [<<"/users/{id}">>]).
 ```
 
 ## Removing Labels
@@ -135,10 +135,10 @@ You can remove specific label combinations or clear all:
 
 ```erlang
 %% Remove a specific combination
-instrument:remove_label(http_requests_total, [<<"DELETE">>, <<"200">>]).
+instrument_metric:remove_label(http_requests_total, [<<"DELETE">>, <<"200">>]).
 
 %% Clear all label combinations (keeps the metric definition)
-instrument:clear_labels(http_requests_total).
+instrument_metric:clear_labels(http_requests_total).
 ```
 
 This is useful for:
@@ -176,11 +176,11 @@ Instrument a connection pool:
 -export([init/0, checkout/1, checkin/1, timeout/1]).
 
 init() ->
-    instrument:new_counter_vec(pool_operations_total, <<"Pool operations">>,
+    instrument_metric:new_counter_vec(pool_operations_total, <<"Pool operations">>,
         [pool, operation]),
-    instrument:new_gauge_vec(pool_connections, <<"Pool connection state">>,
+    instrument_metric:new_gauge_vec(pool_connections, <<"Pool connection state">>,
         [pool, state]),
-    instrument:new_histogram_vec(pool_wait_seconds, <<"Pool wait time">>,
+    instrument_metric:new_histogram_vec(pool_wait_seconds, <<"Pool wait time">>,
         [pool]).
 
 checkout(Pool) ->
@@ -190,29 +190,29 @@ checkout(Pool) ->
     Result = do_checkout(Pool),
 
     Duration = (erlang:monotonic_time(microsecond) - Start) / 1000000,
-    instrument:observe_histogram_vec(pool_wait_seconds, [PoolName], Duration),
+    instrument_metric:observe_histogram_vec(pool_wait_seconds, [PoolName], Duration),
 
     case Result of
         {ok, Conn} ->
-            instrument:inc_counter_vec(pool_operations_total, [PoolName, <<"checkout">>]),
-            instrument:inc_gauge_vec(pool_connections, [PoolName, <<"active">>]),
-            instrument:dec_gauge_vec(pool_connections, [PoolName, <<"idle">>]),
+            instrument_metric:inc_counter_vec(pool_operations_total, [PoolName, <<"checkout">>]),
+            instrument_metric:inc_gauge_vec(pool_connections, [PoolName, <<"active">>]),
+            instrument_metric:dec_gauge_vec(pool_connections, [PoolName, <<"idle">>]),
             {ok, Conn};
         {error, timeout} ->
-            instrument:inc_counter_vec(pool_operations_total, [PoolName, <<"timeout">>]),
+            instrument_metric:inc_counter_vec(pool_operations_total, [PoolName, <<"timeout">>]),
             {error, timeout}
     end.
 
 checkin(Pool) ->
     PoolName = atom_to_binary(Pool),
-    instrument:inc_counter_vec(pool_operations_total, [PoolName, <<"checkin">>]),
-    instrument:dec_gauge_vec(pool_connections, [PoolName, <<"active">>]),
-    instrument:inc_gauge_vec(pool_connections, [PoolName, <<"idle">>]),
+    instrument_metric:inc_counter_vec(pool_operations_total, [PoolName, <<"checkin">>]),
+    instrument_metric:dec_gauge_vec(pool_connections, [PoolName, <<"active">>]),
+    instrument_metric:inc_gauge_vec(pool_connections, [PoolName, <<"idle">>]),
     ok.
 
 timeout(Pool) ->
     PoolName = atom_to_binary(Pool),
-    instrument:inc_counter_vec(pool_operations_total, [PoolName, <<"timeout">>]).
+    instrument_metric:inc_counter_vec(pool_operations_total, [PoolName, <<"timeout">>]).
 ```
 
 ## Exercise

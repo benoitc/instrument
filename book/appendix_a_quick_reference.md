@@ -8,57 +8,57 @@ A cheat sheet for common operations.
 
 ```erlang
 %% Create
-Counter = instrument:new_counter(requests_total, <<"Total requests">>).
+Counter = instrument_metric:new_counter(requests_total, <<"Total requests">>).
 
 %% Use
-instrument:inc_counter(Counter).
-instrument:inc_counter(Counter, 5).
+instrument_metric:inc_counter(Counter).
+instrument_metric:inc_counter(Counter, 5).
 
 %% Read
-Value = instrument:get_counter(Counter).
+Value = instrument_metric:get_counter(Counter).
 ```
 
 ### Gauge
 
 ```erlang
 %% Create
-Gauge = instrument:new_gauge(active_conns, <<"Active connections">>).
+Gauge = instrument_metric:new_gauge(active_conns, <<"Active connections">>).
 
 %% Use
-instrument:set_gauge(Gauge, 100).
-instrument:inc_gauge(Gauge).
-instrument:dec_gauge(Gauge, 5).
+instrument_metric:set_gauge(Gauge, 100).
+instrument_metric:inc_gauge(Gauge).
+instrument_metric:dec_gauge(Gauge, 5).
 
 %% Read
-Value = instrument:get_gauge(Gauge).
+Value = instrument_metric:get_gauge(Gauge).
 ```
 
 ### Histogram
 
 ```erlang
 %% Create
-Hist = instrument:new_histogram(duration_seconds, <<"Duration">>).
-Hist = instrument:new_histogram(size_bytes, <<"Size">>, [100, 500, 1000]).
+Hist = instrument_metric:new_histogram(duration_seconds, <<"Duration">>).
+Hist = instrument_metric:new_histogram(size_bytes, <<"Size">>, [100, 500, 1000]).
 
 %% Use
-instrument:observe_histogram(Hist, 0.125).
+instrument_metric:observe_histogram(Hist, 0.125).
 
 %% Read
-#{count := C, sum := S, buckets := B} = instrument:get_histogram(Hist).
+#{count := C, sum := S, buckets := B} = instrument_metric:get_histogram(Hist).
 ```
 
 ### Vector Metrics (Labeled)
 
 ```erlang
 %% Create
-instrument:new_counter_vec(http_requests, <<"Requests">>, [method, status]).
-instrument:new_gauge_vec(pool_conns, <<"Pool">>, [pool, state]).
-instrument:new_histogram_vec(query_time, <<"Query">>, [operation]).
+instrument_metric:new_counter_vec(http_requests, <<"Requests">>, [method, status]).
+instrument_metric:new_gauge_vec(pool_conns, <<"Pool">>, [pool, state]).
+instrument_metric:new_histogram_vec(query_time, <<"Query">>, [operation]).
 
 %% Use
-instrument:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]).
-instrument:set_gauge_vec(pool_conns, [<<"default">>, <<"active">>], 10).
-instrument:observe_histogram_vec(query_time, [<<"SELECT">>], 0.05).
+instrument_metric:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]).
+instrument_metric:set_gauge_vec(pool_conns, [<<"default">>, <<"active">>], 10).
+instrument_metric:observe_histogram_vec(query_time, [<<"SELECT">>], 0.05).
 ```
 
 ## Tracing Quick Reference

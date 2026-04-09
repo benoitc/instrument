@@ -74,9 +74,9 @@ run_db_tracing() ->
     io:format(user, "  Scenario: Trace DB query with attributes + record metrics~n", []),
 
     %% Setup metrics
-    instrument:new_histogram_vec(bench_db_query_duration, <<"DB query duration">>,
+    instrument_metric:new_histogram_vec(bench_db_query_duration, <<"DB query duration">>,
                                  [operation], [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]),
-    instrument:new_counter_vec(bench_db_queries_total, <<"Total DB queries">>,
+    instrument_metric:new_counter_vec(bench_db_queries_total, <<"Total DB queries">>,
                                [operation, table, status]),
 
     %% Warmup
@@ -99,8 +99,8 @@ run_db_tracing() ->
     io:format(user, "  Tracing overhead: ~.3f us/op~n", [Overhead]),
 
     %% Cleanup
-    instrument:unregister(bench_db_query_duration),
-    instrument:unregister(bench_db_queries_total),
+    instrument_metric:unregister(bench_db_query_duration),
+    instrument_metric:unregister(bench_db_queries_total),
     ok.
 
 db_query_traced() ->
@@ -115,14 +115,14 @@ db_query_traced() ->
         }),
         %% Record metrics
         Duration = rand:uniform() * 0.05,
-        instrument:observe_histogram_vec(bench_db_query_duration, [<<"SELECT">>], Duration),
-        instrument:inc_counter_vec(bench_db_queries_total, [<<"SELECT">>, <<"users">>, <<"ok">>])
+        instrument_metric:observe_histogram_vec(bench_db_query_duration, [<<"SELECT">>], Duration),
+        instrument_metric:inc_counter_vec(bench_db_queries_total, [<<"SELECT">>, <<"users">>, <<"ok">>])
     end).
 
 db_query_metrics_only() ->
     Duration = rand:uniform() * 0.05,
-    instrument:observe_histogram_vec(bench_db_query_duration, [<<"SELECT">>], Duration),
-    instrument:inc_counter_vec(bench_db_queries_total, [<<"SELECT">>, <<"users">>, <<"ok">>]).
+    instrument_metric:observe_histogram_vec(bench_db_query_duration, [<<"SELECT">>], Duration),
+    instrument_metric:inc_counter_vec(bench_db_queries_total, [<<"SELECT">>, <<"users">>, <<"ok">>]).
 
 %% @doc Benchmark HTTP request pipeline with nested spans.
 %%
@@ -134,9 +134,9 @@ run_http_pipeline() ->
     io:format(user, "  Scenario: HTTP request -> Auth verify -> DB query -> Response~n", []),
 
     %% Setup metrics
-    instrument:new_histogram_vec(bench_http_request_duration, <<"HTTP request duration">>,
+    instrument_metric:new_histogram_vec(bench_http_request_duration, <<"HTTP request duration">>,
                                  [method, status], [0.01, 0.05, 0.1, 0.5, 1.0, 5.0]),
-    instrument:new_counter_vec(bench_http_requests_total, <<"Total HTTP requests">>,
+    instrument_metric:new_counter_vec(bench_http_requests_total, <<"Total HTTP requests">>,
                                [method, endpoint, status]),
 
     %% Warmup
@@ -167,8 +167,8 @@ run_http_pipeline() ->
     io:format(user, "  Single span overhead: ~.3f us/op~n", [FlatOverhead]),
 
     %% Cleanup
-    instrument:unregister(bench_http_request_duration),
-    instrument:unregister(bench_http_requests_total),
+    instrument_metric:unregister(bench_http_request_duration),
+    instrument_metric:unregister(bench_http_requests_total),
     ok.
 
 http_pipeline_traced() ->
@@ -202,8 +202,8 @@ http_pipeline_traced() ->
         instrument_tracer:set_status(ok),
 
         Duration = rand:uniform() * 0.1,
-        instrument:observe_histogram_vec(bench_http_request_duration, [<<"GET">>, <<"200">>], Duration),
-        instrument:inc_counter_vec(bench_http_requests_total, [<<"GET">>, <<"/api/users">>, <<"200">>])
+        instrument_metric:observe_histogram_vec(bench_http_request_duration, [<<"GET">>, <<"200">>], Duration),
+        instrument_metric:inc_counter_vec(bench_http_requests_total, [<<"GET">>, <<"/api/users">>, <<"200">>])
     end).
 
 http_pipeline_flat() ->
@@ -221,14 +221,14 @@ http_pipeline_flat() ->
         instrument_tracer:set_status(ok),
 
         Duration = rand:uniform() * 0.1,
-        instrument:observe_histogram_vec(bench_http_request_duration, [<<"GET">>, <<"200">>], Duration),
-        instrument:inc_counter_vec(bench_http_requests_total, [<<"GET">>, <<"/api/users">>, <<"200">>])
+        instrument_metric:observe_histogram_vec(bench_http_request_duration, [<<"GET">>, <<"200">>], Duration),
+        instrument_metric:inc_counter_vec(bench_http_requests_total, [<<"GET">>, <<"/api/users">>, <<"200">>])
     end).
 
 http_pipeline_metrics_only() ->
     Duration = rand:uniform() * 0.1,
-    instrument:observe_histogram_vec(bench_http_request_duration, [<<"GET">>, <<"200">>], Duration),
-    instrument:inc_counter_vec(bench_http_requests_total, [<<"GET">>, <<"/api/users">>, <<"200">>]).
+    instrument_metric:observe_histogram_vec(bench_http_request_duration, [<<"GET">>, <<"200">>], Duration),
+    instrument_metric:inc_counter_vec(bench_http_requests_total, [<<"GET">>, <<"/api/users">>, <<"200">>]).
 
 %% @doc Benchmark concurrent load with default parameters.
 -spec run_concurrent_load() -> ok.
@@ -246,11 +246,11 @@ run_concurrent_load(NumWorkers, RequestsPerWorker) ->
               [NumWorkers, RequestsPerWorker, NumWorkers * RequestsPerWorker]),
 
     %% Setup metrics
-    instrument:new_histogram_vec(bench_concurrent_request_duration, <<"Request duration">>,
+    instrument_metric:new_histogram_vec(bench_concurrent_request_duration, <<"Request duration">>,
                                  [endpoint], [0.01, 0.05, 0.1, 0.5, 1.0]),
-    instrument:new_counter_vec(bench_concurrent_requests_total, <<"Total requests">>,
+    instrument_metric:new_counter_vec(bench_concurrent_requests_total, <<"Total requests">>,
                                [endpoint, status]),
-    ActiveGauge = instrument:new_gauge(bench_active_requests, <<"Active concurrent requests">>),
+    ActiveGauge = instrument_metric:new_gauge(bench_active_requests, <<"Active concurrent requests">>),
 
     Endpoints = [<<"/api/users">>, <<"/api/orders">>, <<"/api/products">>,
                  <<"/health">>, <<"/metrics">>],
@@ -282,19 +282,19 @@ run_concurrent_load(NumWorkers, RequestsPerWorker) ->
               [TotalRequests, ElapsedStr, ReqPerSecStr]),
 
     %% Verify active requests gauge is back to 0
-    FinalActive = instrument:get_gauge(ActiveGauge),
+    FinalActive = instrument_metric:get_gauge(ActiveGauge),
     io:format(user, "  Active requests at end: ~p (should be 0)~n", [FinalActive]),
 
     %% Cleanup
-    instrument:unregister(bench_concurrent_request_duration),
-    instrument:unregister(bench_concurrent_requests_total),
-    instrument:unregister(bench_active_requests),
+    instrument_metric:unregister(bench_concurrent_request_duration),
+    instrument_metric:unregister(bench_concurrent_requests_total),
+    instrument_metric:unregister(bench_active_requests),
     ok.
 
 worker_loop(0, _Endpoints, _ActiveGauge) ->
     ok;
 worker_loop(N, Endpoints, ActiveGauge) ->
-    instrument:inc_gauge(ActiveGauge),
+    instrument_metric:inc_gauge(ActiveGauge),
     try
         Endpoint = lists:nth(rand:uniform(length(Endpoints)), Endpoints),
         instrument_tracer:with_span(<<"http.request">>, #{kind => server}, fun() ->
@@ -303,12 +303,12 @@ worker_loop(N, Endpoints, ActiveGauge) ->
                 <<"http.url">> => Endpoint
             }),
             Duration = rand:uniform() * 0.1,
-            instrument:observe_histogram_vec(bench_concurrent_request_duration, [Endpoint], Duration),
-            instrument:inc_counter_vec(bench_concurrent_requests_total, [Endpoint, <<"200">>]),
+            instrument_metric:observe_histogram_vec(bench_concurrent_request_duration, [Endpoint], Duration),
+            instrument_metric:inc_counter_vec(bench_concurrent_requests_total, [Endpoint, <<"200">>]),
             instrument_tracer:set_status(ok)
         end)
     after
-        instrument:dec_gauge(ActiveGauge)
+        instrument_metric:dec_gauge(ActiveGauge)
     end,
     worker_loop(N - 1, Endpoints, ActiveGauge).
 

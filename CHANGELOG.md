@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - Unreleased
+
+### Changed
+- Renamed `instrument` module to `instrument_metric` to avoid conflict with Erlang's `runtime_tools` instrument module
+
 ## [0.5.0] - 2026-04-08
 
 ### Added

@@ -101,38 +101,38 @@ For simple use cases, use metrics directly without the OTel API:
 
 ```erlang
 %% Create and use a counter
-Counter = instrument:new_counter(requests_total, "Total requests"),
-instrument:inc_counter(Counter),
-instrument:inc_counter(Counter, 5),
-Value = instrument:get_counter(Counter).  %% 6.0
+Counter = instrument_metric:new_counter(requests_total, "Total requests"),
+instrument_metric:inc_counter(Counter),
+instrument_metric:inc_counter(Counter, 5),
+Value = instrument_metric:get_counter(Counter).  %% 6.0
 ```
 
 ### Gauge
 
 ```erlang
 %% Create and use a gauge
-Gauge = instrument:new_gauge(connections_active, "Active connections"),
-instrument:set_gauge(Gauge, 100),
-instrument:inc_gauge(Gauge),       %% 101
-instrument:dec_gauge(Gauge, 5),    %% 96
-Value = instrument:get_gauge(Gauge).
+Gauge = instrument_metric:new_gauge(connections_active, "Active connections"),
+instrument_metric:set_gauge(Gauge, 100),
+instrument_metric:inc_gauge(Gauge),       %% 101
+instrument_metric:dec_gauge(Gauge, 5),    %% 96
+Value = instrument_metric:get_gauge(Gauge).
 ```
 
 ### Histogram
 
 ```erlang
 %% Create with default buckets
-Histogram = instrument:new_histogram(request_duration_seconds, "Request duration"),
+Histogram = instrument_metric:new_histogram(request_duration_seconds, "Request duration"),
 
 %% Or with custom buckets
-Histogram2 = instrument:new_histogram(response_size_bytes, "Response size",
+Histogram2 = instrument_metric:new_histogram(response_size_bytes, "Response size",
     [100, 500, 1000, 5000, 10000]),
 
 %% Record observations
-instrument:observe_histogram(Histogram, 0.125),
+instrument_metric:observe_histogram(Histogram, 0.125),
 
 %% Get distribution data
-#{count := Count, sum := Sum, buckets := Buckets} = instrument:get_histogram(Histogram).
+#{count := Count, sum := Sum, buckets := Buckets} = instrument_metric:get_histogram(Histogram).
 ```
 
 ### Vector Metrics (Labeled)
@@ -141,14 +141,14 @@ Add dimensions to standalone metrics:
 
 ```erlang
 %% Create vector metrics
-instrument:new_counter_vec(http_requests_total, "HTTP requests", [method, status]),
-instrument:new_gauge_vec(pool_connections, "Pool connections", [pool, state]),
-instrument:new_histogram_vec(db_query_duration, "Query duration", [operation]),
+instrument_metric:new_counter_vec(http_requests_total, "HTTP requests", [method, status]),
+instrument_metric:new_gauge_vec(pool_connections, "Pool connections", [pool, state]),
+instrument_metric:new_histogram_vec(db_query_duration, "Query duration", [operation]),
 
 %% Record with labels
-instrument:inc_counter_vec(http_requests_total, ["GET", "200"]),
-instrument:set_gauge_vec(pool_connections, ["default", "active"], 10),
-instrument:observe_histogram_vec(db_query_duration, ["SELECT"], 0.05).
+instrument_metric:inc_counter_vec(http_requests_total, ["GET", "200"]),
+instrument_metric:set_gauge_vec(pool_connections, ["default", "active"], 10),
+instrument_metric:observe_histogram_vec(db_query_duration, ["SELECT"], 0.05).
 ```
 
 ## Context Propagation

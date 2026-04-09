@@ -17,7 +17,7 @@ Both APIs use the same high-performance NIF backend.
 
 Counters track cumulative values that only increase.
 
-#### `instrument:new_counter/2`
+#### `instrument_metric:new_counter/2`
 
 Creates a new counter metric.
 
@@ -31,10 +31,10 @@ Creates a new counter metric.
 **Example:**
 
 ```erlang
-Counter = instrument:new_counter(http_requests_total, <<"Total HTTP requests">>).
+Counter = instrument_metric:new_counter(http_requests_total, <<"Total HTTP requests">>).
 ```
 
-#### `instrument:inc_counter/1`
+#### `instrument_metric:inc_counter/1`
 
 Increments a counter by 1.
 
@@ -43,7 +43,7 @@ Increments a counter by 1.
     Counter :: metric().
 ```
 
-#### `instrument:inc_counter/2`
+#### `instrument_metric:inc_counter/2`
 
 Increments a counter by a specific value.
 
@@ -55,7 +55,7 @@ Increments a counter by a specific value.
 
 **Note:** Value must be non-negative.
 
-#### `instrument:get_counter/1`
+#### `instrument_metric:get_counter/1`
 
 Returns the current counter value.
 
@@ -68,7 +68,7 @@ Returns the current counter value.
 
 Gauges track values that can increase or decrease.
 
-#### `instrument:new_gauge/2`
+#### `instrument_metric:new_gauge/2`
 
 Creates a new gauge metric.
 
@@ -79,7 +79,7 @@ Creates a new gauge metric.
     Gauge :: metric().
 ```
 
-#### `instrument:set_gauge/2`
+#### `instrument_metric:set_gauge/2`
 
 Sets the gauge to a specific value.
 
@@ -89,7 +89,7 @@ Sets the gauge to a specific value.
     Value :: number().
 ```
 
-#### `instrument:inc_gauge/1`, `instrument:inc_gauge/2`
+#### `instrument_metric:inc_gauge/1`, `instrument_metric:inc_gauge/2`
 
 Increments the gauge.
 
@@ -98,7 +98,7 @@ Increments the gauge.
 -spec inc_gauge(Gauge, Value) -> ok | {error, not_found}.
 ```
 
-#### `instrument:dec_gauge/1`, `instrument:dec_gauge/2`
+#### `instrument_metric:dec_gauge/1`, `instrument_metric:dec_gauge/2`
 
 Decrements the gauge.
 
@@ -107,7 +107,7 @@ Decrements the gauge.
 -spec dec_gauge(Gauge, Value) -> ok | {error, not_found}.
 ```
 
-#### `instrument:set_gauge_to_current_time/1`
+#### `instrument_metric:set_gauge_to_current_time/1`
 
 Sets the gauge to the current Unix timestamp.
 
@@ -115,7 +115,7 @@ Sets the gauge to the current Unix timestamp.
 -spec set_gauge_to_current_time(Gauge) -> ok | {error, not_found}.
 ```
 
-#### `instrument:get_gauge/1`
+#### `instrument_metric:get_gauge/1`
 
 Returns the current gauge value.
 
@@ -127,7 +127,7 @@ Returns the current gauge value.
 
 Histograms track the distribution of values.
 
-#### `instrument:new_histogram/2`
+#### `instrument_metric:new_histogram/2`
 
 Creates a histogram with default buckets.
 
@@ -140,7 +140,7 @@ Creates a histogram with default buckets.
 
 Default buckets: `[0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0]`
 
-#### `instrument:new_histogram/3`
+#### `instrument_metric:new_histogram/3`
 
 Creates a histogram with custom buckets.
 
@@ -155,14 +155,14 @@ Creates a histogram with custom buckets.
 **Example:**
 
 ```erlang
-Hist = instrument:new_histogram(
+Hist = instrument_metric:new_histogram(
     response_size_bytes,
     <<"Response size">>,
     [100, 500, 1000, 5000, 10000]
 ).
 ```
 
-#### `instrument:observe_histogram/2`
+#### `instrument_metric:observe_histogram/2`
 
 Records an observation in the histogram.
 
@@ -172,7 +172,7 @@ Records an observation in the histogram.
     Value :: number().
 ```
 
-#### `instrument:get_histogram/1`
+#### `instrument_metric:get_histogram/1`
 
 Returns histogram data.
 
@@ -188,7 +188,7 @@ Returns histogram data.
 
 Vector metrics add label dimensions.
 
-#### `instrument:new_counter_vec/3`
+#### `instrument_metric:new_counter_vec/3`
 
 Creates a labeled counter.
 
@@ -202,10 +202,10 @@ Creates a labeled counter.
 **Example:**
 
 ```erlang
-instrument:new_counter_vec(http_requests_total, <<"HTTP requests">>, [method, status]).
+instrument_metric:new_counter_vec(http_requests_total, <<"HTTP requests">>, [method, status]).
 ```
 
-#### `instrument:new_gauge_vec/3`
+#### `instrument_metric:new_gauge_vec/3`
 
 Creates a labeled gauge.
 
@@ -213,7 +213,7 @@ Creates a labeled gauge.
 -spec new_gauge_vec(Name, Help, Labels) -> ok.
 ```
 
-#### `instrument:new_histogram_vec/3`, `instrument:new_histogram_vec/4`
+#### `instrument_metric:new_histogram_vec/3`, `instrument_metric:new_histogram_vec/4`
 
 Creates a labeled histogram.
 
@@ -226,31 +226,31 @@ Creates a labeled histogram.
 
 ```erlang
 %% Counter operations
-instrument:inc_counter_vec(Name, LabelValues).
-instrument:inc_counter_vec(Name, LabelValues, Value).
-instrument:get_counter_vec(Name, LabelValues).
+instrument_metric:inc_counter_vec(Name, LabelValues).
+instrument_metric:inc_counter_vec(Name, LabelValues, Value).
+instrument_metric:get_counter_vec(Name, LabelValues).
 
 %% Gauge operations
-instrument:set_gauge_vec(Name, LabelValues, Value).
-instrument:inc_gauge_vec(Name, LabelValues).
-instrument:inc_gauge_vec(Name, LabelValues, Value).
-instrument:dec_gauge_vec(Name, LabelValues).
-instrument:dec_gauge_vec(Name, LabelValues, Value).
-instrument:get_gauge_vec(Name, LabelValues).
+instrument_metric:set_gauge_vec(Name, LabelValues, Value).
+instrument_metric:inc_gauge_vec(Name, LabelValues).
+instrument_metric:inc_gauge_vec(Name, LabelValues, Value).
+instrument_metric:dec_gauge_vec(Name, LabelValues).
+instrument_metric:dec_gauge_vec(Name, LabelValues, Value).
+instrument_metric:get_gauge_vec(Name, LabelValues).
 
 %% Histogram operations
-instrument:observe_histogram_vec(Name, LabelValues, Value).
-instrument:get_histogram_vec(Name, LabelValues).
+instrument_metric:observe_histogram_vec(Name, LabelValues, Value).
+instrument_metric:get_histogram_vec(Name, LabelValues).
 ```
 
 **Example:**
 
 ```erlang
-instrument:inc_counter_vec(http_requests_total, [<<"GET">>, <<"200">>]).
-instrument:inc_counter_vec(http_requests_total, [<<"POST">>, <<"201">>], 5).
+instrument_metric:inc_counter_vec(http_requests_total, [<<"GET">>, <<"200">>]).
+instrument_metric:inc_counter_vec(http_requests_total, [<<"POST">>, <<"201">>], 5).
 ```
 
-#### `instrument:labels/2`
+#### `instrument_metric:labels/2`
 
 Returns a metric reference for specific label values.
 
@@ -261,11 +261,11 @@ Returns a metric reference for specific label values.
 **Example:**
 
 ```erlang
-Metric = instrument:labels(http_requests_total, [<<"GET">>, <<"200">>]),
-instrument:inc_counter(Metric).
+Metric = instrument_metric:labels(http_requests_total, [<<"GET">>, <<"200">>]),
+instrument_metric:inc_counter(Metric).
 ```
 
-#### `instrument:remove_label/2`
+#### `instrument_metric:remove_label/2`
 
 Removes a specific label combination.
 
@@ -273,7 +273,7 @@ Removes a specific label combination.
 -spec remove_label(Name, LabelValues) -> ok | {error, not_found}.
 ```
 
-#### `instrument:clear_labels/1`
+#### `instrument_metric:clear_labels/1`
 
 Removes all label combinations for a metric.
 
@@ -283,7 +283,7 @@ Removes all label combinations for a metric.
 
 ### Registry
 
-#### `instrument:register/1`
+#### `instrument_metric:register/1`
 
 Registers a metric with the global registry.
 
@@ -291,7 +291,7 @@ Registers a metric with the global registry.
 -spec register(Metric) -> ok.
 ```
 
-#### `instrument:unregister/1`
+#### `instrument_metric:unregister/1`
 
 Unregisters a metric by name.
 
@@ -299,7 +299,7 @@ Unregisters a metric by name.
 -spec unregister(Name) -> ok | {error, not_found}.
 ```
 
-#### `instrument:unregister_all/0`
+#### `instrument_metric:unregister_all/0`
 
 Unregisters all metrics.
 

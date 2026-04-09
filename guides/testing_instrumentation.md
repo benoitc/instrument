@@ -246,8 +246,8 @@ test_async_operation(_Config) ->
 
 ```erlang
 test_counter(_Config) ->
-    Counter = instrument:new_counter(requests_total, <<"Total requests">>),
-    instrument:inc_counter(Counter, 5),
+    Counter = instrument_metric:new_counter(requests_total, <<"Total requests">>),
+    instrument_metric:inc_counter(Counter, 5),
 
     instrument_test:assert_counter(requests_total, 5.0).
 ```
@@ -256,8 +256,8 @@ test_counter(_Config) ->
 
 ```erlang
 test_gauge(_Config) ->
-    Gauge = instrument:new_gauge(active_connections, <<"Active connections">>),
-    instrument:set_gauge(Gauge, 42),
+    Gauge = instrument_metric:new_gauge(active_connections, <<"Active connections">>),
+    instrument_metric:set_gauge(Gauge, 42),
 
     instrument_test:assert_gauge(active_connections, 42.0).
 ```
@@ -266,11 +266,11 @@ test_gauge(_Config) ->
 
 ```erlang
 test_histogram(_Config) ->
-    Hist = instrument:new_histogram(request_duration, <<"Request duration">>, [0.1, 0.5, 1.0]),
+    Hist = instrument_metric:new_histogram(request_duration, <<"Request duration">>, [0.1, 0.5, 1.0]),
 
-    instrument:observe_histogram(Hist, 0.2),
-    instrument:observe_histogram(Hist, 0.3),
-    instrument:observe_histogram(Hist, 0.8),
+    instrument_metric:observe_histogram(Hist, 0.2),
+    instrument_metric:observe_histogram(Hist, 0.3),
+    instrument_metric:observe_histogram(Hist, 0.8),
 
     %% Assert observation count
     instrument_test:assert_histogram_count(request_duration, 3),
@@ -346,11 +346,11 @@ To avoid collisions between tests, use unique metric names:
 
 ```erlang
 test_counter_1(_Config) ->
-    Counter = instrument:new_counter(test1_counter, <<"Test 1 counter">>),
+    Counter = instrument_metric:new_counter(test1_counter, <<"Test 1 counter">>),
     %% ...
 
 test_counter_2(_Config) ->
-    Counter = instrument:new_counter(test2_counter, <<"Test 2 counter">>),
+    Counter = instrument_metric:new_counter(test2_counter, <<"Test 2 counter">>),
     %% ...
 ```
 
@@ -367,10 +367,10 @@ prop_counter_monotonic() ->
     ?FORALL(Increments, list(pos_integer()),
         begin
             instrument_test:reset(),
-            Counter = instrument:new_counter(prop_counter, <<"">>),
+            Counter = instrument_metric:new_counter(prop_counter, <<"">>),
 
             lists:foreach(fun(Inc) ->
-                instrument:inc_counter(Counter, Inc)
+                instrument_metric:inc_counter(Counter, Inc)
             end, Increments),
 
             Expected = float(lists:sum(Increments)),

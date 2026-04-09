@@ -316,8 +316,8 @@ span_assert_properties(_Config) ->
 
 metrics_collection(_Config) ->
     %% Create counter
-    Counter = instrument:new_counter(test_counter, <<"Test counter">>),
-    instrument:inc_counter(Counter, 5),
+    Counter = instrument_metric:new_counter(test_counter, <<"Test counter">>),
+    instrument_metric:inc_counter(Counter, 5),
 
     %% Collect metrics
     Metrics = instrument_test:collect_metrics(),
@@ -325,8 +325,8 @@ metrics_collection(_Config) ->
     ok.
 
 metrics_counter_assertion(_Config) ->
-    Counter = instrument:new_counter(assertion_counter, <<"Test">>),
-    instrument:inc_counter(Counter, 10),
+    Counter = instrument_metric:new_counter(assertion_counter, <<"Test">>),
+    instrument_metric:inc_counter(Counter, 10),
 
     %% Should pass
     ok = instrument_test:assert_counter(assertion_counter, 10.0),
@@ -341,8 +341,8 @@ metrics_counter_assertion(_Config) ->
     end.
 
 metrics_gauge_assertion(_Config) ->
-    Gauge = instrument:new_gauge(assertion_gauge, <<"Test">>),
-    instrument:set_gauge(Gauge, 42),
+    Gauge = instrument_metric:new_gauge(assertion_gauge, <<"Test">>),
+    instrument_metric:set_gauge(Gauge, 42),
 
     %% Should pass
     ok = instrument_test:assert_gauge(assertion_gauge, 42.0),
@@ -357,10 +357,10 @@ metrics_gauge_assertion(_Config) ->
     end.
 
 metrics_histogram_assertion(_Config) ->
-    Hist = instrument:new_histogram(assertion_hist, <<"Test">>, [1, 5, 10]),
-    instrument:observe_histogram(Hist, 2),
-    instrument:observe_histogram(Hist, 3),
-    instrument:observe_histogram(Hist, 7),
+    Hist = instrument_metric:new_histogram(assertion_hist, <<"Test">>, [1, 5, 10]),
+    instrument_metric:observe_histogram(Hist, 2),
+    instrument_metric:observe_histogram(Hist, 3),
+    instrument_metric:observe_histogram(Hist, 7),
 
     %% Should pass
     ok = instrument_test:assert_histogram_count(assertion_hist, 3),
@@ -376,8 +376,8 @@ metrics_histogram_assertion(_Config) ->
     end.
 
 metrics_clear(_Config) ->
-    Counter = instrument:new_counter(clear_counter, <<"Test">>),
-    instrument:inc_counter(Counter),
+    Counter = instrument_metric:new_counter(clear_counter, <<"Test">>),
+    instrument_metric:inc_counter(Counter),
     _ = instrument_test:collect_metrics(),
 
     true = length(instrument_test:get_metrics()) > 0,
@@ -389,8 +389,8 @@ metrics_clear(_Config) ->
 %% Test that a crashing collector doesn't prevent other collectors from running (Bug 2 fix)
 metrics_collector_error_isolation(_Config) ->
     %% Create a good counter
-    GoodCounter = instrument:new_counter(good_counter, <<"Good counter">>),
-    instrument:inc_counter(GoodCounter, 10),
+    GoodCounter = instrument_metric:new_counter(good_counter, <<"Good counter">>),
+    instrument_metric:inc_counter(GoodCounter, 10),
 
     %% Create a mock metric with a crashing collector
     meck:new(crashing_collector, [non_strict]),
@@ -404,11 +404,11 @@ metrics_collector_error_isolation(_Config) ->
         handle = undefined,
         collect = {crashing_collector, collect, []}
     },
-    ok = instrument:register(CrashingMetric),
+    ok = instrument_metric:register(CrashingMetric),
 
     %% Create another good counter after the crashing one
-    GoodCounter2 = instrument:new_counter(good_counter2, <<"Good counter 2">>),
-    instrument:inc_counter(GoodCounter2, 5),
+    GoodCounter2 = instrument_metric:new_counter(good_counter2, <<"Good counter 2">>),
+    instrument_metric:inc_counter(GoodCounter2, 5),
 
     %% collect_all should not crash and should return data from working collectors
     Results = instrument_registry:collect_all(),
@@ -417,9 +417,9 @@ metrics_collector_error_isolation(_Config) ->
     true = is_list(Results),
 
     %% Cleanup
-    instrument:unregister(crashing_metric),
-    instrument:unregister(good_counter),
-    instrument:unregister(good_counter2),
+    instrument_metric:unregister(crashing_metric),
+    instrument_metric:unregister(good_counter),
+    instrument_metric:unregister(good_counter2),
     meck:unload(crashing_collector),
     ok.
 
@@ -542,8 +542,8 @@ log_clear(_Config) ->
 reset_clears_all(_Config) ->
     %% Create some data
     instrument_tracer:with_span(<<"reset_span">>, fun() -> ok end),
-    Counter = instrument:new_counter(reset_counter, <<"Test">>),
-    instrument:inc_counter(Counter),
+    Counter = instrument_metric:new_counter(reset_counter, <<"Test">>),
+    instrument_metric:inc_counter(Counter),
     _ = instrument_test:collect_metrics(),
 
     LogRecord = #log_record{body = <<"reset log">>, timestamp = erlang:system_time(nanosecond)},

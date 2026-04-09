@@ -80,7 +80,7 @@ end_per_suite(Config) ->
 
 init_per_testcase(_, Config) ->
   _ = instrument_meter:unregister_all_instruments(),
-  _ = instrument:unregister_all(),
+  _ = instrument_metric:unregister_all(),
   Config.
 
 end_per_testcase(_, _Config) ->

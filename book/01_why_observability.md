@@ -75,8 +75,8 @@ The `instrument` library gives you all three pillars in one package:
 
 ```erlang
 %% Metrics
-Counter = instrument:new_counter(requests_total, <<"Total requests">>),
-instrument:inc_counter(Counter).
+Counter = instrument_metric:new_counter(requests_total, <<"Total requests">>),
+instrument_metric:inc_counter(Counter).
 
 %% Traces
 instrument_tracer:with_span(<<"handle_request">>, fun() ->

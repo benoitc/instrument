@@ -50,7 +50,7 @@ end_per_suite(Config) ->
 
 
 init_per_testcase(_, Config) ->
-  _ = instrument:unregister_all(),
+  _ = instrument_metric:unregister_all(),
   Config.
 
 end_per_testcase(_Config) ->
@@ -63,29 +63,29 @@ end_per_testcase(_Config) ->
 %% ==============
 
 starts_with_zero(_Config) ->
-  M = instrument:new_counter(c, "no help"),
-  +0.0 = instrument:get_counter(M).
+  M = instrument_metric:new_counter(c, "no help"),
+  +0.0 = instrument_metric:get_counter(M).
 
 increment_correctly(_Config) ->
-  M = instrument:new_counter(c, "no help"),
-  ok = instrument:inc_counter(M),
-  1.0 = instrument:get_counter(M),
-  ok = instrument:inc_counter(M, 41),
-  42.0 = instrument:get_counter(M).
+  M = instrument_metric:new_counter(c, "no help"),
+  ok = instrument_metric:inc_counter(M),
+  1.0 = instrument_metric:get_counter(M),
+  ok = instrument_metric:inc_counter(M, 41),
+  42.0 = instrument_metric:get_counter(M).
 
 is_concurrent(_Config) ->
-  M = instrument:new_counter(test, ""),
+  M = instrument_metric:new_counter(test, ""),
   In = lists:seq(1, 1000),
-  Out = pmap(fun(I) -> ok = instrument:inc_counter(M), I end, In),
+  Out = pmap(fun(I) -> ok = instrument_metric:inc_counter(M), I end, In),
   In = [I || {ok, I} <- Out],
-  1000.0 = instrument:get_counter(M).
+  1000.0 = instrument_metric:get_counter(M).
 
 counter_with_name(_Config) ->
-  _ = instrument:new_counter(c, "no help"),
-  ok = instrument:inc_counter(c),
-  1.0 = instrument:get_counter(c),
-  ok = instrument:inc_counter(c, 41),
-  42.0 = instrument:get_counter(c).
+  _ = instrument_metric:new_counter(c, "no help"),
+  ok = instrument_metric:inc_counter(c),
+  1.0 = instrument_metric:get_counter(c),
+  ok = instrument_metric:inc_counter(c, 41),
+  42.0 = instrument_metric:get_counter(c).
 
 
 
@@ -115,7 +115,7 @@ collect([{Pid, MRef} | Next], Timeout) ->
 
 high_concurrency(_Config) ->
   %% 100 processes x 100 increments = 10000 total operations
-  M = instrument:new_counter(high_conc_test, "high concurrency test"),
+  M = instrument_metric:new_counter(high_conc_test, "high concurrency test"),
   NumProcesses = 100,
   IncrementsPerProcess = 100,
   ExpectedTotal = float(NumProcesses * IncrementsPerProcess),
@@ -123,7 +123,7 @@ high_concurrency(_Config) ->
   In = lists:seq(1, NumProcesses),
   Out = pmap(fun(_) ->
     lists:foreach(fun(_) ->
-      ok = instrument:inc_counter(M)
+      ok = instrument_metric:inc_counter(M)
     end, lists:seq(1, IncrementsPerProcess)),
     ok
   end, In),
@@ -132,11 +132,11 @@ high_concurrency(_Config) ->
   NumProcesses = length([ok || {ok, ok} <- Out]),
 
   %% Counter should have exact value
-  ExpectedTotal = instrument:get_counter(M).
+  ExpectedTotal = instrument_metric:get_counter(M).
 
 read_during_write(_Config) ->
   %% Test read consistency while writes are happening
-  M = instrument:new_counter(rw_test, "read-write test"),
+  M = instrument_metric:new_counter(rw_test, "read-write test"),
   NumWriters = 10,
   NumReaders = 5,
   WritesPerWriter = 1000,
@@ -147,7 +147,7 @@ read_during_write(_Config) ->
   %% Start writer processes
   WriterPids = [spawn_link(fun() ->
     lists:foreach(fun(_) ->
-      ok = instrument:inc_counter(M)
+      ok = instrument_metric:inc_counter(M)
     end, lists:seq(1, WritesPerWriter)),
     Parent ! {writer_done, self()}
   end) || _ <- lists:seq(1, NumWriters)],
@@ -170,12 +170,12 @@ read_during_write(_Config) ->
 
   %% Final value should be exact
   ExpectedFinal = float(NumWriters * WritesPerWriter),
-  ExpectedFinal = instrument:get_counter(M).
+  ExpectedFinal = instrument_metric:get_counter(M).
 
 read_monotonic_loop(_M, 0, _LastValue) ->
   ok;
 read_monotonic_loop(M, N, LastValue) ->
-  CurrentValue = instrument:get_counter(M),
+  CurrentValue = instrument_metric:get_counter(M),
   %% Value should never decrease (monotonic)
   true = CurrentValue >= LastValue,
   timer:sleep(1),

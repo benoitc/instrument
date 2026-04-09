@@ -119,13 +119,13 @@ register_unregister(_Config) ->
 
 collect_metrics(_Config) ->
   %% Create a counter
-  Counter = instrument:new_counter(test_requests, [{help, "Test requests counter"}]),
-  ok = instrument:inc_counter(Counter),
-  ok = instrument:inc_counter(Counter),
+  Counter = instrument_metric:new_counter(test_requests, [{help, "Test requests counter"}]),
+  ok = instrument_metric:inc_counter(Counter),
+  ok = instrument_metric:inc_counter(Counter),
 
   %% Create a gauge
-  Gauge = instrument:new_gauge(test_connections, [{help, "Test connections gauge"}]),
-  ok = instrument:set_gauge(Gauge, 42),
+  Gauge = instrument_metric:new_gauge(test_connections, [{help, "Test connections gauge"}]),
+  ok = instrument_metric:set_gauge(Gauge, 42),
 
   %% Collect metrics
   Metrics = instrument_metrics_exporter:collect(),
@@ -141,15 +141,15 @@ collect_metrics(_Config) ->
 
 collect_labeled_metrics(_Config) ->
   %% Create a labeled counter
-  ok = instrument:new_counter_vec(http_requests, "HTTP requests", [method, status]),
-  ok = instrument:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
-  ok = instrument:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
-  ok = instrument:inc_counter_vec(http_requests, [<<"POST">>, <<"201">>]),
+  ok = instrument_metric:new_counter_vec(http_requests, "HTTP requests", [method, status]),
+  ok = instrument_metric:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
+  ok = instrument_metric:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
+  ok = instrument_metric:inc_counter_vec(http_requests, [<<"POST">>, <<"201">>]),
 
   %% Create a labeled gauge
-  ok = instrument:new_gauge_vec(active_sessions, "Active sessions", [region]),
-  ok = instrument:set_gauge_vec(active_sessions, [<<"us-east">>], 100),
-  ok = instrument:set_gauge_vec(active_sessions, [<<"eu-west">>], 75),
+  ok = instrument_metric:new_gauge_vec(active_sessions, "Active sessions", [region]),
+  ok = instrument_metric:set_gauge_vec(active_sessions, [<<"us-east">>], 100),
+  ok = instrument_metric:set_gauge_vec(active_sessions, [<<"eu-west">>], 75),
 
   %% Collect metrics
   Metrics = instrument_metrics_exporter:collect(),
@@ -171,8 +171,8 @@ console_exporter_text(_Config) ->
   })),
 
   %% Create a metric
-  Counter = instrument:new_counter(console_text_counter, [{help, "Test counter for console text"}]),
-  ok = instrument:inc_counter(Counter),
+  Counter = instrument_metric:new_counter(console_text_counter, [{help, "Test counter for console text"}]),
+  ok = instrument_metric:inc_counter(Counter),
 
   %% Flush to ensure export
   ok = instrument_metrics_exporter:flush(),
@@ -186,12 +186,12 @@ console_exporter_json(_Config) ->
   })),
 
   %% Create metrics
-  Counter = instrument:new_counter(console_json_counter, [{help, "JSON test counter"}]),
-  ok = instrument:inc_counter(Counter),
-  ok = instrument:inc_counter(Counter),
+  Counter = instrument_metric:new_counter(console_json_counter, [{help, "JSON test counter"}]),
+  ok = instrument_metric:inc_counter(Counter),
+  ok = instrument_metric:inc_counter(Counter),
 
-  Gauge = instrument:new_gauge(console_json_gauge, [{help, "JSON test gauge"}]),
-  ok = instrument:set_gauge(Gauge, 123),
+  Gauge = instrument_metric:new_gauge(console_json_gauge, [{help, "JSON test gauge"}]),
+  ok = instrument_metric:set_gauge(Gauge, 123),
 
   %% Flush to ensure export
   ok = instrument_metrics_exporter:flush(),
@@ -205,12 +205,12 @@ console_labeled_text(_Config) ->
   })),
 
   %% Create labeled metrics
-  ok = instrument:new_counter_vec(api_requests, "API requests", [endpoint, method]),
-  ok = instrument:inc_counter_vec(api_requests, [<<"/users">>, <<"GET">>]),
-  ok = instrument:inc_counter_vec(api_requests, [<<"/users">>, <<"POST">>]),
+  ok = instrument_metric:new_counter_vec(api_requests, "API requests", [endpoint, method]),
+  ok = instrument_metric:inc_counter_vec(api_requests, [<<"/users">>, <<"GET">>]),
+  ok = instrument_metric:inc_counter_vec(api_requests, [<<"/users">>, <<"POST">>]),
 
-  ok = instrument:new_gauge_vec(queue_size, "Queue size", [queue_name]),
-  ok = instrument:set_gauge_vec(queue_size, [<<"orders">>], 42),
+  ok = instrument_metric:new_gauge_vec(queue_size, "Queue size", [queue_name]),
+  ok = instrument_metric:set_gauge_vec(queue_size, [<<"orders">>], 42),
 
   %% Flush to ensure export
   ok = instrument_metrics_exporter:flush(),
@@ -224,10 +224,10 @@ console_labeled_json(_Config) ->
   })),
 
   %% Create labeled histogram
-  ok = instrument:new_histogram_vec(response_time, "Response time", [service], [0.1, 0.5, 1.0, 5.0]),
-  ok = instrument:observe_histogram_vec(response_time, [<<"auth">>], 0.05),
-  ok = instrument:observe_histogram_vec(response_time, [<<"auth">>], 0.3),
-  ok = instrument:observe_histogram_vec(response_time, [<<"api">>], 0.8),
+  ok = instrument_metric:new_histogram_vec(response_time, "Response time", [service], [0.1, 0.5, 1.0, 5.0]),
+  ok = instrument_metric:observe_histogram_vec(response_time, [<<"auth">>], 0.05),
+  ok = instrument_metric:observe_histogram_vec(response_time, [<<"auth">>], 0.3),
+  ok = instrument_metric:observe_histogram_vec(response_time, [<<"api">>], 0.8),
 
   %% Flush to ensure export
   ok = instrument_metrics_exporter:flush(),
@@ -256,11 +256,11 @@ otlp_start_time_unix_nano(_Config) ->
   BeforeCreate = erlang:system_time(nanosecond),
 
   %% Create counter and histogram
-  Counter = instrument:new_counter(otlp_start_time_counter, [{help, "Test counter"}]),
-  ok = instrument:inc_counter(Counter, 5),
+  Counter = instrument_metric:new_counter(otlp_start_time_counter, [{help, "Test counter"}]),
+  ok = instrument_metric:inc_counter(Counter, 5),
 
-  Histogram = instrument:new_histogram(otlp_start_time_hist, [{help, "Test histogram"}]),
-  ok = instrument:observe_histogram(Histogram, 0.5),
+  Histogram = instrument_metric:new_histogram(otlp_start_time_hist, [{help, "Test histogram"}]),
+  ok = instrument_metric:observe_histogram(Histogram, 0.5),
 
   AfterCreate = erlang:system_time(nanosecond),
 
@@ -296,8 +296,8 @@ flush(_Config) ->
   ok = instrument_metrics_exporter:register(instrument_metrics_exporter_console:new()),
 
   %% Create metric and flush
-  Counter = instrument:new_counter(flush_test_counter, [{help, "Flush test"}]),
-  ok = instrument:inc_counter(Counter),
+  Counter = instrument_metric:new_counter(flush_test_counter, [{help, "Flush test"}]),
+  ok = instrument_metric:inc_counter(Counter),
   ok = instrument_metrics_exporter:flush(),
 
   %% Shutdown
@@ -316,8 +316,8 @@ periodic_export(_Config) ->
   })),
 
   %% Create a metric
-  Counter = instrument:new_counter(periodic_counter, [{help, "Periodic test"}]),
-  ok = instrument:inc_counter(Counter),
+  Counter = instrument_metric:new_counter(periodic_counter, [{help, "Periodic test"}]),
+  ok = instrument_metric:inc_counter(Counter),
 
   %% Trigger manual export (since default interval is 60s)
   ok = instrument_metrics_exporter:export(),
@@ -332,8 +332,8 @@ periodic_export(_Config) ->
 
 %% Test that atom metric names are correctly converted to binary
 metric_name_atom_test(_Config) ->
-  Counter = instrument:new_counter(my_atom_counter, [{help, "Atom name counter"}]),
-  ok = instrument:inc_counter(Counter, 5),
+  Counter = instrument_metric:new_counter(my_atom_counter, [{help, "Atom name counter"}]),
+  ok = instrument_metric:inc_counter(Counter, 5),
 
   Metrics = instrument_metrics_exporter:collect(),
   CounterMetrics = [M || #{name := N} = M <- Metrics, N =:= <<"my_atom_counter">>],
@@ -347,8 +347,8 @@ metric_name_atom_test(_Config) ->
 %% Test that binary metric names are preserved
 metric_name_binary_test(_Config) ->
   %% Use instrument_nif directly to create metric with binary name
-  Gauge = instrument:new_gauge(<<"my_binary_gauge">>, [{help, "Binary name gauge"}]),
-  ok = instrument:set_gauge(Gauge, 42),
+  Gauge = instrument_metric:new_gauge(<<"my_binary_gauge">>, [{help, "Binary name gauge"}]),
+  ok = instrument_metric:set_gauge(Gauge, 42),
 
   Metrics = instrument_metrics_exporter:collect(),
   GaugeMetrics = [M || #{name := N} = M <- Metrics, N =:= <<"my_binary_gauge">>],
@@ -361,9 +361,9 @@ metric_name_binary_test(_Config) ->
 
 %% Test that vec metric names are correctly exported
 metric_name_vec_test(_Config) ->
-  ok = instrument:new_counter_vec(my_vec_counter, "Vec counter", [method, status]),
-  ok = instrument:inc_counter_vec(my_vec_counter, [<<"GET">>, <<"200">>], 10),
-  ok = instrument:inc_counter_vec(my_vec_counter, [<<"POST">>, <<"201">>], 5),
+  ok = instrument_metric:new_counter_vec(my_vec_counter, "Vec counter", [method, status]),
+  ok = instrument_metric:inc_counter_vec(my_vec_counter, [<<"GET">>, <<"200">>], 10),
+  ok = instrument_metric:inc_counter_vec(my_vec_counter, [<<"POST">>, <<"201">>], 5),
 
   Metrics = instrument_metrics_exporter:collect(),
   VecMetrics = [M || #{name := N} = M <- Metrics, N =:= <<"my_vec_counter">>],
@@ -433,8 +433,8 @@ metric_name_otel_with_attrs_test(_Config) ->
 
 %% Test that metrics without labels have empty attributes
 metric_attrs_empty_test(_Config) ->
-  Counter = instrument:new_counter(attrs_empty_counter, [{help, "No labels"}]),
-  ok = instrument:inc_counter(Counter, 10),
+  Counter = instrument_metric:new_counter(attrs_empty_counter, [{help, "No labels"}]),
+  ok = instrument_metric:inc_counter(Counter, 10),
 
   Metrics = instrument_metrics_exporter:collect(),
   [#{data_points := [#{attributes := Attrs}]}] =
@@ -447,9 +447,9 @@ metric_attrs_empty_test(_Config) ->
 
 %% Test that vec metric labels are correctly converted to attributes
 metric_attrs_vec_labels_test(_Config) ->
-  ok = instrument:new_counter_vec(attrs_vec_counter, "Vec with labels", [region, service]),
-  ok = instrument:inc_counter_vec(attrs_vec_counter, [<<"us-east">>, <<"api">>], 100),
-  ok = instrument:inc_counter_vec(attrs_vec_counter, [<<"eu-west">>, <<"web">>], 50),
+  ok = instrument_metric:new_counter_vec(attrs_vec_counter, "Vec with labels", [region, service]),
+  ok = instrument_metric:inc_counter_vec(attrs_vec_counter, [<<"us-east">>, <<"api">>], 100),
+  ok = instrument_metric:inc_counter_vec(attrs_vec_counter, [<<"eu-west">>, <<"web">>], 50),
 
   Metrics = instrument_metrics_exporter:collect(),
   [#{data_points := DataPoints}] =

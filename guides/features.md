@@ -178,12 +178,12 @@ end).
 
 ```erlang
 %% Direct counter/gauge/histogram
-Counter = instrument:new_counter(name, <<"help">>).
-instrument:inc_counter(Counter).
+Counter = instrument_metric:new_counter(name, <<"help">>).
+instrument_metric:inc_counter(Counter).
 
 %% Vector metrics (labeled)
-instrument:new_counter_vec(name, <<"help">>, [method, status]).
-instrument:inc_counter_vec(name, [<<"GET">>, <<"200">>]).
+instrument_metric:new_counter_vec(name, <<"help">>, [method, status]).
+instrument_metric:inc_counter_vec(name, [<<"GET">>, <<"200">>]).
 ```
 
 ## Configuration Options

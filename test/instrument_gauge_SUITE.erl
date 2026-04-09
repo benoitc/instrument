@@ -53,7 +53,7 @@ end_per_suite(Config) ->
 
 
 init_per_testcase(_, Config) ->
-  ok = instrument:unregister_all(),
+  ok = instrument_metric:unregister_all(),
   Config.
 
 end_per_testcase(_Config) ->
@@ -93,26 +93,26 @@ can_be_reset(_Config) ->
 %% ==============
 
 gauge_facade_api(_Config) ->
-  G = instrument:new_gauge(facade_gauge, "Test gauge"),
-  +0.0 = instrument:get_gauge(G),
-  ok = instrument:set_gauge(G, 10),
-  10.0 = instrument:get_gauge(G),
-  ok = instrument:inc_gauge(G),
-  11.0 = instrument:get_gauge(G),
-  ok = instrument:inc_gauge(G, 5),
-  16.0 = instrument:get_gauge(G),
-  ok = instrument:dec_gauge(G),
-  15.0 = instrument:get_gauge(G),
-  ok = instrument:dec_gauge(G, 10),
-  5.0 = instrument:get_gauge(G),
+  G = instrument_metric:new_gauge(facade_gauge, "Test gauge"),
+  +0.0 = instrument_metric:get_gauge(G),
+  ok = instrument_metric:set_gauge(G, 10),
+  10.0 = instrument_metric:get_gauge(G),
+  ok = instrument_metric:inc_gauge(G),
+  11.0 = instrument_metric:get_gauge(G),
+  ok = instrument_metric:inc_gauge(G, 5),
+  16.0 = instrument_metric:get_gauge(G),
+  ok = instrument_metric:dec_gauge(G),
+  15.0 = instrument_metric:get_gauge(G),
+  ok = instrument_metric:dec_gauge(G, 10),
+  5.0 = instrument_metric:get_gauge(G),
   ok.
 
 gauge_by_name(_Config) ->
-  _ = instrument:new_gauge(named_gauge, "named gauge"),
-  ok = instrument:set_gauge(named_gauge, 42),
-  42.0 = instrument:get_gauge(named_gauge),
-  ok = instrument:inc_gauge(named_gauge, 8),
-  50.0 = instrument:get_gauge(named_gauge),
+  _ = instrument_metric:new_gauge(named_gauge, "named gauge"),
+  ok = instrument_metric:set_gauge(named_gauge, 42),
+  42.0 = instrument_metric:get_gauge(named_gauge),
+  ok = instrument_metric:inc_gauge(named_gauge, 8),
+  50.0 = instrument_metric:get_gauge(named_gauge),
   ok.
 
 %% ==============
@@ -120,7 +120,7 @@ gauge_by_name(_Config) ->
 %% ==============
 
 gauge_concurrent(_Config) ->
-  G = instrument:new_gauge(conc_gauge, "concurrent gauge"),
+  G = instrument_metric:new_gauge(conc_gauge, "concurrent gauge"),
   NumWriters = 10,
   OpsPerWriter = 100,
 
@@ -128,8 +128,8 @@ gauge_concurrent(_Config) ->
   Pids = [spawn_link(fun() ->
     lists:foreach(fun(I) ->
       case I rem 2 of
-        0 -> instrument:inc_gauge(G);
-        1 -> instrument:dec_gauge(G)
+        0 -> instrument_metric:inc_gauge(G);
+        1 -> instrument_metric:dec_gauge(G)
       end
     end, lists:seq(1, OpsPerWriter)),
     Parent ! {done, self()}
@@ -140,24 +140,24 @@ gauge_concurrent(_Config) ->
   end, Pids),
 
   %% Each writer does 50 inc + 50 dec = net 0 change
-  +0.0 = instrument:get_gauge(G),
+  +0.0 = instrument_metric:get_gauge(G),
   ok.
 
 gauge_high_concurrency(_Config) ->
-  G = instrument:new_gauge(high_conc_gauge, "high concurrency gauge"),
+  G = instrument_metric:new_gauge(high_conc_gauge, "high concurrency gauge"),
   NumProcesses = 100,
   OpsPerProcess = 100,
 
   Results = pmap(fun(_) ->
     lists:foreach(fun(_) ->
-      instrument:inc_gauge(G, 1)
+      instrument_metric:inc_gauge(G, 1)
     end, lists:seq(1, OpsPerProcess)),
     ok
   end, lists:seq(1, NumProcesses)),
 
   NumProcesses = length([ok || {ok, ok} <- Results]),
   Expected = float(NumProcesses * OpsPerProcess),
-  Expected = instrument:get_gauge(G),
+  Expected = instrument_metric:get_gauge(G),
   ok.
 
 %% ==============

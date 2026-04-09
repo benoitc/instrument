@@ -136,9 +136,9 @@ Prometheus has naming conventions:
 
 ```erlang
 %% Good names
-instrument:new_counter(http_requests_total, <<"Total HTTP requests">>).
-instrument:new_gauge(http_active_connections, <<"Active connections">>).
-instrument:new_histogram(http_request_duration_seconds, <<"Request duration">>).
+instrument_metric:new_counter(http_requests_total, <<"Total HTTP requests">>).
+instrument_metric:new_gauge(http_active_connections, <<"Active connections">>).
+instrument_metric:new_histogram(http_request_duration_seconds, <<"Request duration">>).
 
 %% Counter: use _total suffix
 %% Histogram: use _seconds or _bytes suffix

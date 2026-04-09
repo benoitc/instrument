@@ -80,13 +80,13 @@ end_per_suite(Config) ->
   Config.
 
 init_per_testcase(_, Config) ->
-  ok = instrument:unregister_all(),
+  ok = instrument_metric:unregister_all(),
   ok = instrument_meter:unregister_all_instruments(),
   timer:sleep(100),
   Config.
 
 end_per_testcase(_, _Config) ->
-  ok = instrument:unregister_all(),
+  ok = instrument_metric:unregister_all(),
   ok = instrument_meter:unregister_all_instruments(),
   timer:sleep(100),
   ok.
@@ -94,35 +94,35 @@ end_per_testcase(_, _Config) ->
 %% VEC API tests
 
 counter_vec_basic(_Config) ->
-  ok = instrument:new_counter_vec(http_requests, "Total HTTP requests", [method, status]),
-  ok = instrument:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
-  ok = instrument:inc_counter_vec(http_requests, [<<"POST">>, <<"201">>], 5),
-  1.0 = instrument:get_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
-  5.0 = instrument:get_counter_vec(http_requests, [<<"POST">>, <<"201">>]),
+  ok = instrument_metric:new_counter_vec(http_requests, "Total HTTP requests", [method, status]),
+  ok = instrument_metric:inc_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
+  ok = instrument_metric:inc_counter_vec(http_requests, [<<"POST">>, <<"201">>], 5),
+  1.0 = instrument_metric:get_counter_vec(http_requests, [<<"GET">>, <<"200">>]),
+  5.0 = instrument_metric:get_counter_vec(http_requests, [<<"POST">>, <<"201">>]),
   ok.
 
 counter_vec_with_labels_function(_Config) ->
-  ok = instrument:new_counter_vec(api_calls, "API calls", [endpoint]),
-  GetUsers = instrument:labels(api_calls, [<<"/users">>]),
-  ok = instrument:inc_counter(GetUsers),
-  ok = instrument:inc_counter(GetUsers, 10),
-  11.0 = instrument:get_counter(GetUsers),
+  ok = instrument_metric:new_counter_vec(api_calls, "API calls", [endpoint]),
+  GetUsers = instrument_metric:labels(api_calls, [<<"/users">>]),
+  ok = instrument_metric:inc_counter(GetUsers),
+  ok = instrument_metric:inc_counter(GetUsers, 10),
+  11.0 = instrument_metric:get_counter(GetUsers),
   ok.
 
 gauge_vec_basic(_Config) ->
-  ok = instrument:new_gauge_vec(active_connections, "Active connections", [server]),
-  ok = instrument:set_gauge_vec(active_connections, [<<"server1">>], 10),
-  ok = instrument:inc_gauge_vec(active_connections, [<<"server1">>], 5),
-  ok = instrument:dec_gauge_vec(active_connections, [<<"server1">>], 3),
-  12.0 = instrument:get_gauge_vec(active_connections, [<<"server1">>]),
+  ok = instrument_metric:new_gauge_vec(active_connections, "Active connections", [server]),
+  ok = instrument_metric:set_gauge_vec(active_connections, [<<"server1">>], 10),
+  ok = instrument_metric:inc_gauge_vec(active_connections, [<<"server1">>], 5),
+  ok = instrument_metric:dec_gauge_vec(active_connections, [<<"server1">>], 3),
+  12.0 = instrument_metric:get_gauge_vec(active_connections, [<<"server1">>]),
   ok.
 
 histogram_vec_basic(_Config) ->
-  ok = instrument:new_histogram_vec(request_latency, "Request latency", [endpoint], [0.1, 0.5, 1.0]),
-  ok = instrument:observe_histogram_vec(request_latency, [<<"/api">>], 0.05),
-  ok = instrument:observe_histogram_vec(request_latency, [<<"/api">>], 0.3),
-  ok = instrument:observe_histogram_vec(request_latency, [<<"/api">>], 0.8),
-  #{count := Count, sum := Sum} = instrument:get_histogram_vec(request_latency, [<<"/api">>]),
+  ok = instrument_metric:new_histogram_vec(request_latency, "Request latency", [endpoint], [0.1, 0.5, 1.0]),
+  ok = instrument_metric:observe_histogram_vec(request_latency, [<<"/api">>], 0.05),
+  ok = instrument_metric:observe_histogram_vec(request_latency, [<<"/api">>], 0.3),
+  ok = instrument_metric:observe_histogram_vec(request_latency, [<<"/api">>], 0.8),
+  #{count := Count, sum := Sum} = instrument_metric:get_histogram_vec(request_latency, [<<"/api">>]),
   true = (Count >= 3.0 andalso Count =< 3.0),
   true = (Sum > 1.14 andalso Sum < 1.16),
   ok.
@@ -134,8 +134,8 @@ prometheus_content_type(_Config) ->
   ok.
 
 prometheus_counter_format(_Config) ->
-  _ = instrument:new_counter(simple_counter, "A simple counter"),
-  ok = instrument:inc_counter(simple_counter, 42),
+  _ = instrument_metric:new_counter(simple_counter, "A simple counter"),
+  ok = instrument_metric:inc_counter(simple_counter, 42),
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"# HELP simple_counter_total A simple counter">>) =/= nomatch,
   true = binary:match(Output, <<"# TYPE simple_counter_total counter">>) =/= nomatch,
@@ -143,9 +143,9 @@ prometheus_counter_format(_Config) ->
   ok.
 
 prometheus_counter_vec_format(_Config) ->
-  ok = instrument:new_counter_vec(http_requests, "Total requests", [method]),
-  ok = instrument:inc_counter_vec(http_requests, [<<"GET">>], 100),
-  ok = instrument:inc_counter_vec(http_requests, [<<"POST">>], 50),
+  ok = instrument_metric:new_counter_vec(http_requests, "Total requests", [method]),
+  ok = instrument_metric:inc_counter_vec(http_requests, [<<"GET">>], 100),
+  ok = instrument_metric:inc_counter_vec(http_requests, [<<"POST">>], 50),
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"# HELP http_requests_total Total requests">>) =/= nomatch,
   true = binary:match(Output, <<"# TYPE http_requests_total counter">>) =/= nomatch,
@@ -154,8 +154,8 @@ prometheus_counter_vec_format(_Config) ->
   ok.
 
 prometheus_gauge_format(_Config) ->
-  _ = instrument:new_gauge(temperature, "Current temperature"),
-  ok = instrument:set_gauge(temperature, 23.5),
+  _ = instrument_metric:new_gauge(temperature, "Current temperature"),
+  ok = instrument_metric:set_gauge(temperature, 23.5),
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"# HELP temperature Current temperature">>) =/= nomatch,
   true = binary:match(Output, <<"# TYPE temperature gauge">>) =/= nomatch,
@@ -163,9 +163,9 @@ prometheus_gauge_format(_Config) ->
   ok.
 
 prometheus_gauge_vec_format(_Config) ->
-  ok = instrument:new_gauge_vec(pool_size, "Connection pool size", [pool]),
-  ok = instrument:set_gauge_vec(pool_size, [<<"main">>], 10),
-  ok = instrument:set_gauge_vec(pool_size, [<<"backup">>], 5),
+  ok = instrument_metric:new_gauge_vec(pool_size, "Connection pool size", [pool]),
+  ok = instrument_metric:set_gauge_vec(pool_size, [<<"main">>], 10),
+  ok = instrument_metric:set_gauge_vec(pool_size, [<<"backup">>], 5),
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"# HELP pool_size Connection pool size">>) =/= nomatch,
   true = binary:match(Output, <<"# TYPE pool_size gauge">>) =/= nomatch,
@@ -174,9 +174,9 @@ prometheus_gauge_vec_format(_Config) ->
   ok.
 
 prometheus_histogram_format(_Config) ->
-  _ = instrument:new_histogram(latency, "Request latency", [0.1, 0.5, 1.0]),
-  ok = instrument:observe_histogram(latency, 0.05),
-  ok = instrument:observe_histogram(latency, 0.3),
+  _ = instrument_metric:new_histogram(latency, "Request latency", [0.1, 0.5, 1.0]),
+  ok = instrument_metric:observe_histogram(latency, 0.05),
+  ok = instrument_metric:observe_histogram(latency, 0.3),
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"# HELP latency Request latency">>) =/= nomatch,
   true = binary:match(Output, <<"# TYPE latency histogram">>) =/= nomatch,
@@ -187,9 +187,9 @@ prometheus_histogram_format(_Config) ->
   ok.
 
 prometheus_histogram_vec_format(_Config) ->
-  ok = instrument:new_histogram_vec(api_latency, "API latency", [endpoint], [0.1, 0.5]),
-  ok = instrument:observe_histogram_vec(api_latency, [<<"/users">>], 0.05),
-  ok = instrument:observe_histogram_vec(api_latency, [<<"/users">>], 0.3),
+  ok = instrument_metric:new_histogram_vec(api_latency, "API latency", [endpoint], [0.1, 0.5]),
+  ok = instrument_metric:observe_histogram_vec(api_latency, [<<"/users">>], 0.05),
+  ok = instrument_metric:observe_histogram_vec(api_latency, [<<"/users">>], 0.3),
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"# HELP api_latency API latency">>) =/= nomatch,
   true = binary:match(Output, <<"# TYPE api_latency histogram">>) =/= nomatch,
@@ -198,10 +198,10 @@ prometheus_histogram_vec_format(_Config) ->
   ok.
 
 prometheus_label_escaping(_Config) ->
-  ok = instrument:new_counter_vec(escaped_metric, "Test escaping", [label]),
-  ok = instrument:inc_counter_vec(escaped_metric, [<<"value with \"quotes\"">>]),
-  ok = instrument:inc_counter_vec(escaped_metric, [<<"value\\with\\backslashes">>]),
-  ok = instrument:inc_counter_vec(escaped_metric, [<<"value\nwith\nnewlines">>]),
+  ok = instrument_metric:new_counter_vec(escaped_metric, "Test escaping", [label]),
+  ok = instrument_metric:inc_counter_vec(escaped_metric, [<<"value with \"quotes\"">>]),
+  ok = instrument_metric:inc_counter_vec(escaped_metric, [<<"value\\with\\backslashes">>]),
+  ok = instrument_metric:inc_counter_vec(escaped_metric, [<<"value\nwith\nnewlines">>]),
   Output = instrument_prometheus:format(),
   true = binary:match(Output, <<"label=\"value with \\\"quotes\\\"\"">>)  =/= nomatch,
   true = binary:match(Output, <<"label=\"value\\\\with\\\\backslashes\"">>)  =/= nomatch,

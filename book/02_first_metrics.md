@@ -23,7 +23,7 @@ A counter is a value that only goes up. Use counters when you want to count even
 ### Creating a Counter
 
 ```erlang
-Counter = instrument:new_counter(http_requests_total, <<"Total HTTP requests">>).
+Counter = instrument_metric:new_counter(http_requests_total, <<"Total HTTP requests">>).
 ```
 
 The arguments are:
@@ -34,13 +34,13 @@ The arguments are:
 
 ```erlang
 %% Increment by 1
-instrument:inc_counter(Counter).
+instrument_metric:inc_counter(Counter).
 
 %% Increment by a specific amount
-instrument:inc_counter(Counter, 5).
+instrument_metric:inc_counter(Counter, 5).
 
 %% Read the current value
-Value = instrument:get_counter(Counter).  %% Returns 6.0
+Value = instrument_metric:get_counter(Counter).  %% Returns 6.0
 ```
 
 ### When to Use Counters
@@ -70,27 +70,27 @@ A gauge is a value that can go up or down. Use gauges for current state.
 ### Creating a Gauge
 
 ```erlang
-Gauge = instrument:new_gauge(active_connections, <<"Current active connections">>).
+Gauge = instrument_metric:new_gauge(active_connections, <<"Current active connections">>).
 ```
 
 ### Using a Gauge
 
 ```erlang
 %% Set to a specific value
-instrument:set_gauge(Gauge, 100).
+instrument_metric:set_gauge(Gauge, 100).
 
 %% Increment by 1
-instrument:inc_gauge(Gauge).  %% Now 101
+instrument_metric:inc_gauge(Gauge).  %% Now 101
 
 %% Decrement
-instrument:dec_gauge(Gauge).        %% Now 100
-instrument:dec_gauge(Gauge, 10).    %% Now 90
+instrument_metric:dec_gauge(Gauge).        %% Now 100
+instrument_metric:dec_gauge(Gauge, 10).    %% Now 90
 
 %% Set to current time
-instrument:set_gauge_to_current_time(Gauge).
+instrument_metric:set_gauge_to_current_time(Gauge).
 
 %% Read the value
-Value = instrument:get_gauge(Gauge).
+Value = instrument_metric:get_gauge(Gauge).
 ```
 
 ### When to Use Gauges
@@ -121,13 +121,13 @@ A histogram tracks the distribution of values. Use histograms for latencies and 
 
 ```erlang
 %% With default buckets
-Histogram = instrument:new_histogram(
+Histogram = instrument_metric:new_histogram(
     request_duration_seconds,
     <<"Request duration in seconds">>
 ).
 
 %% With custom buckets
-Histogram2 = instrument:new_histogram(
+Histogram2 = instrument_metric:new_histogram(
     response_size_bytes,
     <<"Response size in bytes">>,
     [100, 500, 1000, 5000, 10000]
@@ -138,16 +138,16 @@ Histogram2 = instrument:new_histogram(
 
 ```erlang
 %% Record an observation
-instrument:observe_histogram(Histogram, 0.125).
-instrument:observe_histogram(Histogram, 0.250).
-instrument:observe_histogram(Histogram, 0.050).
+instrument_metric:observe_histogram(Histogram, 0.125).
+instrument_metric:observe_histogram(Histogram, 0.250).
+instrument_metric:observe_histogram(Histogram, 0.050).
 
 %% Get the distribution
 #{
     count := Count,
     sum := Sum,
     buckets := Buckets
-} = instrument:get_histogram(Histogram).
+} = instrument_metric:get_histogram(Histogram).
 ```
 
 ### Understanding Buckets
@@ -194,13 +194,13 @@ Here is a complete example instrumenting an HTTP handler:
 
 init() ->
     %% Create metrics at startup
-    instrument:new_counter(http_requests_total, <<"Total HTTP requests">>),
-    instrument:new_gauge(http_active_requests, <<"Active HTTP requests">>),
-    instrument:new_histogram(http_request_duration_seconds, <<"Request duration">>).
+    instrument_metric:new_counter(http_requests_total, <<"Total HTTP requests">>),
+    instrument_metric:new_gauge(http_active_requests, <<"Active HTTP requests">>),
+    instrument_metric:new_histogram(http_request_duration_seconds, <<"Request duration">>).
 
 handle(Method, Path) ->
     %% Track active requests
-    instrument:inc_gauge(http_active_requests),
+    instrument_metric:inc_gauge(http_active_requests),
 
     %% Time the request
     Start = erlang:monotonic_time(microsecond),
@@ -209,13 +209,13 @@ handle(Method, Path) ->
         Result = do_handle(Method, Path),
 
         %% Count successful request
-        instrument:inc_counter(http_requests_total),
+        instrument_metric:inc_counter(http_requests_total),
         Result
     after
         %% Always record duration and decrement active
         Duration = (erlang:monotonic_time(microsecond) - Start) / 1000000,
-        instrument:observe_histogram(http_request_duration_seconds, Duration),
-        instrument:dec_gauge(http_active_requests)
+        instrument_metric:observe_histogram(http_request_duration_seconds, Duration),
+        instrument_metric:dec_gauge(http_active_requests)
     end.
 ```
 

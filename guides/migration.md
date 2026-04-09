@@ -31,8 +31,8 @@ folsom_metrics:new_counter(my_counter),
 folsom_metrics:notify({my_counter, {inc, 1}}).
 
 %% instrument
-Counter = instrument:new_counter(my_counter, <<"My counter">>),
-instrument:inc_counter(Counter).
+Counter = instrument_metric:new_counter(my_counter, <<"My counter">>),
+instrument_metric:inc_counter(Counter).
 ```
 
 ### Gauges
@@ -43,8 +43,8 @@ folsom_metrics:new_gauge(my_gauge),
 folsom_metrics:notify({my_gauge, 100}).
 
 %% instrument
-Gauge = instrument:new_gauge(my_gauge, <<"My gauge">>),
-instrument:set_gauge(Gauge, 100).
+Gauge = instrument_metric:new_gauge(my_gauge, <<"My gauge">>),
+instrument_metric:set_gauge(Gauge, 100).
 ```
 
 ### Histograms
@@ -55,8 +55,8 @@ folsom_metrics:new_histogram(my_hist, slide, 60),
 folsom_metrics:notify({my_hist, Value}).
 
 %% instrument
-Hist = instrument:new_histogram(my_hist, <<"My histogram">>),
-instrument:observe_histogram(Hist, Value).
+Hist = instrument_metric:new_histogram(my_hist, <<"My histogram">>),
+instrument_metric:observe_histogram(Hist, Value).
 ```
 
 ### Meters (Rate)
@@ -69,8 +69,8 @@ folsom_metrics:new_meter(requests),
 folsom_metrics:notify({requests, 1}).
 
 %% instrument - use counter, Prometheus calculates rate
-Counter = instrument:new_counter(requests_total, <<"Total requests">>),
-instrument:inc_counter(Counter).
+Counter = instrument_metric:new_counter(requests_total, <<"Total requests">>),
+instrument_metric:inc_counter(Counter).
 
 %% In Prometheus: rate(requests_total[5m])
 ```
@@ -87,15 +87,15 @@ inc(Name) ->
     %% Old
     folsom_metrics:notify({Name, {inc, 1}}),
     %% New
-    instrument:inc_counter(Name).
+    instrument_metric:inc_counter(Name).
 
 set(Name, Value) ->
     folsom_metrics:notify({Name, Value}),
-    instrument:set_gauge(Name, Value).
+    instrument_metric:set_gauge(Name, Value).
 
 observe(Name, Value) ->
     folsom_metrics:notify({Name, Value}),
-    instrument:observe_histogram(Name, Value).
+    instrument_metric:observe_histogram(Name, Value).
 ```
 
 ## From Exometer
@@ -110,8 +110,8 @@ exometer:new([my, counter], counter),
 exometer:update([my, counter], 1).
 
 %% instrument
-Counter = instrument:new_counter(my_counter, <<"My counter">>),
-instrument:inc_counter(Counter).
+Counter = instrument_metric:new_counter(my_counter, <<"My counter">>),
+instrument_metric:inc_counter(Counter).
 ```
 
 ### Gauges
@@ -122,8 +122,8 @@ exometer:new([my, gauge], gauge),
 exometer:update([my, gauge], 100).
 
 %% instrument
-Gauge = instrument:new_gauge(my_gauge, <<"My gauge">>),
-instrument:set_gauge(Gauge, 100).
+Gauge = instrument_metric:new_gauge(my_gauge, <<"My gauge">>),
+instrument_metric:set_gauge(Gauge, 100).
 ```
 
 ### Histograms
@@ -134,8 +134,8 @@ exometer:new([my, hist], histogram),
 exometer:update([my, hist], Value).
 
 %% instrument
-Hist = instrument:new_histogram(my_hist, <<"My histogram">>),
-instrument:observe_histogram(Hist, Value).
+Hist = instrument_metric:new_histogram(my_hist, <<"My histogram">>),
+instrument_metric:observe_histogram(Hist, Value).
 ```
 
 ### Name Conversion
@@ -158,7 +158,7 @@ OpenCensus has similar concepts but different API structure.
 oc_stat:record([{Tag, Value}], MeasureName, Amount).
 
 %% instrument
-instrument:inc_counter_vec(MeasureName, [Value], Amount).
+instrument_metric:inc_counter_vec(MeasureName, [Value], Amount).
 ```
 
 ### Tracing
@@ -262,7 +262,7 @@ Headers = instrument_propagation:inject_headers(instrument_context:current()).
 ets:update_counter(metrics, my_counter, 1).
 
 %% instrument
-instrument:inc_counter(my_counter).
+instrument_metric:inc_counter(my_counter).
 ```
 
 ### Custom Timing
@@ -312,7 +312,7 @@ inc_counter(Name) ->
     end,
     %% New system
     case application:get_env(my_app, use_new_metrics, true) of
-        true -> instrument:inc_counter(Name);
+        true -> instrument_metric:inc_counter(Name);
         false -> ok
     end.
 ```
@@ -366,7 +366,7 @@ Ensure bucket boundaries match or data will look different:
 old_buckets() -> [0.1, 0.5, 1.0, 5.0].
 
 %% Match in instrument
-instrument:new_histogram(my_hist, <<"">>, [0.1, 0.5, 1.0, 5.0]).
+instrument_metric:new_histogram(my_hist, <<"">>, [0.1, 0.5, 1.0, 5.0]).
 ```
 
 ### Missing Features

@@ -68,31 +68,31 @@ run_counter() ->
     io:format(user, "--- Counter Benchmarks ---~n", []),
 
     %% Create counter
-    Counter = instrument:new_counter(bench_counter, <<"Benchmark counter">>),
+    Counter = instrument_metric:new_counter(bench_counter, <<"Benchmark counter">>),
 
     %% Warmup
-    warmup(fun() -> instrument:inc_counter(Counter) end),
+    warmup(fun() -> instrument_metric:inc_counter(Counter) end),
 
     %% Benchmark inc_counter/1
     R1 = bench("counter:inc_counter/1", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:inc_counter(Counter)
+        instrument_metric:inc_counter(Counter)
     end),
     format_result("counter:inc_counter/1", R1),
 
     %% Benchmark inc_counter/2
     R2 = bench("counter:inc_counter/2", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:inc_counter(Counter, 1)
+        instrument_metric:inc_counter(Counter, 1)
     end),
     format_result("counter:inc_counter/2", R2),
 
     %% Benchmark get_counter/1
     R3 = bench("counter:get_counter/1", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:get_counter(Counter)
+        instrument_metric:get_counter(Counter)
     end),
     format_result("counter:get_counter/1", R3),
 
     %% Cleanup
-    instrument:unregister(bench_counter),
+    instrument_metric:unregister(bench_counter),
     ok.
 
 %% @doc Benchmark basic gauge operations.
@@ -101,37 +101,37 @@ run_gauge() ->
     io:format(user, "--- Gauge Benchmarks ---~n", []),
 
     %% Create gauge
-    Gauge = instrument:new_gauge(bench_gauge, <<"Benchmark gauge">>),
+    Gauge = instrument_metric:new_gauge(bench_gauge, <<"Benchmark gauge">>),
 
     %% Warmup
-    warmup(fun() -> instrument:set_gauge(Gauge, 100) end),
+    warmup(fun() -> instrument_metric:set_gauge(Gauge, 100) end),
 
     %% Benchmark set_gauge/2
     R1 = bench("gauge:set_gauge/2", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:set_gauge(Gauge, 100)
+        instrument_metric:set_gauge(Gauge, 100)
     end),
     format_result("gauge:set_gauge/2", R1),
 
     %% Benchmark inc_gauge/1
     R2 = bench("gauge:inc_gauge/1", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:inc_gauge(Gauge)
+        instrument_metric:inc_gauge(Gauge)
     end),
     format_result("gauge:inc_gauge/1", R2),
 
     %% Benchmark dec_gauge/1
     R3 = bench("gauge:dec_gauge/1", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:dec_gauge(Gauge)
+        instrument_metric:dec_gauge(Gauge)
     end),
     format_result("gauge:dec_gauge/1", R3),
 
     %% Benchmark get_gauge/1
     R4 = bench("gauge:get_gauge/1", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:get_gauge(Gauge)
+        instrument_metric:get_gauge(Gauge)
     end),
     format_result("gauge:get_gauge/1", R4),
 
     %% Cleanup
-    instrument:unregister(bench_gauge),
+    instrument_metric:unregister(bench_gauge),
     ok.
 
 %% @doc Benchmark basic histogram operations.
@@ -140,25 +140,25 @@ run_histogram() ->
     io:format(user, "--- Histogram Benchmarks ---~n", []),
 
     %% Create histogram
-    Histogram = instrument:new_histogram(bench_histogram, <<"Benchmark histogram">>),
+    Histogram = instrument_metric:new_histogram(bench_histogram, <<"Benchmark histogram">>),
 
     %% Warmup
-    warmup(fun() -> instrument:observe_histogram(Histogram, 0.5) end),
+    warmup(fun() -> instrument_metric:observe_histogram(Histogram, 0.5) end),
 
     %% Benchmark observe_histogram/2
     R1 = bench("histogram:observe/2", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:observe_histogram(Histogram, 0.125)
+        instrument_metric:observe_histogram(Histogram, 0.125)
     end),
     format_result("histogram:observe/2", R1),
 
     %% Benchmark get_histogram/1
     R2 = bench("histogram:get/1", ?DEFAULT_ITERATIONS, fun() ->
-        instrument:get_histogram(Histogram)
+        instrument_metric:get_histogram(Histogram)
     end),
     format_result("histogram:get/1", R2),
 
     %% Cleanup
-    instrument:unregister(bench_histogram),
+    instrument_metric:unregister(bench_histogram),
     ok.
 
 %% @doc Benchmark OpenTelemetry Meter API.

@@ -56,7 +56,7 @@ end_per_suite(Config) ->
 
 
 init_per_testcase(_, Config) ->
-  ok = instrument:unregister_all(),
+  ok = instrument_metric:unregister_all(),
   Config.
 
 end_per_testcase(_Config) ->

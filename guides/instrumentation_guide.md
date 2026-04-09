@@ -42,7 +42,7 @@ All three signals can be correlated using trace context (trace_id, span_id).
 ```erlang
 %% Application startup
 init_metrics() ->
-    instrument:new_counter_vec(
+    instrument_metric:new_counter_vec(
         http_requests_total,
         "Total HTTP requests",
         [method, path, status]
@@ -53,11 +53,11 @@ handle_request(Method, Path, _Req) ->
     try
         Response = process_request(Method, Path),
         Status = response_status(Response),
-        instrument:inc_counter_vec(http_requests_total, [Method, Path, Status]),
+        instrument_metric:inc_counter_vec(http_requests_total, [Method, Path, Status]),
         Response
     catch
         _:_ ->
-            instrument:inc_counter_vec(http_requests_total, [Method, Path, "500"]),
+            instrument_metric:inc_counter_vec(http_requests_total, [Method, Path, "500"]),
             {error, internal_error}
     end.
 ```
@@ -66,11 +66,11 @@ handle_request(Method, Path, _Req) ->
 
 ```erlang
 init_metrics() ->
-    instrument:new_counter_vec(errors_total, "Total errors", [type, module]).
+    instrument_metric:new_counter_vec(errors_total, "Total errors", [type, module]).
 
 %% In error handler
 log_error(Type, Module, _Reason) ->
-    instrument:inc_counter_vec(errors_total, [atom_to_list(Type), atom_to_list(Module)]).
+    instrument_metric:inc_counter_vec(errors_total, [atom_to_list(Type), atom_to_list(Module)]).
 ```
 
 ### Gauge Patterns
@@ -79,33 +79,33 @@ log_error(Type, Module, _Reason) ->
 
 ```erlang
 init_metrics() ->
-    instrument:new_gauge(memory_usage_bytes, "Current memory usage"),
-    instrument:new_gauge(process_count, "Number of processes"),
-    instrument:new_gauge_vec(pool_connections, "Pool connections", [pool, state]).
+    instrument_metric:new_gauge(memory_usage_bytes, "Current memory usage"),
+    instrument_metric:new_gauge(process_count, "Number of processes"),
+    instrument_metric:new_gauge_vec(pool_connections, "Pool connections", [pool, state]).
 
 %% Periodic update (e.g., in a gen_server)
 update_system_metrics() ->
     MemInfo = erlang:memory(),
-    instrument:set_gauge(memory_usage_bytes, proplists:get_value(total, MemInfo)),
-    instrument:set_gauge(process_count, erlang:system_info(process_count)).
+    instrument_metric:set_gauge(memory_usage_bytes, proplists:get_value(total, MemInfo)),
+    instrument_metric:set_gauge(process_count, erlang:system_info(process_count)).
 
 update_pool_metrics(PoolName, Active, Idle) ->
-    instrument:set_gauge_vec(pool_connections, [PoolName, "active"], Active),
-    instrument:set_gauge_vec(pool_connections, [PoolName, "idle"], Idle).
+    instrument_metric:set_gauge_vec(pool_connections, [PoolName, "active"], Active),
+    instrument_metric:set_gauge_vec(pool_connections, [PoolName, "idle"], Idle).
 ```
 
 #### In-Flight Tracking
 
 ```erlang
 init_metrics() ->
-    instrument:new_gauge(requests_in_flight, "Current in-flight requests").
+    instrument_metric:new_gauge(requests_in_flight, "Current in-flight requests").
 
 handle_request(Req) ->
-    instrument:inc_gauge(requests_in_flight),
+    instrument_metric:inc_gauge(requests_in_flight),
     try
         process_request(Req)
     after
-        instrument:dec_gauge(requests_in_flight)
+        instrument_metric:dec_gauge(requests_in_flight)
     end.
 ```
 
@@ -116,7 +116,7 @@ handle_request(Req) ->
 ```erlang
 init_metrics() ->
     %% Use buckets appropriate for your SLOs
-    instrument:new_histogram_vec(
+    instrument_metric:new_histogram_vec(
         http_request_duration_seconds,
         "HTTP request duration",
         [method, path],
@@ -133,7 +133,7 @@ handle_request(Method, Path, Req) ->
             native,
             microsecond
         ) / 1_000_000,  %% Convert to seconds
-        instrument:observe_histogram_vec(
+        instrument_metric:observe_histogram_vec(
             http_request_duration_seconds,
             [Method, Path],
             Duration
@@ -145,7 +145,7 @@ handle_request(Method, Path, Req) ->
 
 ```erlang
 init_metrics() ->
-    instrument:new_histogram_vec(
+    instrument_metric:new_histogram_vec(
         http_response_size_bytes,
         "HTTP response size",
         [method, path],
@@ -154,7 +154,7 @@ init_metrics() ->
 
 send_response(Method, Path, Body) ->
     Size = byte_size(Body),
-    instrument:observe_histogram_vec(http_response_size_bytes, [Method, Path], Size),
+    instrument_metric:observe_histogram_vec(http_response_size_bytes, [Method, Path], Size),
     Body.
 ```
 
@@ -592,10 +592,10 @@ end).
 
 init() ->
     %% Initialize metrics
-    instrument:new_counter_vec(http_requests_total, "HTTP requests", [method, path, status]),
-    instrument:new_histogram_vec(http_request_duration_seconds, "Request duration",
+    instrument_metric:new_counter_vec(http_requests_total, "HTTP requests", [method, path, status]),
+    instrument_metric:new_histogram_vec(http_request_duration_seconds, "Request duration",
         [method, path], [0.001, 0.01, 0.1, 1.0, 10.0]),
-    instrument:new_gauge(http_requests_in_flight, "In-flight requests"),
+    instrument_metric:new_gauge(http_requests_in_flight, "In-flight requests"),
 
     %% Install logger integration
     instrument_logger:install().
@@ -606,7 +606,7 @@ handle(#{method := Method, path := Path, headers := Headers} = Req, State) ->
     instrument_context:attach(Ctx),
 
     %% Track in-flight
-    instrument:inc_gauge(http_requests_in_flight),
+    instrument_metric:inc_gauge(http_requests_in_flight),
     Start = erlang:monotonic_time(),
 
     instrument_tracer:with_span(<<"http.request">>, #{kind => server}, fun() ->
@@ -620,8 +620,8 @@ handle(#{method := Method, path := Path, headers := Headers} = Req, State) ->
 
             %% Record success metrics
             Duration = duration_seconds(Start),
-            instrument:inc_counter_vec(http_requests_total, [Method, Path, integer_to_list(Status)]),
-            instrument:observe_histogram_vec(http_request_duration_seconds, [Method, Path], Duration),
+            instrument_metric:inc_counter_vec(http_requests_total, [Method, Path, integer_to_list(Status)]),
+            instrument_metric:observe_histogram_vec(http_request_duration_seconds, [Method, Path], Duration),
 
             instrument_tracer:set_attributes(#{<<"http.status_code">> => Status}),
             instrument_tracer:set_status(ok),
@@ -630,15 +630,15 @@ handle(#{method := Method, path := Path, headers := Headers} = Req, State) ->
         catch
             _:Reason:Stack ->
                 Duration = duration_seconds(Start),
-                instrument:inc_counter_vec(http_requests_total, [Method, Path, "500"]),
-                instrument:observe_histogram_vec(http_request_duration_seconds, [Method, Path], Duration),
+                instrument_metric:inc_counter_vec(http_requests_total, [Method, Path, "500"]),
+                instrument_metric:observe_histogram_vec(http_request_duration_seconds, [Method, Path], Duration),
 
                 instrument_tracer:record_exception(Reason, #{stacktrace => Stack}),
                 instrument_tracer:set_status(error, <<"Internal server error">>),
 
                 {500, <<"Internal Server Error">>, State}
         after
-            instrument:dec_gauge(http_requests_in_flight)
+            instrument_metric:dec_gauge(http_requests_in_flight)
         end
     end).
 
@@ -672,12 +672,12 @@ query(SQL, Params) ->
         try
             Result = pgsql:query(SQL, Params),
             Duration = duration_seconds(Start),
-            instrument:observe_histogram(db_query_duration_seconds, Duration),
+            instrument_metric:observe_histogram(db_query_duration_seconds, Duration),
             instrument_tracer:set_status(ok),
             Result
         catch
             _:Reason:Stack ->
-                instrument:inc_counter(db_errors_total),
+                instrument_metric:inc_counter(db_errors_total),
                 instrument_tracer:record_exception(Reason, #{stacktrace => Stack}),
                 instrument_tracer:set_status(error, <<"Query failed">>),
                 error(Reason)
@@ -712,12 +712,12 @@ handle_message(#{headers := Headers, body := Body, queue := Queue}) ->
 
         try
             Result = process_message_body(Body),
-            instrument:inc_counter_vec(messages_processed_total, [Queue, "success"]),
+            instrument_metric:inc_counter_vec(messages_processed_total, [Queue, "success"]),
             instrument_tracer:set_status(ok),
             Result
         catch
             _:Reason:Stack ->
-                instrument:inc_counter_vec(messages_processed_total, [Queue, "error"]),
+                instrument_metric:inc_counter_vec(messages_processed_total, [Queue, "error"]),
                 instrument_tracer:record_exception(Reason, #{stacktrace => Stack}),
                 instrument_tracer:set_status(error),
                 {error, Reason}

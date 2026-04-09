@@ -93,7 +93,7 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
   %% Clean up any registered metrics
-  catch instrument:unregister_all(),
+  catch instrument_metric:unregister_all(),
   %% Clear context
   erlang:erase('$instrument_context'),
   ok.
@@ -119,11 +119,11 @@ counter_concurrent_increments(_Config) ->
   IncrementsPerProcess = 10000,
   ExpectedTotal = float(NumProcesses * IncrementsPerProcess),
 
-  M = instrument:new_counter(stress_counter, <<"stress test counter">>),
+  M = instrument_metric:new_counter(stress_counter, <<"stress test counter">>),
 
   Results = stress_test(NumProcesses, fun() ->
     lists:foreach(fun(_) ->
-      ok = instrument:inc_counter(M)
+      ok = instrument_metric:inc_counter(M)
     end, lists:seq(1, IncrementsPerProcess)),
     ok
   end),
@@ -132,7 +132,7 @@ counter_concurrent_increments(_Config) ->
   ?assertEqual(NumProcesses, length([ok || ok <- Results])),
 
   %% Counter value should be exact
-  ActualValue = instrument:get_counter(M),
+  ActualValue = instrument_metric:get_counter(M),
   ?assertEqual(ExpectedTotal, ActualValue),
   ok.
 
@@ -141,14 +141,14 @@ counter_vec_high_cardinality(_Config) ->
   NumLabels = 100,
   IncrementsPerLabel = 100,
 
-  _Vec = instrument:new_counter_vec(stress_counter_vec, <<"high cardinality test">>, [method, status]),
+  _Vec = instrument_metric:new_counter_vec(stress_counter_vec, <<"high cardinality test">>, [method, status]),
 
   %% Concurrent updates to different labels
   Results = stress_test(NumLabels, fun() ->
     Method = list_to_binary(["method_", integer_to_list(rand:uniform(10))]),
     Status = list_to_binary(["status_", integer_to_list(rand:uniform(10))]),
     lists:foreach(fun(_) ->
-      ok = instrument:inc_counter_vec(stress_counter_vec, [Method, Status])
+      ok = instrument_metric:inc_counter_vec(stress_counter_vec, [Method, Status])
     end, lists:seq(1, IncrementsPerLabel)),
     ok
   end),
@@ -165,15 +165,15 @@ gauge_concurrent_updates(_Config) ->
   NumProcesses = 50,
   OpsPerProcess = 5000,
 
-  M = instrument:new_gauge(stress_gauge, <<"stress test gauge">>),
+  M = instrument_metric:new_gauge(stress_gauge, <<"stress test gauge">>),
 
   Results = stress_test(NumProcesses, fun() ->
     lists:foreach(fun(_) ->
       Op = rand:uniform(3),
       case Op of
-        1 -> instrument:inc_gauge(M);
-        2 -> instrument:dec_gauge(M);
-        3 -> instrument:set_gauge(M, rand:uniform(1000))
+        1 -> instrument_metric:inc_gauge(M);
+        2 -> instrument_metric:dec_gauge(M);
+        3 -> instrument_metric:set_gauge(M, rand:uniform(1000))
       end
     end, lists:seq(1, OpsPerProcess)),
     ok
@@ -181,7 +181,7 @@ gauge_concurrent_updates(_Config) ->
 
   ?assertEqual(NumProcesses, length([ok || ok <- Results])),
   %% Just verify gauge can still be read
-  Value = instrument:get_gauge(M),
+  Value = instrument_metric:get_gauge(M),
   ?assert(is_number(Value)),
   ok.
 
@@ -190,7 +190,7 @@ gauge_vec_concurrent(_Config) ->
   NumProcesses = 50,
   OpsPerProcess = 1000,
 
-  _Vec = instrument:new_gauge_vec(stress_gauge_vec, <<"gauge vec stress">>, [node, service]),
+  _Vec = instrument_metric:new_gauge_vec(stress_gauge_vec, <<"gauge vec stress">>, [node, service]),
 
   Results = stress_test(NumProcesses, fun() ->
     Node = list_to_binary(["node_", integer_to_list(rand:uniform(5))]),
@@ -198,9 +198,9 @@ gauge_vec_concurrent(_Config) ->
     lists:foreach(fun(_) ->
       Op = rand:uniform(3),
       case Op of
-        1 -> instrument:inc_gauge_vec(stress_gauge_vec, [Node, Service]);
-        2 -> instrument:dec_gauge_vec(stress_gauge_vec, [Node, Service]);
-        3 -> instrument:set_gauge_vec(stress_gauge_vec, [Node, Service], rand:uniform(100))
+        1 -> instrument_metric:inc_gauge_vec(stress_gauge_vec, [Node, Service]);
+        2 -> instrument_metric:dec_gauge_vec(stress_gauge_vec, [Node, Service]);
+        3 -> instrument_metric:set_gauge_vec(stress_gauge_vec, [Node, Service], rand:uniform(100))
       end
     end, lists:seq(1, OpsPerProcess)),
     ok
@@ -220,11 +220,11 @@ histogram_concurrent_observations(_Config) ->
   ExpectedCount = float(NumProcesses * ObservationsPerProcess),
 
   Buckets = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
-  M = instrument:new_histogram(stress_histogram, <<"stress histogram">>, Buckets),
+  M = instrument_metric:new_histogram(stress_histogram, <<"stress histogram">>, Buckets),
 
   Results = stress_test(NumProcesses, fun() ->
     lists:foreach(fun(_) ->
-      ok = instrument:observe_histogram(M, rand:uniform() * 10)
+      ok = instrument_metric:observe_histogram(M, rand:uniform() * 10)
     end, lists:seq(1, ObservationsPerProcess)),
     ok
   end),
@@ -232,7 +232,7 @@ histogram_concurrent_observations(_Config) ->
   ?assertEqual(NumProcesses, length([ok || ok <- Results])),
 
   %% Verify count matches
-  #{count := Count} = instrument:get_histogram(M),
+  #{count := Count} = instrument_metric:get_histogram(M),
   ?assertEqual(ExpectedCount, Count),
   ok.
 
@@ -243,14 +243,14 @@ histogram_read_during_write(_Config) ->
   ObservationsPerWriter = 2000,
 
   Buckets = [0.0, 1.0, 5.0, 10.0],
-  M = instrument:new_histogram(rw_histogram, <<"read-write histogram">>, Buckets),
+  M = instrument_metric:new_histogram(rw_histogram, <<"read-write histogram">>, Buckets),
 
   Parent = self(),
 
   %% Start writers
   WriterPids = [spawn_link(fun() ->
     lists:foreach(fun(_) ->
-      ok = instrument:observe_histogram(M, rand:uniform() * 10)
+      ok = instrument_metric:observe_histogram(M, rand:uniform() * 10)
     end, lists:seq(1, ObservationsPerWriter)),
     Parent ! {writer_done, self()}
   end) || _ <- lists:seq(1, NumWriters)],
@@ -272,16 +272,16 @@ histogram_read_during_write(_Config) ->
   end, ReaderPids),
 
   %% Final verification
-  #{count := FinalCount} = instrument:get_histogram(M),
+  #{count := FinalCount} = instrument_metric:get_histogram(M),
   ExpectedCount = float(NumWriters * ObservationsPerWriter),
   ?assertEqual(ExpectedCount, FinalCount),
   ok.
 
 read_loop(M, 0) ->
-  _ = instrument:get_histogram(M),
+  _ = instrument_metric:get_histogram(M),
   ok;
 read_loop(M, N) ->
-  #{count := Count, sum := Sum, buckets := Buckets} = instrument:get_histogram(M),
+  #{count := Count, sum := Sum, buckets := Buckets} = instrument_metric:get_histogram(M),
   %% Basic sanity checks - count and sum should be non-negative
   ?assert(Count >= 0),
   ?assert(Sum >= 0),
@@ -378,7 +378,7 @@ registry_concurrent_register(_Config) ->
 
   Results = stress_test(NumProcesses, fun() ->
     Name = list_to_atom("stress_metric_" ++ integer_to_list(erlang:unique_integer([positive]))),
-    _M = instrument:new_counter(Name, <<"concurrent register test">>),
+    _M = instrument_metric:new_counter(Name, <<"concurrent register test">>),
     ok
   end),
 
@@ -394,9 +394,9 @@ registry_register_unregister_cycle(_Config) ->
     BaseName = "cycle_metric_" ++ integer_to_list(erlang:unique_integer([positive])),
     lists:foreach(fun(I) ->
       Name = list_to_atom(BaseName ++ "_" ++ integer_to_list(I)),
-      M = instrument:new_counter(Name, <<"cycle test">>),
-      ok = instrument:inc_counter(M),
-      ok = instrument:unregister(M)
+      M = instrument_metric:new_counter(Name, <<"cycle test">>),
+      ok = instrument_metric:inc_counter(M),
+      ok = instrument_metric:unregister(M)
     end, lists:seq(1, CyclesPerProcess)),
     ok
   end),

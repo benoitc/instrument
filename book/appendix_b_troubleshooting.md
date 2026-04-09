@@ -112,10 +112,10 @@ instrument_prometheus:format().
 %% Names must match: [a-zA-Z_:][a-zA-Z0-9_:]*
 
 %% Good
-instrument:new_counter(http_requests_total, <<"">>).
+instrument_metric:new_counter(http_requests_total, <<"">>).
 
 %% Bad (will be sanitized)
-instrument:new_counter('http.requests.total', <<"">>).
+instrument_metric:new_counter('http.requests.total', <<"">>).
 ```
 
 **Check 3: Verify endpoint is accessible**
@@ -130,10 +130,10 @@ curl http://localhost:8080/metrics
 
 ```erlang
 %% Bad: unbounded cardinality
-instrument:new_counter_vec(requests, <<"">>, [user_id]).  %% Millions of users!
+instrument_metric:new_counter_vec(requests, <<"">>, [user_id]).  %% Millions of users!
 
 %% Good: bounded cardinality
-instrument:new_counter_vec(requests, <<"">>, [user_tier]).  %% free, pro, enterprise
+instrument_metric:new_counter_vec(requests, <<"">>, [user_tier]).  %% free, pro, enterprise
 ```
 
 ### Problem: Metric values seem wrong
@@ -142,10 +142,10 @@ instrument:new_counter_vec(requests, <<"">>, [user_tier]).  %% free, pro, enterp
 
 ```erlang
 %% Counters can only increase
-instrument:inc_counter(Counter, -1).  %% This won't work!
+instrument_metric:inc_counter(Counter, -1).  %% This won't work!
 
 %% Use gauge for values that decrease
-instrument:dec_gauge(Gauge, 1).
+instrument_metric:dec_gauge(Gauge, 1).
 ```
 
 **Check 2: Histogram bucket boundaries**
@@ -155,7 +155,7 @@ instrument:dec_gauge(Gauge, 1).
 %% 0.5 goes in buckets 0.5, 0.75, 1.0, 2.5, etc.
 
 %% Choose buckets that match your expected distribution
-instrument:new_histogram(latency, <<"">>, [0.01, 0.05, 0.1, 0.5, 1.0]).
+instrument_metric:new_histogram(latency, <<"">>, [0.01, 0.05, 0.1, 0.5, 1.0]).
 ```
 
 ## Logging Issues
@@ -240,7 +240,7 @@ end.
 
 2. Clean up unused label combinations:
 ```erlang
-instrument:remove_label(metric_name, [<<"old">>, <<"labels">>]).
+instrument_metric:remove_label(metric_name, [<<"old">>, <<"labels">>]).
 ```
 
 3. Use views to aggregate (future feature)
@@ -292,11 +292,11 @@ The metric was not created before use:
 
 ```erlang
 %% Error: using before creating
-instrument:inc_counter(my_counter).  %% Returns {error, not_found}
+instrument_metric:inc_counter(my_counter).  %% Returns {error, not_found}
 
 %% Fix: create first
-instrument:new_counter(my_counter, <<"Description">>),
-instrument:inc_counter(my_counter).
+instrument_metric:new_counter(my_counter, <<"Description">>),
+instrument_metric:inc_counter(my_counter).
 ```
 
 ### "Invalid operation"
@@ -305,10 +305,10 @@ Wrong operation for metric type:
 
 ```erlang
 %% Error: histogram doesn't support inc
-instrument:inc_counter(my_histogram).  %% Wrong!
+instrument_metric:inc_counter(my_histogram).  %% Wrong!
 
 %% Fix: use observe
-instrument:observe_histogram(my_histogram, Value).
+instrument_metric:observe_histogram(my_histogram, Value).
 ```
 
 ### "Connection refused" (OTLP)

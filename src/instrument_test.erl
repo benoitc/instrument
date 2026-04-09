@@ -136,7 +136,7 @@ cleanup() ->
     _ = stop_metrics_collector(),
     _ = stop_log_collector(),
     %% Clean up instrument state
-    _ = instrument:unregister_all(),
+    _ = instrument_metric:unregister_all(),
     _ = instrument_meter:unregister_all_instruments(),
     %% Clean up context
     erlang:erase('$instrument_context'),

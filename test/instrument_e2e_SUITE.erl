@@ -99,7 +99,7 @@ init_per_group(prometheus, Config) ->
   instrument_e2e_helpers:stop_container(ContainerName),
 
   %% Clear any existing metrics
-  ok = instrument:unregister_all(),
+  ok = instrument_metric:unregister_all(),
   timer:sleep(100),
 
   %% Start the metrics server
@@ -217,7 +217,7 @@ init_per_testcase(TestCase, Config) when
     TestCase =:= prometheus_scrapes_gauge;
     TestCase =:= prometheus_scrapes_histogram;
     TestCase =:= prometheus_scrapes_labeled_metrics ->
-  ok = instrument:unregister_all(),
+  ok = instrument_metric:unregister_all(),
   timer:sleep(100),
   Config;
 init_per_testcase(_, Config) ->
@@ -233,8 +233,8 @@ end_per_testcase(_, _Config) ->
 
 prometheus_scrapes_counter(_Config) ->
   %% Create and increment a counter
-  _ = instrument:new_counter(e2e_counter, "E2E test counter"),
-  _ = instrument:inc_counter(e2e_counter, 42),
+  _ = instrument_metric:new_counter(e2e_counter, "E2E test counter"),
+  _ = instrument_metric:inc_counter(e2e_counter, 42),
 
   %% Query Prometheus (retries built into query function)
   {ok, Result} = instrument_e2e_helpers:query_prometheus(?PROM_URL, <<"e2e_counter_total">>),
@@ -251,8 +251,8 @@ prometheus_scrapes_counter(_Config) ->
 
 prometheus_scrapes_gauge(_Config) ->
   %% Create and set a gauge
-  _ = instrument:new_gauge(e2e_gauge, "E2E test gauge"),
-  _ = instrument:set_gauge(e2e_gauge, 123.5),
+  _ = instrument_metric:new_gauge(e2e_gauge, "E2E test gauge"),
+  _ = instrument_metric:set_gauge(e2e_gauge, 123.5),
 
   %% Query Prometheus (retries built into query function)
   {ok, Result} = instrument_e2e_helpers:query_prometheus(?PROM_URL, <<"e2e_gauge">>),
@@ -270,11 +270,11 @@ prometheus_scrapes_gauge(_Config) ->
 
 prometheus_scrapes_histogram(_Config) ->
   %% Create and observe histogram values
-  _ = instrument:new_histogram(e2e_histogram, "E2E test histogram", [0.1, 0.5, 1.0, 5.0]),
-  _ = instrument:observe_histogram(e2e_histogram, 0.05),
-  _ = instrument:observe_histogram(e2e_histogram, 0.3),
-  _ = instrument:observe_histogram(e2e_histogram, 0.8),
-  _ = instrument:observe_histogram(e2e_histogram, 2.0),
+  _ = instrument_metric:new_histogram(e2e_histogram, "E2E test histogram", [0.1, 0.5, 1.0, 5.0]),
+  _ = instrument_metric:observe_histogram(e2e_histogram, 0.05),
+  _ = instrument_metric:observe_histogram(e2e_histogram, 0.3),
+  _ = instrument_metric:observe_histogram(e2e_histogram, 0.8),
+  _ = instrument_metric:observe_histogram(e2e_histogram, 2.0),
 
   %% Query bucket (retries built into query function)
   {ok, Result} = instrument_e2e_helpers:query_prometheus(?PROM_URL, <<"e2e_histogram_bucket">>),
@@ -293,10 +293,10 @@ prometheus_scrapes_histogram(_Config) ->
 
 prometheus_scrapes_labeled_metrics(_Config) ->
   %% Create counter vec with labels
-  _ = instrument:new_counter_vec(e2e_requests, "E2E request counter", [method, status]),
-  _ = instrument:inc_counter_vec(e2e_requests, [<<"GET">>, <<"200">>], 100),
-  _ = instrument:inc_counter_vec(e2e_requests, [<<"POST">>, <<"201">>], 50),
-  _ = instrument:inc_counter_vec(e2e_requests, [<<"GET">>, <<"404">>], 5),
+  _ = instrument_metric:new_counter_vec(e2e_requests, "E2E request counter", [method, status]),
+  _ = instrument_metric:inc_counter_vec(e2e_requests, [<<"GET">>, <<"200">>], 100),
+  _ = instrument_metric:inc_counter_vec(e2e_requests, [<<"POST">>, <<"201">>], 50),
+  _ = instrument_metric:inc_counter_vec(e2e_requests, [<<"GET">>, <<"404">>], 5),
 
   %% Query with label filter (retries built into query function)
   {ok, Result} = instrument_e2e_helpers:query_prometheus(

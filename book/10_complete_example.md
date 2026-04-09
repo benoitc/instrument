@@ -82,44 +82,44 @@ init() ->
 
 create_metrics() ->
     %% HTTP metrics
-    instrument:new_counter_vec(
+    instrument_metric:new_counter_vec(
         http_requests_total,
         <<"Total HTTP requests">>,
         [method, status, endpoint]
     ),
-    instrument:new_histogram_vec(
+    instrument_metric:new_histogram_vec(
         http_request_duration_seconds,
         <<"HTTP request duration">>,
         [method, endpoint]
     ),
-    instrument:new_gauge(
+    instrument_metric:new_gauge(
         http_active_requests,
         <<"Currently active HTTP requests">>
     ),
 
     %% Database metrics
-    instrument:new_counter_vec(
+    instrument_metric:new_counter_vec(
         db_queries_total,
         <<"Total database queries">>,
         [operation]
     ),
-    instrument:new_histogram_vec(
+    instrument_metric:new_histogram_vec(
         db_query_duration_seconds,
         <<"Database query duration">>,
         [operation]
     ),
-    instrument:new_gauge(
+    instrument_metric:new_gauge(
         db_pool_connections_active,
         <<"Active database connections">>
     ),
 
     %% Business metrics
-    instrument:new_counter_vec(
+    instrument_metric:new_counter_vec(
         orders_total,
         <<"Total orders">>,
         [status]
     ),
-    instrument:new_histogram(
+    instrument_metric:new_histogram(
         order_value_dollars,
         <<"Order value distribution">>,
         [10, 25, 50, 100, 250, 500, 1000]
@@ -177,7 +177,7 @@ init(Req0, State) ->
     Token = instrument_context:attach(Ctx),
 
     %% Track active requests
-    instrument:inc_gauge(http_active_requests),
+    instrument_metric:inc_gauge(http_active_requests),
 
     Method = cowboy_req:method(Req0),
     Path = cowboy_req:path(Req0),
@@ -197,8 +197,8 @@ init(Req0, State) ->
 
             %% Record metrics
             Endpoint = normalize_path(Path),
-            instrument:inc_counter_vec(http_requests_total, [Method, integer_to_binary(Status), Endpoint]),
-            instrument:observe_histogram_vec(http_request_duration_seconds, [Method, Endpoint], Duration),
+            instrument_metric:inc_counter_vec(http_requests_total, [Method, integer_to_binary(Status), Endpoint]),
+            instrument_metric:observe_histogram_vec(http_request_duration_seconds, [Method, Endpoint], Duration),
 
             %% Set span attributes
             instrument_tracer:set_attribute(<<"http.status_code">>, Status),
@@ -211,7 +211,7 @@ init(Req0, State) ->
             {ok, Req, State}
         end)
     after
-        instrument:dec_gauge(http_active_requests),
+        instrument_metric:dec_gauge(http_active_requests),
         instrument_context:detach(Token)
     end.
 
@@ -256,7 +256,7 @@ create_order(Req) ->
             {error, Reason} ->
                 logger:warning("Order validation failed: ~p", [Reason]),
                 instrument_tracer:set_status(error, <<"Validation failed">>),
-                instrument:inc_counter_vec(orders_total, [<<"validation_failed">>]),
+                instrument_metric:inc_counter_vec(orders_total, [<<"validation_failed">>]),
                 {400, #{}, jiffy:encode(#{error => Reason})};
 
             ok ->
@@ -265,7 +265,7 @@ create_order(Req) ->
                 %% Calculate total
                 Total = calculate_total(Order),
                 instrument_tracer:set_attribute(<<"order.total">>, Total),
-                instrument:observe_histogram(order_value_dollars, Total),
+                instrument_metric:observe_histogram(order_value_dollars, Total),
 
                 %% Process payment
                 case process_payment(OrderId, Total, Order) of
@@ -279,7 +279,7 @@ create_order(Req) ->
                             ok ->
                                 logger:info("Order created successfully"),
                                 instrument_tracer:set_status(ok),
-                                instrument:inc_counter_vec(orders_total, [<<"completed">>]),
+                                instrument_metric:inc_counter_vec(orders_total, [<<"completed">>]),
                                 {201, #{}, jiffy:encode(#{
                                     order_id => OrderId,
                                     payment_id => PaymentId,
@@ -290,14 +290,14 @@ create_order(Req) ->
                                 logger:error("Failed to save order: ~p", [DbError]),
                                 instrument_tracer:record_exception(DbError),
                                 instrument_tracer:set_status(error, <<"Database error">>),
-                                instrument:inc_counter_vec(orders_total, [<<"db_error">>]),
+                                instrument_metric:inc_counter_vec(orders_total, [<<"db_error">>]),
                                 {500, #{}, jiffy:encode(#{error => <<"internal_error">>})}
                         end;
 
                     {error, PaymentError} ->
                         logger:warning("Payment failed: ~p", [PaymentError]),
                         instrument_tracer:set_status(error, <<"Payment failed">>),
-                        instrument:inc_counter_vec(orders_total, [<<"payment_failed">>]),
+                        instrument_metric:inc_counter_vec(orders_total, [<<"payment_failed">>]),
                         {402, #{}, jiffy:encode(#{error => <<"payment_failed">>})}
                 end
         end
@@ -365,8 +365,8 @@ insert_order(OrderId, Order, PaymentId) ->
         Result = do_insert(OrderId, Order, PaymentId),
 
         Duration = (erlang:monotonic_time(microsecond) - Start) / 1000000,
-        instrument:inc_counter_vec(db_queries_total, [<<"INSERT">>]),
-        instrument:observe_histogram_vec(db_query_duration_seconds, [<<"INSERT">>], Duration),
+        instrument_metric:inc_counter_vec(db_queries_total, [<<"INSERT">>]),
+        instrument_metric:observe_histogram_vec(db_query_duration_seconds, [<<"INSERT">>], Duration),
 
         case Result of
             ok ->
@@ -392,8 +392,8 @@ get_order(OrderId) ->
         Result = do_select(OrderId),
 
         Duration = (erlang:monotonic_time(microsecond) - Start) / 1000000,
-        instrument:inc_counter_vec(db_queries_total, [<<"SELECT">>]),
-        instrument:observe_histogram_vec(db_query_duration_seconds, [<<"SELECT">>], Duration),
+        instrument_metric:inc_counter_vec(db_queries_total, [<<"SELECT">>]),
+        instrument_metric:observe_histogram_vec(db_query_duration_seconds, [<<"SELECT">>], Duration),
 
         Result
     end).

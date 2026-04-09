@@ -99,7 +99,7 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
   %% Clean up any registered metrics
-  catch instrument:unregister_all(),
+  catch instrument_metric:unregister_all(),
   %% Clean up processors
   lists:foreach(fun(M) ->
     catch instrument_span_processor:unregister(M)
@@ -205,7 +205,7 @@ registry_double_register(_Config) ->
     %% Two processes try to register same metric
     P1 = spawn(fun() ->
       R = try
-        instrument:new_counter(Name, <<"test">>)
+        instrument_metric:new_counter(Name, <<"test">>)
       catch
         _:E -> {error, E}
       end,
@@ -213,7 +213,7 @@ registry_double_register(_Config) ->
     end),
     P2 = spawn(fun() ->
       R = try
-        instrument:new_counter(Name, <<"test">>)
+        instrument_metric:new_counter(Name, <<"test">>)
       catch
         _:E -> {error, E}
       end,
@@ -232,7 +232,7 @@ registry_double_register(_Config) ->
     ?assert(HasSuccess),
 
     %% Clean up
-    catch instrument:unregister(Name)
+    catch instrument_metric:unregister(Name)
   end, lists:seq(1, NumIterations)),
   ok.
 
@@ -242,7 +242,7 @@ registry_unregister_during_use(_Config) ->
 
   lists:foreach(fun(I) ->
     Name = list_to_atom("unreg_counter_" ++ integer_to_list(I)),
-    M = instrument:new_counter(Name, <<"test">>),
+    M = instrument_metric:new_counter(Name, <<"test">>),
 
     Parent = self(),
 
@@ -250,7 +250,7 @@ registry_unregister_during_use(_Config) ->
     UserPid = spawn_link(fun() ->
       lists:foreach(fun(_) ->
         try
-          instrument:inc_counter(M)
+          instrument_metric:inc_counter(M)
         catch
           _:_ -> ok
         end,
@@ -262,7 +262,7 @@ registry_unregister_during_use(_Config) ->
     %% Another process unregisters it mid-use
     timer:sleep(10),
     UnregPid = spawn_link(fun() ->
-      instrument:unregister(M),
+      instrument_metric:unregister(M),
       Parent ! {self(), done}
     end),
 
@@ -274,7 +274,7 @@ registry_unregister_during_use(_Config) ->
 
 vector_label_creation_race(_Config) ->
   %% Concurrent label creation for same labels
-  _Vec = instrument:new_counter_vec(race_vec, <<"race test">>, [method, status]),
+  _Vec = instrument_metric:new_counter_vec(race_vec, <<"race test">>, [method, status]),
 
   NumProcesses = 50,
   Parent = self(),
@@ -285,7 +285,7 @@ vector_label_creation_race(_Config) ->
       Method = list_to_binary(["method_", integer_to_list(I rem 5)]),
       Status = list_to_binary(["status_", integer_to_list(I rem 3)]),
       try
-        instrument:inc_counter_vec(race_vec, [Method, Status])
+        instrument_metric:inc_counter_vec(race_vec, [Method, Status])
       catch
         _:_ -> ok
       end

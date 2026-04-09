@@ -287,7 +287,7 @@ store_observable_observation(_Name, Value, Attrs, Handle) ->
   %% With attributes - use vec metric
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(get_internal_metric_name(Handle), gauge, LabelNames, Handle),
-  instrument:set_gauge_vec(VecName, LabelValues, Value).
+  instrument_metric:set_gauge_vec(VecName, LabelValues, Value).
 
 %% @doc Unregisters an instrument by name.
 %% This removes the instrument from persistent_term, unregisters the underlying metric,
@@ -327,7 +327,7 @@ unregister_associated_vec_metrics(BaseName) ->
   Key = {otel_instrument_vecs, BaseName},
   VecNames = persistent_term:get(Key, []),
   lists:foreach(fun(VecName) ->
-    _ = instrument:unregister(VecName)
+    _ = instrument_metric:unregister(VecName)
   end, VecNames),
   _ = persistent_term:erase(Key),
   ok.
@@ -342,9 +342,9 @@ unregister_all_instruments() ->
   ok.
 
 unregister_underlying_metric(#metric{name = MetricName}) ->
-  instrument:unregister(MetricName);
+  instrument_metric:unregister(MetricName);
 unregister_underlying_metric({observable, #metric{name = MetricName}, _Callback}) ->
-  instrument:unregister(MetricName);
+  instrument_metric:unregister(MetricName);
 unregister_underlying_metric(_) ->
   ok.
 
@@ -419,7 +419,7 @@ create_underlying_metric(Name, counter, Opts) ->
     handle = {Ref, StartTime},
     collect = {instrument_counter, collect, [Info, {Ref, StartTime}]}
   },
-  ok = instrument:register(Metric),
+  ok = instrument_metric:register(Metric),
   Metric;
 
 create_underlying_metric(Name, up_down_counter, Opts) ->
@@ -432,7 +432,7 @@ create_underlying_metric(Name, up_down_counter, Opts) ->
     handle = Ref,
     collect = {instrument_gauge, collect, [Info, Ref]}
   },
-  ok = instrument:register(Metric),
+  ok = instrument_metric:register(Metric),
   Metric;
 
 create_underlying_metric(Name, histogram, Opts) ->
@@ -445,7 +445,7 @@ create_underlying_metric(Name, histogram, Opts) ->
   end,
   Description = maps:get(description, Opts, <<>>),
   Metric = instrument_histogram:new_histogram(Name, Description, Boundaries),
-  ok = instrument:register(Metric),
+  ok = instrument_metric:register(Metric),
   Metric;
 
 create_underlying_metric(Name, gauge, Opts) ->
@@ -458,7 +458,7 @@ create_underlying_metric(Name, gauge, Opts) ->
     handle = Ref,
     collect = {instrument_gauge, collect, [Info, Ref]}
   },
-  ok = instrument:register(Metric),
+  ok = instrument_metric:register(Metric),
   Metric.
 
 register_instrument(Name, Instrument) ->
@@ -480,7 +480,7 @@ do_add(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_s
   %% With attributes - use vec API
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, counter, LabelNames, Metric),
-  instrument:inc_counter_vec(VecName, LabelValues, Value);
+  instrument_metric:inc_counter_vec(VecName, LabelValues, Value);
 do_add(_, _, _) ->
   {error, invalid_handle}.
 
@@ -491,7 +491,7 @@ do_record(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), ma
   %% With attributes - use vec API
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, histogram, LabelNames, Metric),
-  instrument:observe_histogram_vec(VecName, LabelValues, Value);
+  instrument_metric:observe_histogram_vec(VecName, LabelValues, Value);
 do_record(_, _, _) ->
   {error, invalid_handle}.
 
@@ -502,7 +502,7 @@ do_set(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_s
   %% With attributes - use vec API
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
-  instrument:set_gauge_vec(VecName, LabelValues, Value);
+  instrument_metric:set_gauge_vec(VecName, LabelValues, Value);
 do_set(_, _, _) ->
   {error, invalid_handle}.
 
@@ -532,7 +532,7 @@ ensure_vec_metric(BaseName, histogram, LabelNames, BaseMetric) ->
     undefined ->
       try
         Boundaries = instrument_histogram:get_bucket_boundaries(BaseMetric),
-        instrument:new_histogram_vec(VecName, <<>>, LabelNames, Boundaries),
+        instrument_metric:new_histogram_vec(VecName, <<>>, LabelNames, Boundaries),
         track_vec_metric(BaseName, VecName),
         VecName
       catch
@@ -558,9 +558,9 @@ ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
       try
         case Type of
           counter ->
-            instrument:new_counter_vec(VecName, <<>>, LabelNames);
+            instrument_metric:new_counter_vec(VecName, <<>>, LabelNames);
           gauge ->
-            instrument:new_gauge_vec(VecName, <<>>, LabelNames)
+            instrument_metric:new_gauge_vec(VecName, <<>>, LabelNames)
         end,
         track_vec_metric(BaseName, VecName),
         VecName

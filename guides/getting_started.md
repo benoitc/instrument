@@ -36,16 +36,16 @@ Counters track cumulative values that only increase (e.g., total requests):
 
 ```erlang
 %% Create a counter
-Counter = instrument:new_counter(http_requests_total, "Total HTTP requests"),
+Counter = instrument_metric:new_counter(http_requests_total, "Total HTTP requests"),
 
 %% Increment by 1
-instrument:inc_counter(Counter),
+instrument_metric:inc_counter(Counter),
 
 %% Increment by a specific value
-instrument:inc_counter(Counter, 10),
+instrument_metric:inc_counter(Counter, 10),
 
 %% Get current value
-Value = instrument:get_counter(Counter).  %% Returns 11.0
+Value = instrument_metric:get_counter(Counter).  %% Returns 11.0
 ```
 
 ### Gauge
@@ -54,17 +54,17 @@ Gauges track values that can go up or down (e.g., current connections):
 
 ```erlang
 %% Create a gauge
-Gauge = instrument:new_gauge(active_connections, "Current active connections"),
+Gauge = instrument_metric:new_gauge(active_connections, "Current active connections"),
 
 %% Set to a specific value
-instrument:set_gauge(Gauge, 100),
+instrument_metric:set_gauge(Gauge, 100),
 
 %% Increment/decrement
-instrument:inc_gauge(Gauge),      %% Now 101
-instrument:dec_gauge(Gauge, 5),   %% Now 96
+instrument_metric:inc_gauge(Gauge),      %% Now 101
+instrument_metric:dec_gauge(Gauge, 5),   %% Now 96
 
 %% Get current value
-Value = instrument:get_gauge(Gauge).
+Value = instrument_metric:get_gauge(Gauge).
 ```
 
 ### Histogram
@@ -73,18 +73,18 @@ Histograms track distributions of values (e.g., request latencies):
 
 ```erlang
 %% Create with default buckets
-Histogram = instrument:new_histogram(request_duration_seconds, "Request duration"),
+Histogram = instrument_metric:new_histogram(request_duration_seconds, "Request duration"),
 
 %% Create with custom buckets
-Histogram2 = instrument:new_histogram(response_size_bytes, "Response size",
+Histogram2 = instrument_metric:new_histogram(response_size_bytes, "Response size",
     [100, 500, 1000, 5000, 10000]),
 
 %% Record observations
-instrument:observe_histogram(Histogram, 0.125),
-instrument:observe_histogram(Histogram, 0.250),
+instrument_metric:observe_histogram(Histogram, 0.125),
+instrument_metric:observe_histogram(Histogram, 0.250),
 
 %% Get histogram data
-#{count := Count, sum := Sum, buckets := Buckets} = instrument:get_histogram(Histogram).
+#{count := Count, sum := Sum, buckets := Buckets} = instrument_metric:get_histogram(Histogram).
 ```
 
 ## Labeled Metrics (Vec API)
@@ -93,15 +93,15 @@ Add dimensions to your metrics with labels:
 
 ```erlang
 %% Create a counter with labels
-instrument:new_counter_vec(http_requests_total, "HTTP requests", [method, status]),
+instrument_metric:new_counter_vec(http_requests_total, "HTTP requests", [method, status]),
 
 %% Increment specific label combinations
-instrument:inc_counter_vec(http_requests_total, ["GET", "200"]),
-instrument:inc_counter_vec(http_requests_total, ["POST", "201"]),
-instrument:inc_counter_vec(http_requests_total, ["GET", "404"]),
+instrument_metric:inc_counter_vec(http_requests_total, ["GET", "200"]),
+instrument_metric:inc_counter_vec(http_requests_total, ["POST", "201"]),
+instrument_metric:inc_counter_vec(http_requests_total, ["GET", "404"]),
 
 %% Get value for specific labels
-Value = instrument:get_counter_vec(http_requests_total, ["GET", "200"]).
+Value = instrument_metric:get_counter_vec(http_requests_total, ["GET", "200"]).
 ```
 
 ## Prometheus Export

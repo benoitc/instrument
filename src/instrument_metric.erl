@@ -23,7 +23,7 @@
 %% '''
 %%
 %% For OpenTelemetry-compatible metrics, see {@link instrument_meter}.
--module(instrument).
+-module(instrument_metric).
 -author("benoitc").
 
 %% COUNTER API
