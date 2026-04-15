@@ -163,8 +163,8 @@ sanitize_text(Text) ->
 %%
 %% Options:
 %% - patterns: List of regex patterns to replace (default: SQL literals and numbers)
-%% - placeholder: Replacement text (default: <<"?">>)
-%% - preserve: Patterns to preserve (e.g., <<"\\$\\d+">> for PostgreSQL placeholders)
+%% - placeholder: Replacement text (default: `&lt;&lt;"?"&gt;&gt;')
+%% - preserve: Patterns to preserve (e.g., `&lt;&lt;"\\$\\d+"&gt;&gt;' for PostgreSQL placeholders)
 -spec sanitize_text(binary(), sanitize_opts()) -> binary().
 sanitize_text(Text, Opts) when is_binary(Text), is_map(Opts) ->
     Placeholder = maps:get(placeholder, Opts, <<"?">>),

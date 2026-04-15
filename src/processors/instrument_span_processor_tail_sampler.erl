@@ -20,7 +20,7 @@
 %%
 %% == Rule Types ==
 %% - `{status, error | ok}' - Match span status
-%% - `{duration_ms, Op, Value}' - Match duration (Op: '>', '<', '>=', '<=')
+%% - `{duration_ms, Op, Value}' - Match duration (Op: '&gt;', '&lt;', '&gt;=', '&lt;=')
 %% - `{attribute, Key, Value}' - Exact attribute match
 %% - `{attribute_exists, Key}' - Attribute is present
 %% - `{has_event, EventName}' - Span has named event

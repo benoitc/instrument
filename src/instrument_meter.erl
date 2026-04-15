@@ -511,7 +511,7 @@ default_boundaries() ->
   [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0].
 
 %% @doc Convert attribute map to sorted label names and values.
-%% #{method => <<"GET">>, status => 200} -> {[method, status], [<<"GET">>, <<"200">>]}
+%% #{method =&gt; &lt;&lt;"GET"&gt;&gt;, status =&gt; 200} -&gt; {[method, status], [&lt;&lt;"GET"&gt;&gt;, &lt;&lt;"200"&gt;&gt;]}
 attrs_to_labels(Attrs) ->
   Sorted = lists:sort(maps:to_list(Attrs)),
   {[K || {K, _} <- Sorted], [to_label_value(V) || {_, V} <- Sorted]}.
