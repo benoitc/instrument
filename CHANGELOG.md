@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1] - 2026-04-16
+
+### Fixed
+- Moved hex package `files` list from `rebar.config` to `instrument.app.src` so `do_build.sh`, `do_cmake.sh`, and `c_src/` build assets are actually shipped in the published tarball (the rebar.config `{hex, [{files, ...}]}` entry was silently ignored for non-standard files)
+- ex_doc XML parse errors caused by `<<...>>` literals and comparison operators in doc comments
+
 ## [0.6.0] - 2026-04-16
 
 ### Changed

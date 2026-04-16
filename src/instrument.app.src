@@ -5,7 +5,7 @@
 
 {application, instrument,
  [{description, "Fast metrics library for Erlang with Prometheus export and OpenTelemetry support"},
-  {vsn, "0.6.0"},
+  {vsn, "0.6.1"},
   {registered, []},
   {mod, {instrument_app, []}},
   {applications, [kernel, stdlib]},
@@ -13,5 +13,15 @@
   {modules, []},
   {maintainers, ["Benoit Chesneau"]},
   {licenses, ["MIT"]},
-  {links, [{"GitHub", "https://github.com/benoitc/instrument"}]}
+  {links, [{"GitHub", "https://github.com/benoitc/instrument"}]},
+  {files, ["rebar.config",
+           "do_cmake.sh",
+           "do_build.sh",
+           "README.md",
+           "LICENSE",
+           "NOTICE",
+           "CHANGELOG.md",
+           "src",
+           "include",
+           "c_src"]}
 ]}.
