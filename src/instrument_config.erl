@@ -60,7 +60,9 @@
   %% Span limits (OTel spec defaults: 128 each)
   get_span_attribute_count_limit/0,
   get_span_event_count_limit/0,
-  get_span_link_count_limit/0
+  get_span_link_count_limit/0,
+  %% Metric cardinality limit (OTel spec recommendation: 2000)
+  get_metric_cardinality_limit/0
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
@@ -353,6 +355,15 @@ get_span_event_count_limit() ->
 -spec get_span_link_count_limit() -> pos_integer().
 get_span_link_count_limit() ->
   read_span_limit("OTEL_SPAN_LINK_COUNT_LIMIT", 128).
+
+%% @doc Gets the per-metric cardinality limit.
+%% Reads from OTEL_METRIC_CARDINALITY_LIMIT env var, defaults to 2000.
+%% When a vector metric reaches this many distinct label sets, subsequent
+%% label sets are aggregated into a single overflow series identified by
+%% `otel.metric.overflow=true'.
+-spec get_metric_cardinality_limit() -> pos_integer().
+get_metric_cardinality_limit() ->
+  read_span_limit("OTEL_METRIC_CARDINALITY_LIMIT", 2000).
 
 %% ============================================================================
 %% Internal Functions
