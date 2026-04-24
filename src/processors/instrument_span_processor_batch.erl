@@ -69,6 +69,17 @@
 %% `(MaxRetries + 1) * (MaxBatchRetries + 1)' attempts.
 -define(DEFAULT_MAX_BATCH_RETRIES, 3).
 
+%% Tracks one in-flight export spawned from the gen_server loop. Keeping
+%% the export off the main loop lets concurrent callers (force_flush,
+%% on_end, timer) continue to make progress while the network call is
+%% outstanding.
+-type inflight() :: #{pid := pid(),
+                      monitor := reference(),
+                      ref := reference(),
+                      spans := [#span{}],
+                      kill_timer := reference(),
+                      pending_froms := [gen_server:from()]}.
+
 -record(state, {
   exporter :: module(),
   exporter_state :: term(),
@@ -85,7 +96,11 @@
   %% of this batch; at `max_batch_retries' it is dropped.
   retry_spans = [] :: [#span{}],
   retry_attempts = 0 :: non_neg_integer(),
-  max_batch_retries = ?DEFAULT_MAX_BATCH_RETRIES :: non_neg_integer()
+  max_batch_retries = ?DEFAULT_MAX_BATCH_RETRIES :: non_neg_integer(),
+  %% When an async export is in flight the gen_server loop remains free to
+  %% service span_end casts and new force_flush calls; their From tags are
+  %% queued in `pending_froms' and replied to once the worker finishes.
+  export_inflight = undefined :: undefined | inflight()
 }).
 
 %% ============================================================================
@@ -174,6 +189,10 @@ force_flush(_State) ->
 %% ============================================================================
 
 handle_call(shutdown, _From, State) ->
+  %% Shutdown is synchronous: wait for any in-flight export, then drain the
+  %% queue one last time. Retryable failures are not re-queued since we are
+  %% going away.
+  State1 = drain_inflight(State),
   #state{
     exporter = Exporter,
     exporter_state = ExporterState,
@@ -181,27 +200,35 @@ handle_call(shutdown, _From, State) ->
     retry_spans = RetrySpans,
     timer_ref = TimerRef,
     export_timeout = ExportTimeout
-  } = State,
-  %% Cancel timer
+  } = State1,
   cancel_timer(TimerRef),
-  %% Export remaining spans with configured timeout. Shutdown is best-effort
-  %% so retryable failures are not re-queued.
   Combined = RetrySpans ++ Queue,
   {_Outcome, NewExporterState} =
-    export_batch_with_timeout(Combined, Exporter, ExporterState, ExportTimeout),
-  %% Shutdown exporter
+    export_batch_sync(Combined, Exporter, ExporterState, ExportTimeout),
   try
     Exporter:shutdown(NewExporterState)
   catch
     Class:Reason:Stack ->
       logger:debug("Exporter shutdown failed: ~p:~p~n~p", [Class, Reason, Stack])
   end,
-  {reply, ok, State#state{queue = [], queue_size = 0,
-                          retry_spans = [], retry_attempts = 0,
-                          exporter_state = NewExporterState}};
+  {reply, ok, State1#state{queue = [], queue_size = 0,
+                           retry_spans = [], retry_attempts = 0,
+                           exporter_state = NewExporterState}};
 
-handle_call(force_flush, _From, State) ->
-  {reply, ok, do_scheduled_export(State)};
+%% force_flush returns without blocking the gen_server loop: the From tag is
+%% queued and replied to when the in-flight export completes.
+handle_call(force_flush, From, State) ->
+  case State#state.export_inflight of
+    undefined ->
+      case has_pending_spans(State) of
+        false -> {reply, ok, State};
+        true -> {noreply, start_async_export([From], State)}
+      end;
+    Inflight ->
+      Pending = maps:get(pending_froms, Inflight),
+      NewInflight = Inflight#{pending_froms := [From | Pending]},
+      {noreply, State#state{export_inflight = NewInflight}}
+  end;
 
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
@@ -224,9 +251,9 @@ handle_cast({on_end, Span}, State) ->
       NewQueue = [Span | Queue],
       NewQueueSize = QueueSize + 1,
       State1 = State#state{queue = NewQueue, queue_size = NewQueueSize},
-      %% Check if we should export immediately
-      case NewQueueSize >= MaxExportBatchSize of
-        true -> {noreply, do_scheduled_export(State1)};
+      case NewQueueSize >= MaxExportBatchSize andalso
+           State1#state.export_inflight =:= undefined of
+        true -> {noreply, start_async_export([], State1)};
         false -> {noreply, State1}
       end
   end;
@@ -235,14 +262,56 @@ handle_cast(_Msg, State) ->
   {noreply, State}.
 
 handle_info(export, State) ->
-  State1 = do_scheduled_export(State),
+  %% Scheduled tick: if nothing is in flight and there are spans to send,
+  %% start an async export. Otherwise skip this cycle.
+  State1 = case State#state.export_inflight of
+             undefined ->
+               case has_pending_spans(State) of
+                 true -> start_async_export([], State);
+                 false -> State
+               end;
+             _ -> State
+           end,
   TimerRef = schedule_export(State1#state.schedule_delay),
   {noreply, State1#state{timer_ref = TimerRef}};
+
+handle_info({export_done, Ref, {Outcome, NewExporterState}}, State) ->
+  case State#state.export_inflight of
+    #{ref := Ref} = Inflight ->
+      {noreply, finalize_export(Outcome, NewExporterState, Inflight, State)};
+    _ ->
+      %% Stale completion message from a killed worker. Drop it.
+      {noreply, State}
+  end;
+
+handle_info({export_kill, Ref}, State) ->
+  case State#state.export_inflight of
+    #{ref := Ref} = Inflight ->
+      #{pid := Pid, monitor := MonRef} = Inflight,
+      erlang:demonitor(MonRef, [flush]),
+      exit(Pid, kill),
+      drain_ref_messages(Ref),
+      {noreply, finalize_export(permanent, State#state.exporter_state,
+                                Inflight, State)};
+    _ ->
+      {noreply, State}
+  end;
+
+handle_info({'DOWN', MonRef, process, _Pid, _Reason}, State) ->
+  case State#state.export_inflight of
+    #{monitor := MonRef, ref := Ref} = Inflight ->
+      drain_ref_messages(Ref),
+      {noreply, finalize_export(permanent, State#state.exporter_state,
+                                Inflight, State)};
+    _ ->
+      {noreply, State}
+  end;
 
 handle_info(_Info, State) ->
   {noreply, State}.
 
 terminate(_Reason, State) ->
+  State1 = drain_inflight(State),
   #state{
     exporter = Exporter,
     exporter_state = ExporterState,
@@ -250,12 +319,11 @@ terminate(_Reason, State) ->
     retry_spans = RetrySpans,
     timer_ref = TimerRef,
     export_timeout = ExportTimeout
-  } = State,
+  } = State1,
   cancel_timer(TimerRef),
-  %% Use configured export timeout for shutdown
   Combined = RetrySpans ++ Queue,
   {_Outcome, NewExporterState} =
-    export_batch_with_timeout(Combined, Exporter, ExporterState, ExportTimeout),
+    export_batch_sync(Combined, Exporter, ExporterState, ExportTimeout),
   try
     Exporter:shutdown(NewExporterState)
   catch
@@ -274,54 +342,115 @@ code_change(_OldVsn, State, _Extra) ->
 schedule_export(Delay) ->
   erlang:send_after(Delay, self(), export).
 
-%% Drives an export cycle. Prepends any in-flight retry batch to the current
-%% queue, exports with a timeout, then classifies the outcome:
-%%   ok / empty / permanent -> clear the queue
-%%   retryable + attempts < max_batch_retries -> keep the spans for next cycle
-%%   retryable + attempts hit the cap -> drop and count them as dropped_spans
-do_scheduled_export(State) ->
+cancel_timer(undefined) ->
+  ok;
+cancel_timer(Ref) ->
+  erlang:cancel_timer(Ref).
+
+has_pending_spans(#state{queue = [], retry_spans = []}) -> false;
+has_pending_spans(_) -> true.
+
+%% Spawn an export worker. The gen_server loop stays responsive while the
+%% worker runs; the outcome comes back as {export_done, Ref, _} and a kill
+%% timer bounds the worst-case runtime.
+start_async_export(Froms, State) ->
   #state{
     exporter = Exporter,
     exporter_state = ExporterState,
     queue = Queue,
     retry_spans = RetrySpans,
-    retry_attempts = RetryAttempts,
-    max_batch_retries = MaxBatchRetries,
-    export_timeout = ExportTimeout,
-    dropped_spans = Dropped
+    export_timeout = ExportTimeout
   } = State,
-  %% The queue is LIFO (head is newest). Retry spans are already in send-order
-  %% after the first export_batch reversed them, so prepend them to the head
-  %% of the queue to preserve overall order.
   Combined = RetrySpans ++ Queue,
-  case Combined of
-    [] -> State;
-    _ ->
-      {Outcome, NewExporterState} =
-        export_batch_with_timeout(Combined, Exporter, ExporterState, ExportTimeout),
-      Base = State#state{queue = [], queue_size = 0,
-                         exporter_state = NewExporterState},
-      case Outcome of
-        Ok when Ok =:= ok; Ok =:= empty; Ok =:= permanent ->
-          PermDropped = case Outcome of
-                          permanent -> Dropped + length(Combined);
-                          _ -> Dropped
-                        end,
-          Base#state{retry_spans = [], retry_attempts = 0,
-                     dropped_spans = PermDropped};
-        retryable when RetryAttempts + 1 >= MaxBatchRetries ->
-          Base#state{retry_spans = [], retry_attempts = 0,
-                     dropped_spans = Dropped + length(Combined)};
-        retryable ->
-          Base#state{retry_spans = Combined,
-                     retry_attempts = RetryAttempts + 1}
-      end
+  Parent = self(),
+  Ref = make_ref(),
+  {Pid, MonRef} = erlang:spawn_monitor(fun() ->
+    Result = export_batch(Combined, Exporter, ExporterState),
+    Parent ! {export_done, Ref, Result}
+  end),
+  KillTimer = erlang:send_after(ExportTimeout, self(), {export_kill, Ref}),
+  Inflight = #{pid => Pid, monitor => MonRef, ref => Ref,
+               spans => Combined, kill_timer => KillTimer,
+               pending_froms => Froms},
+  State#state{queue = [], queue_size = 0, export_inflight = Inflight}.
+
+%% Apply the export outcome, reply to any queued flush callers, and kick off
+%% another export if new spans arrived during the in-flight one.
+finalize_export(Outcome, NewExporterState, Inflight, State) ->
+  #{spans := Spans,
+    pending_froms := Froms,
+    kill_timer := KillTimer,
+    monitor := MonRef} = Inflight,
+  cancel_timer(KillTimer),
+  erlang:demonitor(MonRef, [flush]),
+  lists:foreach(fun(F) -> gen_server:reply(F, ok) end, Froms),
+  #state{max_batch_retries = MaxBatchRetries,
+         retry_attempts = RetryAttempts,
+         dropped_spans = Dropped} = State,
+  Base = State#state{exporter_state = NewExporterState,
+                     export_inflight = undefined},
+  NewState = case Outcome of
+               Ok when Ok =:= ok; Ok =:= empty ->
+                 Base#state{retry_spans = [], retry_attempts = 0};
+               permanent ->
+                 Base#state{retry_spans = [], retry_attempts = 0,
+                            dropped_spans = Dropped + length(Spans)};
+               retryable when RetryAttempts + 1 >= MaxBatchRetries ->
+                 Base#state{retry_spans = [], retry_attempts = 0,
+                            dropped_spans = Dropped + length(Spans)};
+               retryable ->
+                 Base#state{retry_spans = Spans,
+                            retry_attempts = RetryAttempts + 1}
+             end,
+  case has_pending_spans(NewState) of
+    true -> start_async_export([], NewState);
+    false -> NewState
   end.
 
-cancel_timer(undefined) ->
-  ok;
-cancel_timer(Ref) ->
-  erlang:cancel_timer(Ref).
+%% Synchronously wait for any in-flight export to complete. Used by shutdown
+%% and terminate where we cannot return control to the main loop.
+drain_inflight(#state{export_inflight = undefined} = State) ->
+  State;
+drain_inflight(#state{export_inflight = Inflight} = State) ->
+  #{ref := Ref, monitor := MonRef, kill_timer := KillTimer,
+    pid := Pid, pending_froms := Froms, spans := Spans} = Inflight,
+  ExportTimeout = State#state.export_timeout,
+  Result = receive
+             {export_done, Ref, R} ->
+               R;
+             {'DOWN', MonRef, process, _, _} ->
+               {permanent, State#state.exporter_state}
+           after ExportTimeout ->
+             exit(Pid, kill),
+             {permanent, State#state.exporter_state}
+           end,
+  cancel_timer(KillTimer),
+  erlang:demonitor(MonRef, [flush]),
+  drain_ref_messages(Ref),
+  lists:foreach(fun(F) -> gen_server:reply(F, ok) end, Froms),
+  {_Outcome, NewExporterState} = Result,
+  _ = Spans,
+  State#state{export_inflight = undefined,
+              exporter_state = NewExporterState}.
+
+%% Synchronous one-shot export used only by shutdown / terminate.
+export_batch_sync(Spans, Exporter, ExporterState, Timeout) ->
+  Parent = self(),
+  Ref = make_ref(),
+  {Pid, MonRef} = erlang:spawn_monitor(fun() ->
+    Result = export_batch(Spans, Exporter, ExporterState),
+    Parent ! {Ref, Result}
+  end),
+  Outcome = receive
+              {Ref, R} -> R;
+              {'DOWN', MonRef, process, Pid, _Reason} -> {permanent, ExporterState}
+            after Timeout ->
+              exit(Pid, kill),
+              {permanent, ExporterState}
+            end,
+  erlang:demonitor(MonRef, [flush]),
+  drain_ref_messages(Ref),
+  Outcome.
 
 %% Returns {Outcome, NewExporterState} where Outcome is one of:
 %%   ok           the batch was exported successfully
@@ -331,7 +460,6 @@ cancel_timer(Ref) ->
 export_batch([], _Exporter, ExporterState) ->
   {empty, ExporterState};
 export_batch(Spans, Exporter, ExporterState) ->
-  %% Reverse to maintain order
   OrderedSpans = lists:reverse(Spans),
   try
     case Exporter:export(OrderedSpans, ExporterState) of
@@ -345,33 +473,12 @@ export_batch(Spans, Exporter, ExporterState) ->
     _:_ -> {permanent, ExporterState}
   end.
 
-export_batch_with_timeout(Spans, Exporter, ExporterState, Timeout) ->
-  Parent = self(),
-  Ref = make_ref(),
-  {Pid, MonRef} = erlang:spawn_monitor(fun() ->
-    Result = export_batch(Spans, Exporter, ExporterState),
-    Parent ! {Ref, Result}
-  end),
+%% Drain any orphaned messages with the given ref and any residual DOWN
+%% notifications, to prevent mailbox leaks.
+drain_ref_messages(Ref) ->
   receive
-    {Ref, Result} ->
-      erlang:demonitor(MonRef, [flush]),
-      Result;
-    {'DOWN', MonRef, process, Pid, _Reason} ->
-      %% Drain any late message from the worker
-      drain_ref_message(Ref),
-      {permanent, ExporterState}
-  after Timeout ->
-    erlang:demonitor(MonRef, [flush]),
-    exit(Pid, kill),
-    %% Drain any late message from the worker that may have arrived just before/during kill
-    drain_ref_message(Ref),
-    {permanent, ExporterState}
-  end.
-
-%% Drain any orphaned message with the given ref to prevent mailbox leaks
-drain_ref_message(Ref) ->
-  receive
-    {Ref, _} -> ok
+    {Ref, _} -> drain_ref_messages(Ref);
+    {export_done, Ref, _} -> drain_ref_messages(Ref)
   after 0 ->
     ok
   end.
