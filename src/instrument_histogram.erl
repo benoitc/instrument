@@ -49,7 +49,8 @@
   linear_buckets/3,
   exponential_buckets/3,
   validate_buckets/1,
-  with_histogram/2, with_histogram/3
+  with_histogram/2, with_histogram/3,
+  cleanup/1
 ]).
 
 -include("instrument.hrl").
@@ -196,6 +197,19 @@ with_histogram(Hist, F) -> with_histogram_1(Hist, F, []).
 with_histogram(Hist, F, V) -> with_histogram_1(Hist, F, [V]).
 with_histogram_1(Hist, F, A) ->
   instrument_registry:with(Hist, fun(M) -> erlang:apply(?MODULE, F, [M|A]) end).
+
+%% @doc Release resources owned by this histogram metric (exemplar reservoir).
+%% Tolerates non-histogram handles so callers can invoke this on any metric.
+-spec cleanup(#metric{} | term()) -> ok.
+cleanup(#metric{handle = Handle}) ->
+  cleanup_handle(Handle);
+cleanup(_) ->
+  ok.
+
+cleanup_handle(#histogram{exemplar_key = Key}) ->
+  instrument_exemplar:delete_reservoir(Key);
+cleanup_handle(_) ->
+  ok.
 
 collect(Info, Hist) ->
   #metric_info{name=Name, help=Help} = Info,

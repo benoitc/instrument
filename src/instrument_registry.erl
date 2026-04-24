@@ -200,13 +200,20 @@ do_reg_metric(Metric) ->
 %% @private Unregister a metric from ETS and persistent_term.
 %% Does NOT update the metrics index - that's handled by the gen_server state.
 do_unreg_metric(Name) ->
+  %% Read the metric first so we can drive cleanup from its #vector.labels_map
+  %% and release any histogram exemplar reservoirs it owns.
+  Metric = case ets:lookup(instrument_lib:table(), Name) of
+             [M] -> M;
+             [] -> undefined
+           end,
   %% Delete from all ETS tables (they're partitioned by scheduler)
   [ets:delete(T, Name) || T <- tables()],
   %% Remove from persistent_term
   catch persistent_term:erase({instrument_metric, Name}),
   catch persistent_term:erase({instrument_label_overflow, Name}),
   %% Erase cached labels for this metric
-  _ = erase_cached_labels(Name),
+  _ = erase_cached_labels(Name, Metric),
+  _ = release_exemplar_reservoirs(Metric),
   _ = reset_label_accounting(Name),
   ok.
 
@@ -215,14 +222,43 @@ do_unreg_metric(Name) ->
 sync_metrics_index(Set) ->
   persistent_term:put(instrument_metrics, sets:to_list(Set)).
 
-erase_cached_labels(Name) ->
-  Keys = persistent_term:get(),
-  [persistent_term:erase(K) || {K, _} <- Keys,
-   is_tuple(K), tuple_size(K) =:= 3,
-   element(1, K) =:= instrument_label,
-   element(2, K) =:= Name].
+%% @private Drop any cached {instrument_label, Name, LabelValues} entries for
+%% this metric. Iterates the metric's own labels_map rather than scanning the
+%% global persistent_term index, which would be O(total persistent_term size).
+erase_cached_labels(_Name, undefined) ->
+  0;
+erase_cached_labels(Name, #metric{handle = #vector{labels_map = LabelsMap}}) ->
+  maps:fold(fun(LabelValues, _, Acc) ->
+    case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
+      undefined -> Acc;
+      _ ->
+        persistent_term:erase({instrument_label, Name, LabelValues}),
+        Acc + 1
+    end
+  end, 0, LabelsMap);
+erase_cached_labels(_Name, _Metric) ->
+  0.
+
+%% @private Release exemplar reservoirs owned by a metric. For vector
+%% metrics this walks every label-specific handle; for simple metrics it
+%% delegates directly to the histogram cleanup helper.
+release_exemplar_reservoirs(undefined) ->
+  ok;
+release_exemplar_reservoirs(#metric{handle = #vector{labels_map = LabelsMap}}) ->
+  maps:foreach(fun(_, LabelMetric) ->
+    instrument_histogram:cleanup(LabelMetric)
+  end, LabelsMap);
+release_exemplar_reservoirs(#metric{} = Metric) ->
+  instrument_histogram:cleanup(Metric).
 
 do_delete_all() ->
+  %% Release histogram exemplar reservoirs for every registered metric
+  %% before we wipe the tables.
+  AllMetrics = case instrument_lib:tables() of
+                 [T | _] -> ets:tab2list(T);
+                 [] -> []
+               end,
+  lists:foreach(fun release_exemplar_reservoirs/1, AllMetrics),
   [ets:delete_all_objects(T) || T <- instrument_lib:tables()],
   %% Clear all persistent_term entries
   Keys = persistent_term:get(),

@@ -68,8 +68,7 @@ set(Key, Value, Metadata) when is_map(Metadata) ->
   NormalizedKey = normalize_key(Key),
   NewBaggage = maps:put(NormalizedKey, {Value, Metadata}, Baggage),
   NewCtx = to_context(Ctx, NewBaggage),
-  _ = instrument_context:attach(NewCtx),
-  ok.
+  instrument_context:set_current(NewCtx).
 
 %% @doc Removes a key from the current baggage.
 -spec remove(baggage_key()) -> ok.
@@ -79,8 +78,7 @@ remove(Key) ->
   NormalizedKey = normalize_key(Key),
   NewBaggage = maps:remove(NormalizedKey, Baggage),
   NewCtx = to_context(Ctx, NewBaggage),
-  _ = instrument_context:attach(NewCtx),
-  ok.
+  instrument_context:set_current(NewCtx).
 
 %% @doc Gets all baggage entries.
 -spec get_all() -> #{baggage_key() => baggage_value()}.
@@ -94,8 +92,7 @@ get_all() ->
 clear() ->
   Ctx = instrument_context:current(),
   NewCtx = to_context(Ctx, #{}),
-  _ = instrument_context:attach(NewCtx),
-  ok.
+  instrument_context:set_current(NewCtx).
 
 %% @doc Extracts baggage from a context.
 -spec from_context(instrument_context:context()) -> baggage().
