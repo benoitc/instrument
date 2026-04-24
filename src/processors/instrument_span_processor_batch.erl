@@ -63,6 +63,11 @@
 -define(DEFAULT_SCHEDULE_DELAY_MILLIS, 5000).
 -define(DEFAULT_EXPORT_TIMEOUT_MILLIS, 30000).
 -define(SHUTDOWN_TIMEOUT_MILLIS, 10000).
+%% Max times a batch may be rescheduled after a retryable export failure
+%% before it is dropped. The OTLP exporter itself also does bounded retry,
+%% so across both layers a batch can see up to roughly
+%% `(MaxRetries + 1) * (MaxBatchRetries + 1)' attempts.
+-define(DEFAULT_MAX_BATCH_RETRIES, 3).
 
 -record(state, {
   exporter :: module(),
@@ -74,7 +79,13 @@
   queue = [] :: [#span{}],
   queue_size = 0 :: non_neg_integer(),
   timer_ref :: reference() | undefined,
-  dropped_spans = 0 :: non_neg_integer()
+  dropped_spans = 0 :: non_neg_integer(),
+  %% Spans from a retryable export that will be re-attempted on the next
+  %% scheduled flush. `retry_attempts' counts consecutive retryable failures
+  %% of this batch; at `max_batch_retries' it is dropped.
+  retry_spans = [] :: [#span{}],
+  retry_attempts = 0 :: non_neg_integer(),
+  max_batch_retries = ?DEFAULT_MAX_BATCH_RETRIES :: non_neg_integer()
 }).
 
 %% ============================================================================
@@ -99,6 +110,7 @@ init(Config) ->
   MaxExportBatchSize = maps:get(max_export_batch_size, Config, ?DEFAULT_MAX_EXPORT_BATCH_SIZE),
   ScheduleDelay = maps:get(schedule_delay_millis, Config, ?DEFAULT_SCHEDULE_DELAY_MILLIS),
   ExportTimeout = maps:get(export_timeout_millis, Config, ?DEFAULT_EXPORT_TIMEOUT_MILLIS),
+  MaxBatchRetries = maps:get(max_batch_retries, Config, ?DEFAULT_MAX_BATCH_RETRIES),
 
   case Exporter:init(ExporterConfig) of
     {ok, ExporterState} ->
@@ -108,7 +120,8 @@ init(Config) ->
         max_queue_size = MaxQueueSize,
         max_export_batch_size = MaxExportBatchSize,
         schedule_delay = ScheduleDelay,
-        export_timeout = ExportTimeout
+        export_timeout = ExportTimeout,
+        max_batch_retries = MaxBatchRetries
       },
       %% Start export timer
       TimerRef = schedule_export(ScheduleDelay),
@@ -165,13 +178,17 @@ handle_call(shutdown, _From, State) ->
     exporter = Exporter,
     exporter_state = ExporterState,
     queue = Queue,
+    retry_spans = RetrySpans,
     timer_ref = TimerRef,
     export_timeout = ExportTimeout
   } = State,
   %% Cancel timer
   cancel_timer(TimerRef),
-  %% Export remaining spans with configured timeout
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
+  %% Export remaining spans with configured timeout. Shutdown is best-effort
+  %% so retryable failures are not re-queued.
+  Combined = RetrySpans ++ Queue,
+  {_Outcome, NewExporterState} =
+    export_batch_with_timeout(Combined, Exporter, ExporterState, ExportTimeout),
   %% Shutdown exporter
   try
     Exporter:shutdown(NewExporterState)
@@ -179,17 +196,12 @@ handle_call(shutdown, _From, State) ->
     Class:Reason:Stack ->
       logger:debug("Exporter shutdown failed: ~p:~p~n~p", [Class, Reason, Stack])
   end,
-  {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
+  {reply, ok, State#state{queue = [], queue_size = 0,
+                          retry_spans = [], retry_attempts = 0,
+                          exporter_state = NewExporterState}};
 
 handle_call(force_flush, _From, State) ->
-  #state{
-    exporter = Exporter,
-    exporter_state = ExporterState,
-    queue = Queue,
-    export_timeout = ExportTimeout
-  } = State,
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
-  {reply, ok, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
+  {reply, ok, do_scheduled_export(State)};
 
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
@@ -198,12 +210,9 @@ handle_cast({on_end, Span}, State) ->
   #state{
     max_queue_size = MaxQueueSize,
     max_export_batch_size = MaxExportBatchSize,
-    exporter = Exporter,
-    exporter_state = ExporterState,
     queue = Queue,
     queue_size = QueueSize,
-    dropped_spans = Dropped,
-    export_timeout = ExportTimeout
+    dropped_spans = Dropped
   } = State,
 
   %% Check if queue is full
@@ -214,13 +223,11 @@ handle_cast({on_end, Span}, State) ->
     false ->
       NewQueue = [Span | Queue],
       NewQueueSize = QueueSize + 1,
+      State1 = State#state{queue = NewQueue, queue_size = NewQueueSize},
       %% Check if we should export immediately
       case NewQueueSize >= MaxExportBatchSize of
-        true ->
-          NewExporterState = export_batch_with_timeout(NewQueue, Exporter, ExporterState, ExportTimeout),
-          {noreply, State#state{queue = [], queue_size = 0, exporter_state = NewExporterState}};
-        false ->
-          {noreply, State#state{queue = NewQueue, queue_size = NewQueueSize}}
+        true -> {noreply, do_scheduled_export(State1)};
+        false -> {noreply, State1}
       end
   end;
 
@@ -228,18 +235,9 @@ handle_cast(_Msg, State) ->
   {noreply, State}.
 
 handle_info(export, State) ->
-  #state{
-    exporter = Exporter,
-    exporter_state = ExporterState,
-    queue = Queue,
-    schedule_delay = ScheduleDelay,
-    export_timeout = ExportTimeout
-  } = State,
-  %% Export current batch with timeout
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
-  %% Schedule next export
-  TimerRef = schedule_export(ScheduleDelay),
-  {noreply, State#state{queue = [], queue_size = 0, timer_ref = TimerRef, exporter_state = NewExporterState}};
+  State1 = do_scheduled_export(State),
+  TimerRef = schedule_export(State1#state.schedule_delay),
+  {noreply, State1#state{timer_ref = TimerRef}};
 
 handle_info(_Info, State) ->
   {noreply, State}.
@@ -249,12 +247,15 @@ terminate(_Reason, State) ->
     exporter = Exporter,
     exporter_state = ExporterState,
     queue = Queue,
+    retry_spans = RetrySpans,
     timer_ref = TimerRef,
     export_timeout = ExportTimeout
   } = State,
   cancel_timer(TimerRef),
   %% Use configured export timeout for shutdown
-  NewExporterState = export_batch_with_timeout(Queue, Exporter, ExporterState, ExportTimeout),
+  Combined = RetrySpans ++ Queue,
+  {_Outcome, NewExporterState} =
+    export_batch_with_timeout(Combined, Exporter, ExporterState, ExportTimeout),
   try
     Exporter:shutdown(NewExporterState)
   catch
@@ -273,24 +274,75 @@ code_change(_OldVsn, State, _Extra) ->
 schedule_export(Delay) ->
   erlang:send_after(Delay, self(), export).
 
+%% Drives an export cycle. Prepends any in-flight retry batch to the current
+%% queue, exports with a timeout, then classifies the outcome:
+%%   ok / empty / permanent -> clear the queue
+%%   retryable + attempts < max_batch_retries -> keep the spans for next cycle
+%%   retryable + attempts hit the cap -> drop and count them as dropped_spans
+do_scheduled_export(State) ->
+  #state{
+    exporter = Exporter,
+    exporter_state = ExporterState,
+    queue = Queue,
+    retry_spans = RetrySpans,
+    retry_attempts = RetryAttempts,
+    max_batch_retries = MaxBatchRetries,
+    export_timeout = ExportTimeout,
+    dropped_spans = Dropped
+  } = State,
+  %% The queue is LIFO (head is newest). Retry spans are already in send-order
+  %% after the first export_batch reversed them, so prepend them to the head
+  %% of the queue to preserve overall order.
+  Combined = RetrySpans ++ Queue,
+  case Combined of
+    [] -> State;
+    _ ->
+      {Outcome, NewExporterState} =
+        export_batch_with_timeout(Combined, Exporter, ExporterState, ExportTimeout),
+      Base = State#state{queue = [], queue_size = 0,
+                         exporter_state = NewExporterState},
+      case Outcome of
+        Ok when Ok =:= ok; Ok =:= empty; Ok =:= permanent ->
+          PermDropped = case Outcome of
+                          permanent -> Dropped + length(Combined);
+                          _ -> Dropped
+                        end,
+          Base#state{retry_spans = [], retry_attempts = 0,
+                     dropped_spans = PermDropped};
+        retryable when RetryAttempts + 1 >= MaxBatchRetries ->
+          Base#state{retry_spans = [], retry_attempts = 0,
+                     dropped_spans = Dropped + length(Combined)};
+        retryable ->
+          Base#state{retry_spans = Combined,
+                     retry_attempts = RetryAttempts + 1}
+      end
+  end.
+
 cancel_timer(undefined) ->
   ok;
 cancel_timer(Ref) ->
   erlang:cancel_timer(Ref).
 
+%% Returns {Outcome, NewExporterState} where Outcome is one of:
+%%   ok           the batch was exported successfully
+%%   empty        no spans were passed in
+%%   retryable    transient failure, caller should retry the batch later
+%%   permanent    non-retryable failure, caller should drop the batch
 export_batch([], _Exporter, ExporterState) ->
-  ExporterState;
+  {empty, ExporterState};
 export_batch(Spans, Exporter, ExporterState) ->
   %% Reverse to maintain order
   OrderedSpans = lists:reverse(Spans),
   try
     case Exporter:export(OrderedSpans, ExporterState) of
-      {ok, NewState} -> NewState;
-      {error, _Reason, NewState} -> NewState;
-      _ -> ExporterState
+      {ok, NewState} -> {ok, NewState};
+      {error, retryable, NewState} -> {retryable, NewState};
+      {error, permanent, NewState} -> {permanent, NewState};
+      {error, _Reason, NewState} -> {permanent, NewState};
+      _ -> {permanent, ExporterState}
     end
   catch
-    _:_ -> ExporterState
+    _:_ -> {permanent, ExporterState}
   end.
 
 export_batch_with_timeout(Spans, Exporter, ExporterState, Timeout) ->
@@ -301,19 +353,19 @@ export_batch_with_timeout(Spans, Exporter, ExporterState, Timeout) ->
     Parent ! {Ref, Result}
   end),
   receive
-    {Ref, NewExporterState} ->
+    {Ref, Result} ->
       erlang:demonitor(MonRef, [flush]),
-      NewExporterState;
+      Result;
     {'DOWN', MonRef, process, Pid, _Reason} ->
       %% Drain any late message from the worker
       drain_ref_message(Ref),
-      ExporterState
+      {permanent, ExporterState}
   after Timeout ->
     erlang:demonitor(MonRef, [flush]),
     exit(Pid, kill),
     %% Drain any late message from the worker that may have arrived just before/during kill
     drain_ref_message(Ref),
-    ExporterState
+    {permanent, ExporterState}
   end.
 
 %% Drain any orphaned message with the given ref to prevent mailbox leaks

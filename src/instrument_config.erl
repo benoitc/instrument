@@ -62,7 +62,11 @@
   get_span_event_count_limit/0,
   get_span_link_count_limit/0,
   %% Metric cardinality limit (OTel spec recommendation: 2000)
-  get_metric_cardinality_limit/0
+  get_metric_cardinality_limit/0,
+  %% OTLP retry settings
+  get_otlp_max_retries/0,
+  get_otlp_retry_initial_delay_ms/0,
+  get_otlp_retry_max_delay_ms/0
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
@@ -364,6 +368,24 @@ get_span_link_count_limit() ->
 -spec get_metric_cardinality_limit() -> pos_integer().
 get_metric_cardinality_limit() ->
   read_span_limit("OTEL_METRIC_CARDINALITY_LIMIT", 2000).
+
+%% @doc Maximum number of OTLP export attempts per batch.
+%% Reads from OTEL_EXPORTER_OTLP_MAX_RETRIES, defaults to 3.
+-spec get_otlp_max_retries() -> non_neg_integer().
+get_otlp_max_retries() ->
+  read_span_limit("OTEL_EXPORTER_OTLP_MAX_RETRIES", 3).
+
+%% @doc Initial delay between OTLP retries in milliseconds.
+%% Reads from OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY_MS, defaults to 1000.
+-spec get_otlp_retry_initial_delay_ms() -> pos_integer().
+get_otlp_retry_initial_delay_ms() ->
+  read_span_limit("OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY_MS", 1000).
+
+%% @doc Maximum delay between OTLP retries in milliseconds.
+%% Reads from OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY_MS, defaults to 30000.
+-spec get_otlp_retry_max_delay_ms() -> pos_integer().
+get_otlp_retry_max_delay_ms() ->
+  read_span_limit("OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY_MS", 30000).
 
 %% ============================================================================
 %% Internal Functions
