@@ -242,17 +242,24 @@ span_events(_Config) ->
   ok.
 
 span_status(_Config) ->
-  instrument_tracer:with_span(<<"test">>, fun() ->
+  %% Per OTel spec, status transitions are constrained:
+  %%   unset -> ok|error (allowed)
+  %%   error -> ok       (allowed; success overrides earlier error)
+  %%   ok    -> *        (final; further updates ignored)
+  instrument_tracer:with_span(<<"start_unset_then_error">>, fun() ->
     Span1 = instrument_tracer:current_span(),
     unset = Span1#span.status,
-
-    ok = instrument_tracer:set_status(ok),
+    ok = instrument_tracer:set_status(error, <<"oops">>),
     Span2 = instrument_tracer:current_span(),
-    ok = Span2#span.status,
-
-    ok = instrument_tracer:set_status(error, <<"something went wrong">>),
+    {error, <<"oops">>} = Span2#span.status,
+    %% error -> ok is allowed
+    ok = instrument_tracer:set_status(ok),
     Span3 = instrument_tracer:current_span(),
-    {error, <<"something went wrong">>} = Span3#span.status
+    ok = Span3#span.status,
+    %% ok is final: subsequent error is ignored
+    ok = instrument_tracer:set_status(error, <<"too late">>),
+    Span4 = instrument_tracer:current_span(),
+    ok = Span4#span.status
   end),
   ok.
 

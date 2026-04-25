@@ -23,6 +23,12 @@
   fields/0
 ]).
 
+%% Exposed for testing the W3C size limits.
+-export([
+  encode_tracestate/1,
+  decode_tracestate/1
+]).
+
 -define(TRACEPARENT_HEADER, <<"traceparent">>).
 -define(TRACESTATE_HEADER, <<"tracestate">>).
 
@@ -145,15 +151,33 @@ parse_trace_flags(<<"01">>) -> 1;
 parse_trace_flags(Hex) ->
   binary_to_integer(Hex, 16) band 16#FF.
 
+%% Per W3C trace-context, tracestate carries at most 32 list-members and
+%% each list-member is at most 256 bytes. We trim to 32 entries on both
+%% encode and decode and drop oversized or malformed entries.
+-define(MAX_TRACESTATE_ENTRIES, 32).
+-define(MAX_TRACESTATE_ENTRY_BYTES, 256).
+
 encode_tracestate(TraceState) ->
-  Parts = [<<K/binary, "=", V/binary>> || {K, V} <- TraceState],
+  Limited = lists:sublist(TraceState, ?MAX_TRACESTATE_ENTRIES),
+  Parts = lists:filtermap(fun({K, V}) ->
+    Entry = <<K/binary, "=", V/binary>>,
+    case byte_size(Entry) =< ?MAX_TRACESTATE_ENTRY_BYTES of
+      true -> {true, Entry};
+      false -> false
+    end
+  end, Limited),
   iolist_to_binary(lists:join(<<",">>, Parts)).
 
 decode_tracestate(Value) ->
   Parts = binary:split(Value, <<",">>, [global, trim_all]),
-  lists:filtermap(fun(Part) ->
-    case binary:split(Part, <<"=">>, [trim_all]) of
-      [K, V] -> {true, {string:trim(K), string:trim(V)}};
-      _ -> false
+  Decoded = lists:filtermap(fun(Part) ->
+    case byte_size(Part) =< ?MAX_TRACESTATE_ENTRY_BYTES of
+      false -> false;
+      true ->
+        case binary:split(Part, <<"=">>, [trim_all]) of
+          [K, V] -> {true, {string:trim(K), string:trim(V)}};
+          _ -> false
+        end
     end
-  end, Parts).
+  end, Parts),
+  lists:sublist(Decoded, ?MAX_TRACESTATE_ENTRIES).

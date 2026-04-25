@@ -410,43 +410,17 @@ current_span() ->
 %% ============================================================================
 
 %% @doc Sets multiple attributes on the current span.
-%% Enforces span attribute count limit per OTel spec.
+%% Enforces span attribute count limit and per-value length limit per OTel spec.
 -spec set_attributes(map()) -> ok.
 set_attributes(Attrs) when is_map(Attrs) ->
   update_current_span(fun(Span) ->
     Limit = instrument_config:get_span_attribute_count_limit(),
-    CurrentAttrs = Span#span.attributes,
-    CurrentCount = maps:size(CurrentAttrs),
-    MergedAttrs = maps:merge(CurrentAttrs, Attrs),
-    MergedCount = maps:size(MergedAttrs),
-    %% Only count newly added attributes (not updates to existing keys)
-    NewKeys = maps:size(Attrs) - maps:size(maps:with(maps:keys(Attrs), CurrentAttrs)),
-    case CurrentCount + NewKeys > Limit of
-      true ->
-        %% At or over limit - only allow updates to existing keys
-        AllowedAttrs = maps:with(maps:keys(CurrentAttrs), Attrs),
-        DroppedCount = NewKeys,
-        Span#span{
-          attributes = maps:merge(CurrentAttrs, AllowedAttrs),
-          dropped_attributes_count = Span#span.dropped_attributes_count + DroppedCount
-        };
-      false when MergedCount > Limit ->
-        %% Would exceed limit - take what we can
-        CanAdd = Limit - CurrentCount,
-        NewKeysToAdd = lists:sublist(
-          [K || K <- maps:keys(Attrs), not maps:is_key(K, CurrentAttrs)],
-          CanAdd
-        ),
-        AllowedNewAttrs = maps:with(NewKeysToAdd, Attrs),
-        UpdatedExisting = maps:with(maps:keys(CurrentAttrs), Attrs),
-        DroppedCount = NewKeys - length(NewKeysToAdd),
-        Span#span{
-          attributes = maps:merge(maps:merge(CurrentAttrs, AllowedNewAttrs), UpdatedExisting),
-          dropped_attributes_count = Span#span.dropped_attributes_count + DroppedCount
-        };
-      false ->
-        Span#span{attributes = MergedAttrs}
-    end
+    {Merged, Dropped} =
+      instrument_attributes:apply_limits(Span#span.attributes, Attrs, Limit),
+    Span#span{
+      attributes = Merged,
+      dropped_attributes_count = Span#span.dropped_attributes_count + Dropped
+    }
   end).
 
 %% @doc Sets a single attribute on the current span.
@@ -460,14 +434,19 @@ add_event(Name) ->
   add_event(Name, #{}).
 
 %% @doc Adds an event with attributes to the current span.
-%% Enforces span event count limit per OTel spec.
+%% Enforces span event count limit and per-event attribute count limit
+%% per OTel spec.
 -spec add_event(binary(), map()) -> ok.
 add_event(Name, Attrs) when is_binary(Name), is_map(Attrs) ->
+  AttrLimit = instrument_config:get_span_event_attribute_count_limit(),
+  {LimitedAttrs, DroppedAttrs} =
+    instrument_attributes:apply_limits(Attrs, AttrLimit),
   Event = #span_event{
     name = Name,
     %% Use system_time (Unix epoch) not monotonic_time for OTLP compatibility
     timestamp = erlang:system_time(nanosecond),
-    attributes = Attrs
+    attributes = LimitedAttrs,
+    dropped_attributes_count = DroppedAttrs
   },
   update_current_span(fun(Span) ->
     Limit = instrument_config:get_span_event_count_limit(),
@@ -482,11 +461,17 @@ add_event(Name, Attrs) when is_binary(Name), is_map(Attrs) ->
   end).
 
 %% @doc Sets the status of the current span to ok.
+%%
+%% Per the OTel spec, status transitions are constrained:
+%% <ul>
+%%   <li>`unset' may be transitioned to `ok' or `error'</li>
+%%   <li>`error' may be transitioned to `ok' (success overrides earlier error)</li>
+%%   <li>once set to `ok' the status is final and further updates are ignored</li>
+%%   <li>setting status to `unset' is always ignored</li>
+%% </ul>
 -spec set_status(ok | error) -> ok.
 set_status(ok) ->
-  update_current_span(fun(Span) ->
-    Span#span{status = ok}
-  end);
+  update_current_span(fun(Span) -> apply_status(Span, ok) end);
 set_status(error) ->
   set_status(error, <<>>).
 
@@ -495,11 +480,22 @@ set_status(error) ->
 set_status(ok, _Description) ->
   set_status(ok);
 set_status(error, Description) when is_binary(Description) ->
-  update_current_span(fun(Span) ->
-    Span#span{status = {error, Description}}
-  end);
+  update_current_span(fun(Span) -> apply_status(Span, {error, Description}) end);
 set_status(error, Description) when is_list(Description) ->
   set_status(error, list_to_binary(Description)).
+
+%% @private Applies OTel-spec status transition rules.
+apply_status(#span{status = ok} = Span, _) ->
+  %% Once OK, status is final.
+  Span;
+apply_status(Span, ok) ->
+  Span#span{status = ok};
+apply_status(#span{status = unset} = Span, {error, _} = Err) ->
+  Span#span{status = Err};
+apply_status(#span{status = {error, _}} = Span, {error, _} = Err) ->
+  Span#span{status = Err};
+apply_status(Span, _) ->
+  Span.
 
 %% @doc Records an exception on the current span.
 -spec record_exception(term()) -> ok.
@@ -528,9 +524,13 @@ add_link(#{span_ctx := SpanCtx} = Opts) ->
   add_link(SpanCtx, Attrs).
 
 add_link(#span_ctx{} = SpanCtx, Attrs) ->
+  AttrLimit = instrument_config:get_span_link_attribute_count_limit(),
+  {LimitedAttrs, DroppedAttrs} =
+    instrument_attributes:apply_limits(Attrs, AttrLimit),
   Link = #span_link{
     ctx = SpanCtx,
-    attributes = Attrs
+    attributes = LimitedAttrs,
+    dropped_attributes_count = DroppedAttrs
   },
   update_current_span(fun(Span) ->
     Limit = instrument_config:get_span_link_count_limit(),

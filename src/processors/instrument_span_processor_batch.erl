@@ -122,7 +122,18 @@ init(Config) ->
   Exporter = maps:get(exporter, Config),
   ExporterConfig = maps:get(exporter_config, Config, #{}),
   MaxQueueSize = maps:get(max_queue_size, Config, ?DEFAULT_MAX_QUEUE_SIZE),
-  MaxExportBatchSize = maps:get(max_export_batch_size, Config, ?DEFAULT_MAX_EXPORT_BATCH_SIZE),
+  ConfiguredBatchSize = maps:get(max_export_batch_size, Config,
+                                 ?DEFAULT_MAX_EXPORT_BATCH_SIZE),
+  %% OTel spec: max_export_batch_size must not exceed max_queue_size.
+  MaxExportBatchSize = case ConfiguredBatchSize > MaxQueueSize of
+                         true ->
+                           logger:warning(
+                             "max_export_batch_size ~p > max_queue_size ~p; "
+                             "clamping to ~p",
+                             [ConfiguredBatchSize, MaxQueueSize, MaxQueueSize]),
+                           MaxQueueSize;
+                         false -> ConfiguredBatchSize
+                       end,
   ScheduleDelay = maps:get(schedule_delay_millis, Config, ?DEFAULT_SCHEDULE_DELAY_MILLIS),
   ExportTimeout = maps:get(export_timeout_millis, Config, ?DEFAULT_EXPORT_TIMEOUT_MILLIS),
   MaxBatchRetries = maps:get(max_batch_retries, Config, ?DEFAULT_MAX_BATCH_RETRIES),

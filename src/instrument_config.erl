@@ -61,6 +61,9 @@
   get_span_attribute_count_limit/0,
   get_span_event_count_limit/0,
   get_span_link_count_limit/0,
+  get_span_event_attribute_count_limit/0,
+  get_span_link_attribute_count_limit/0,
+  get_span_attribute_value_length_limit/0,
   %% Metric cardinality limit (OTel spec recommendation: 2000)
   get_metric_cardinality_limit/0,
   %% OTLP retry settings
@@ -359,6 +362,34 @@ get_span_event_count_limit() ->
 -spec get_span_link_count_limit() -> pos_integer().
 get_span_link_count_limit() ->
   read_span_limit("OTEL_SPAN_LINK_COUNT_LIMIT", 128).
+
+%% @doc Gets the per-event attribute count limit.
+%% Reads from OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT env var, defaults to 128.
+-spec get_span_event_attribute_count_limit() -> pos_integer().
+get_span_event_attribute_count_limit() ->
+  read_span_limit("OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT", 128).
+
+%% @doc Gets the per-link attribute count limit.
+%% Reads from OTEL_LINK_ATTRIBUTE_COUNT_LIMIT env var, defaults to 128.
+-spec get_span_link_attribute_count_limit() -> pos_integer().
+get_span_link_attribute_count_limit() ->
+  read_span_limit("OTEL_LINK_ATTRIBUTE_COUNT_LIMIT", 128).
+
+%% @doc Gets the per-attribute value length limit.
+%% Reads from OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT, returns `unlimited' when
+%% unset (the spec default). When set, string and binary attribute values
+%% longer than the limit are truncated; list elements are truncated
+%% individually.
+-spec get_span_attribute_value_length_limit() -> pos_integer() | unlimited.
+get_span_attribute_value_length_limit() ->
+  case os:getenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT") of
+    false -> unlimited;
+    Value ->
+      case catch list_to_integer(Value) of
+        Int when is_integer(Int), Int > 0 -> Int;
+        _ -> unlimited
+      end
+  end.
 
 %% @doc Gets the per-metric cardinality limit.
 %% Reads from OTEL_METRIC_CARDINALITY_LIMIT env var, defaults to 2000.

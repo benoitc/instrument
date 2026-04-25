@@ -23,7 +23,10 @@
   from_list/1,
   validate/1,
   to_label_values/2,
-  hash/1
+  hash/1,
+  apply_limits/2,
+  apply_limits/3,
+  truncate_value/2
 ]).
 
 -type attribute_key() :: atom() | binary().
@@ -118,6 +121,61 @@ hash(Attrs) when is_map(Attrs) ->
   %% Sort keys for consistent hashing
   Sorted = lists:sort(maps:to_list(Attrs)),
   erlang:phash2(Sorted).
+
+%% @doc Apply OTel attribute limits: cap the count, truncate string values.
+%% Returns `{LimitedAttrs, DroppedCount}'. Existing keys in `Existing' are
+%% preserved unconditionally; new keys are added until `CountLimit' is hit.
+%% Use `unlimited' for either limit to skip that check.
+%%
+%% Equivalent to `apply_limits(Existing, NewAttrs, CountLimit)' with the
+%% configured value-length limit applied automatically.
+-spec apply_limits(map(), map() | pos_integer() | unlimited) ->
+  {map(), non_neg_integer()}.
+apply_limits(Attrs, CountLimit) when is_map(Attrs) ->
+  apply_limits(#{}, Attrs, CountLimit).
+
+%% @doc Three-arity form for limiting an addition to an existing attribute
+%% map. Useful when merging into a span's existing attributes.
+-spec apply_limits(map(), map(), pos_integer() | unlimited) ->
+  {map(), non_neg_integer()}.
+apply_limits(Existing, NewAttrs, CountLimit) when is_map(Existing), is_map(NewAttrs) ->
+  ValueLimit = instrument_config:get_span_attribute_value_length_limit(),
+  TruncatedNew = maps:map(fun(_K, V) -> truncate_value(V, ValueLimit) end, NewAttrs),
+  case CountLimit of
+    unlimited ->
+      {maps:merge(Existing, TruncatedNew), 0};
+    _ when is_integer(CountLimit), CountLimit >= 0 ->
+      enforce_count_limit(Existing, TruncatedNew, CountLimit)
+  end.
+
+enforce_count_limit(Existing, NewAttrs, CountLimit) ->
+  ExistingKeys = maps:keys(Existing),
+  ExistingCount = length(ExistingKeys),
+  %% Updates to existing keys never count against the limit.
+  {Updates, Additions} = maps:fold(fun(K, V, {U, A}) ->
+    case maps:is_key(K, Existing) of
+      true -> {maps:put(K, V, U), A};
+      false -> {U, maps:put(K, V, A)}
+    end
+  end, {#{}, #{}}, NewAttrs),
+  AdditionKeys = maps:keys(Additions),
+  Available = max(0, CountLimit - ExistingCount),
+  Kept = lists:sublist(AdditionKeys, Available),
+  KeptMap = maps:with(Kept, Additions),
+  Dropped = length(AdditionKeys) - length(Kept),
+  {maps:merge(maps:merge(Existing, KeptMap), Updates), Dropped}.
+
+%% @doc Truncate a single attribute value to the given length limit.
+%% Strings/binaries longer than the limit are truncated. Lists are
+%% truncated element by element. Numeric, boolean, and atom values are
+%% returned unchanged. `unlimited' is a no-op.
+-spec truncate_value(term(), pos_integer() | unlimited) -> term().
+truncate_value(V, unlimited) -> V;
+truncate_value(V, Limit) when is_binary(V), byte_size(V) > Limit ->
+  binary:part(V, 0, Limit);
+truncate_value(V, Limit) when is_list(V) ->
+  [truncate_value(E, Limit) || E <- V];
+truncate_value(V, _Limit) -> V.
 
 %% Internal functions
 

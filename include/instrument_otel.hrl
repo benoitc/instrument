@@ -22,14 +22,16 @@
 -record(span_event, {
   name :: binary(),
   timestamp :: integer(),                      % wall clock time in nanoseconds (Unix epoch)
-  attributes = #{} :: map()
+  attributes = #{} :: map(),
+  dropped_attributes_count = 0 :: non_neg_integer()
 }).
 
 %% Span link (reference to another span)
 %% Must be defined before span record
 -record(span_link, {
   ctx :: #span_ctx{},
-  attributes = #{} :: map()
+  attributes = #{} :: map(),
+  dropped_attributes_count = 0 :: non_neg_integer()
 }).
 
 %% Resource (describes the entity producing telemetry)

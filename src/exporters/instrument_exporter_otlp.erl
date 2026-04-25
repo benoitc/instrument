@@ -259,21 +259,27 @@ encode_attr_value(V) ->
 encode_events(Events) ->
   [encode_event(E) || E <- Events].
 
-encode_event(#span_event{name = Name, timestamp = Timestamp, attributes = Attrs}) ->
+encode_event(#span_event{name = Name, timestamp = Timestamp,
+                         attributes = Attrs,
+                         dropped_attributes_count = Dropped}) ->
   #{
     <<"name">> => Name,
     <<"timeUnixNano">> => integer_to_binary(Timestamp),
-    <<"attributes">> => encode_attributes(Attrs)
+    <<"attributes">> => encode_attributes(Attrs),
+    <<"droppedAttributesCount">> => Dropped
   }.
 
 encode_links(Links) ->
   [encode_link(L) || L <- Links].
 
-encode_link(#span_link{ctx = #span_ctx{trace_id = TId, span_id = SId}, attributes = Attrs}) ->
+encode_link(#span_link{ctx = #span_ctx{trace_id = TId, span_id = SId},
+                       attributes = Attrs,
+                       dropped_attributes_count = Dropped}) ->
   #{
     <<"traceId">> => binary:encode_hex(TId, lowercase),
     <<"spanId">> => binary:encode_hex(SId, lowercase),
-    <<"attributes">> => encode_attributes(Attrs)
+    <<"attributes">> => encode_attributes(Attrs),
+    <<"droppedAttributesCount">> => Dropped
   }.
 
 encode_status(unset) ->

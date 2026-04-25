@@ -30,6 +30,9 @@
 ]).
 
 -define(BAGGAGE_KEY, '$instrument_baggage').
+%% W3C Baggage spec: max 180 list-members, max 8192 bytes total.
+-define(MAX_BAGGAGE_ENTRIES, 180).
+-define(MAX_BAGGAGE_BYTES, 8192).
 
 -type baggage_key() :: binary() | atom() | string().
 -type baggage_value() :: binary() | atom() | string() | number().
@@ -61,14 +64,21 @@ set(Key, Value) ->
   set(Key, Value, #{}).
 
 %% @doc Sets a value in the current baggage with metadata.
+%% No-op if it would push the baggage over the W3C entry-count or byte-size
+%% limits and the key is not already present (updates to existing keys are
+%% always accepted).
 -spec set(baggage_key(), baggage_value(), metadata()) -> ok.
 set(Key, Value, Metadata) when is_map(Metadata) ->
   Ctx = instrument_context:current(),
   Baggage = from_context(Ctx),
   NormalizedKey = normalize_key(Key),
-  NewBaggage = maps:put(NormalizedKey, {Value, Metadata}, Baggage),
-  NewCtx = to_context(Ctx, NewBaggage),
-  instrument_context:set_current(NewCtx).
+  Candidate = maps:put(NormalizedKey, {Value, Metadata}, Baggage),
+  case within_limits(Candidate) of
+    true ->
+      instrument_context:set_current(to_context(Ctx, Candidate));
+    false ->
+      ok
+  end.
 
 %% @doc Removes a key from the current baggage.
 -spec remove(baggage_key()) -> ok.
@@ -116,7 +126,8 @@ encode(Baggage) when is_map(Baggage) ->
   end, [], Baggage),
   iolist_to_binary(lists:join(<<",">>, Entries)).
 
-%% @doc Decodes W3C Baggage header format to baggage.
+%% @doc Decodes W3C Baggage header format to baggage. Stops adding entries
+%% past the spec-mandated maximums (180 entries / 8192 bytes).
 -spec decode(binary() | string()) -> baggage().
 decode(Header) when is_list(Header) ->
   decode(list_to_binary(Header));
@@ -125,7 +136,28 @@ decode(Header) when is_binary(Header) ->
     <<>> -> #{};
     _ ->
       Entries = binary:split(Header, <<",">>, [global, trim_all]),
-      lists:foldl(fun decode_entry/2, #{}, Entries)
+      decode_entries(Entries, #{}, 0)
+  end.
+
+decode_entries([], Acc, _Bytes) -> Acc;
+decode_entries(_, Acc, _) when map_size(Acc) >= ?MAX_BAGGAGE_ENTRIES -> Acc;
+decode_entries([Entry | Rest], Acc, Bytes) ->
+  case Bytes + byte_size(Entry) > ?MAX_BAGGAGE_BYTES of
+    true -> Acc;
+    false ->
+      Acc1 = decode_entry(Entry, Acc),
+      %% Add 1 for the separator we no longer see (close enough for the
+      %% byte budget; the spec only requires we stop somewhere below 8192).
+      decode_entries(Rest, Acc1, Bytes + byte_size(Entry) + 1)
+  end.
+
+%% @private Returns true when the candidate baggage is within the W3C
+%% entry-count and byte-size caps.
+within_limits(Baggage) when is_map(Baggage) ->
+  case map_size(Baggage) =< ?MAX_BAGGAGE_ENTRIES of
+    false -> false;
+    true ->
+      byte_size(encode(Baggage)) =< ?MAX_BAGGAGE_BYTES
   end.
 
 %% Internal functions
