@@ -31,7 +31,7 @@ Configure `instrument` using OpenTelemetry-compatible environment variables:
         {sampler, {instrument_sampler_probability, #{ratio => 0.1}}},
         {span_processor, {instrument_span_processor_batch, #{
             max_queue_size => 2048,
-            scheduled_delay => 5000,
+            schedule_delay_millis => 5000,
             max_export_batch_size => 512
         }}}
     ]}
@@ -52,15 +52,14 @@ init() ->
 
 configure_telemetry() ->
     %% Set sampler
-    instrument_sampler:set_sampler({instrument_sampler_probability, #{
-        ratio => get_sample_rate()
-    }}),
+    instrument_sampler:set_sampler(instrument_sampler_probability,
+                                   #{ratio => get_sample_rate()}),
 
     %% Configure batch processor
-    {ok, _} = instrument_span_processor_batch:start_link(#{
+    instrument_span_processor:register(instrument_span_processor_batch, #{
         exporter => get_exporter(),
         max_queue_size => 2048,
-        scheduled_delay => 5000,
+        schedule_delay_millis => 5000,
         max_export_batch_size => 512
     }),
 
@@ -139,23 +138,24 @@ base_rate() ->
 ### Configuration
 
 ```erlang
-instrument_span_processor_batch:start_link(#{
-    %% Exporter to use
-    exporter => instrument_exporter_otlp:new(#{
+instrument_span_processor:register(instrument_span_processor_batch, #{
+    %% Exporter module + its config
+    exporter => instrument_exporter_otlp,
+    exporter_config => #{
         endpoint => "http://collector:4318/v1/traces"
-    }),
+    },
 
     %% Maximum spans to queue
     max_queue_size => 2048,
 
     %% Export interval (ms)
-    scheduled_delay => 5000,
+    schedule_delay_millis => 5000,
 
     %% Maximum spans per export batch
     max_export_batch_size => 512,
 
     %% Timeout for export (ms)
-    export_timeout => 30000
+    export_timeout_millis => 30000
 }).
 ```
 
@@ -164,7 +164,7 @@ instrument_span_processor_batch:start_link(#{
 | Setting | Low Latency | High Throughput |
 |---------|-------------|-----------------|
 | `max_queue_size` | 512 | 4096 |
-| `scheduled_delay` | 1000 | 10000 |
+| `schedule_delay_millis` | 1000 | 10000 |
 | `max_export_batch_size` | 128 | 512 |
 
 ### Handling Backpressure
@@ -197,9 +197,8 @@ check_memory() ->
         true ->
             logger:warning("High memory usage: ~p bytes", [MemUsed]),
             %% Consider reducing sampling
-            instrument_sampler:set_sampler({instrument_sampler_probability, #{
-                ratio => 0.01
-            }});
+            instrument_sampler:set_sampler(instrument_sampler_probability,
+                                           #{ratio => 0.01});
         false ->
             ok
     end.
@@ -240,7 +239,7 @@ stop(_State) ->
     timer:sleep(2000),
 
     %% Shutdown processors
-    instrument_span_processor_batch:stop(),
+    instrument_span_processor:shutdown(),
 
     logger:info("Telemetry flushed"),
     ok.
@@ -280,39 +279,18 @@ init_self_monitoring() ->
 
 ### Health Checks
 
+The library does not expose a built-in OTLP health probe or queue introspection. You can liveness-check the local processor by verifying its registration:
+
 ```erlang
 %% Health check endpoint
 health_check() ->
-    Checks = [
-        {span_processor, check_span_processor()},
-        {exporter, check_exporter()},
-        {queue, check_queue()}
-    ],
-
-    AllHealthy = lists:all(fun({_, Status}) -> Status == ok end, Checks),
-    {AllHealthy, Checks}.
-
-check_span_processor() ->
     case whereis(instrument_span_processor_batch) of
-        undefined -> error;
+        undefined -> {error, span_processor_down};
         Pid when is_pid(Pid) -> ok
     end.
-
-check_exporter() ->
-    %% Verify exporter can connect
-    case instrument_exporter_otlp:health_check() of
-        ok -> ok;
-        _ -> degraded
-    end.
-
-check_queue() ->
-    %% Check queue size
-    case instrument_span_processor_batch:queue_size() of
-        N when N < 1000 -> ok;
-        N when N < 2000 -> degraded;
-        _ -> error
-    end.
 ```
+
+For exporter reachability, probe the configured OTLP endpoint with an HTTP HEAD against `/v1/traces` from your monitoring stack rather than from inside the library.
 
 ## Performance Tuning
 

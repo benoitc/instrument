@@ -78,11 +78,7 @@ run() ->
     application:ensure_all_started(instrument),
 
     %% Register console exporter to see spans
-    instrument_tracer:register_exporter(
-        fun(Span) ->
-            instrument_exporter_console:export([Span], {state, text, standard_io})
-        end
-    ),
+    instrument_exporter:register(instrument_exporter_console:new()),
 
     instrument_tracer:with_span(<<"process_order">>, fun() ->
         instrument_tracer:set_attribute(<<"order.id">>, <<"ORD-123">>),

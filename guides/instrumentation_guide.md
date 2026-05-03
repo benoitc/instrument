@@ -545,10 +545,10 @@ request_count                    %% Avoid
 
 ```erlang
 %% Good: Low cardinality labels
-[method, status_code, endpoint_pattern]
+GoodLabels = [method, status_code, endpoint_pattern],
 
 %% Bad: High cardinality labels (causes memory issues!)
-[user_id, request_id, timestamp]  %% Millions of unique combinations!
+BadLabels = [user_id, request_id, timestamp].  %% Millions of unique combinations!
 ```
 
 ### Span Granularity

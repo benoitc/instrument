@@ -327,11 +327,7 @@ run() ->
     instrument_logger:install(),
 
     %% Register console exporter
-    instrument_tracer:register_exporter(
-        fun(Span) ->
-            instrument_exporter_console:export([Span], {state, text, standard_io})
-        end
-    ),
+    instrument_exporter:register(instrument_exporter_console:new()),
 
     %% Parent process creates a span
     instrument_tracer:with_span(<<"coordinator">>, #{kind => server}, fun() ->

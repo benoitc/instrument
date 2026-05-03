@@ -311,12 +311,10 @@ Registers a span exporter function.
 **Example:**
 
 ```erlang
-%% Console exporter
-instrument_tracer:register_exporter(
-    fun(Span) -> instrument_exporter_console:export(Span) end
-).
+%% Console exporter (preferred path: goes through the batched manager)
+instrument_exporter:register(instrument_exporter_console:new()).
 
-%% Custom exporter
+%% Custom per-span exporter (synchronous, runs inline at end_span)
 instrument_tracer:register_exporter(fun(Span) ->
     io:format("Span: ~s (~.3f ms)~n", [
         Span#span.name,

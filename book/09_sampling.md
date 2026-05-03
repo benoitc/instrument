@@ -80,22 +80,25 @@ Configure samplers in code:
 
 ```erlang
 %% Always on
-instrument_sampler:set_sampler({instrument_sampler_always_on, #{}}).
+instrument_sampler:set_sampler(instrument_sampler_always_on).
 
 %% Always off
-instrument_sampler:set_sampler({instrument_sampler_always_off, #{}}).
+instrument_sampler:set_sampler(instrument_sampler_always_off).
 
 %% Probability
-instrument_sampler:set_sampler({instrument_sampler_probability, #{ratio => 0.1}}).
+instrument_sampler:set_sampler(instrument_sampler_probability, #{ratio => 0.1}).
 
-%% Parent-based
-instrument_sampler:set_sampler({instrument_sampler_parent_based, #{
-    root => {instrument_sampler_probability, #{ratio => 0.1}},
-    remote_parent_sampled => {instrument_sampler_always_on, #{}},
-    remote_parent_not_sampled => {instrument_sampler_always_off, #{}},
-    local_parent_sampled => {instrument_sampler_always_on, #{}},
-    local_parent_not_sampled => {instrument_sampler_always_off, #{}}
-}}).
+%% Parent-based: root sampler runs when there is no parent;
+%% per-parent samplers run otherwise. Each *_config map is passed
+%% to the corresponding sampler's should_sample/7.
+instrument_sampler:set_sampler(instrument_sampler_parent_based, #{
+    root => instrument_sampler_probability,
+    root_config => #{ratio => 0.1},
+    remote_parent_sampled => instrument_sampler_always_on,
+    remote_parent_not_sampled => instrument_sampler_always_off,
+    local_parent_sampled => instrument_sampler_always_on,
+    local_parent_not_sampled => instrument_sampler_always_off
+}).
 ```
 
 ## Custom Samplers
@@ -130,7 +133,7 @@ should_sample(TraceId, SpanName, SpanKind, Attributes, Links, ParentCtx) ->
 Use your custom sampler:
 
 ```erlang
-instrument_sampler:set_sampler({my_sampler, #{}}).
+instrument_sampler:set_sampler(my_sampler, #{}).
 ```
 
 ## Sampling Decisions
@@ -249,8 +252,9 @@ Span processors run before export. Use them for filtering or enrichment.
 Exports spans immediately (synchronously):
 
 ```erlang
-instrument_span_processor_simple:start_link(#{
-    exporter => MyExporter
+instrument_span_processor:register(instrument_span_processor_simple, #{
+    exporter => MyExporterModule,
+    exporter_config => MyExporterConfig
 }).
 ```
 
@@ -259,10 +263,11 @@ instrument_span_processor_simple:start_link(#{
 Buffers and exports in batches (asynchronously):
 
 ```erlang
-instrument_span_processor_batch:start_link(#{
-    exporter => MyExporter,
+instrument_span_processor:register(instrument_span_processor_batch, #{
+    exporter => MyExporterModule,
+    exporter_config => MyExporterConfig,
     max_queue_size => 2048,
-    scheduled_delay => 5000,
+    schedule_delay_millis => 5000,
     max_export_batch_size => 512
 }).
 ```
