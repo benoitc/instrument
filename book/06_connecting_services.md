@@ -1,6 +1,6 @@
 # Connecting Services
 
-Modern systems span multiple services. This chapter covers how to maintain trace continuity across boundaries.
+Modern systems rarely do all their work in one process or one service. This chapter shows how to keep one trace connected as work moves across those boundaries.
 
 ## The Challenge
 
@@ -13,7 +13,7 @@ Service A                    Service B
 └─────────────┘             └─────────────┘
 ```
 
-Without propagation, span B starts a new trace. You lose the connection.
+Without propagation, span B starts a new trace. The backend sees two unrelated requests, even though one caused the other.
 
 With propagation:
 
@@ -23,7 +23,7 @@ Trace: abc123
 │   └── span B (Service B)
 ```
 
-Both spans share the same trace ID.
+Both spans share the same trace ID, so the full path stays visible.
 
 ## How Propagation Works
 
@@ -49,7 +49,7 @@ The `traceparent` header contains:
 
 ## Injecting Context
 
-Before making an outgoing request, inject the trace context:
+Before making an outgoing request, inject the current trace context:
 
 ```erlang
 %% Create the outgoing span
@@ -93,7 +93,7 @@ call_service(URL, Body) ->
 
 ## Extracting Context
 
-When receiving a request, extract the context before creating spans:
+When receiving a request, extract the context before creating new spans:
 
 ```erlang
 handle_request(Req) ->
@@ -118,7 +118,7 @@ handle_request(Req) ->
 
 ## B3 Propagation (Zipkin)
 
-If you're integrating with Zipkin or systems using B3, configure B3 propagation:
+If you are integrating with Zipkin or a system that already uses B3, configure B3 propagation:
 
 ```erlang
 %% Via environment variable (before starting the app)
@@ -159,7 +159,7 @@ You can use multiple propagators simultaneously:
 os:putenv("OTEL_PROPAGATORS", "tracecontext,baggage,b3").
 ```
 
-The library will inject all formats and extract from whichever is present.
+The library injects all configured formats and extracts from whichever supported format is present.
 
 ## Propagation Within Erlang Processes
 
@@ -188,7 +188,7 @@ end).
 
 ### Gen Server Calls
 
-For gen_server communication:
+For `gen_server` communication, pass the context with the request and attach it while handling the call:
 
 ```erlang
 %% Client side
@@ -230,7 +230,7 @@ instrument_context:attach(Ctx),
 UserId = instrument_baggage:get(<<"user.id">>).
 ```
 
-Use baggage for:
+Use baggage for values that downstream services genuinely need:
 - User context needed across services
 - Tenant identification
 - Feature flags
@@ -360,7 +360,7 @@ Run it:
 2> cross_process_trace:run().
 ```
 
-Expected output proving the same trace_id in both processes:
+The output should show the same `trace_id` in both processes:
 
 ```
 2024-01-15T10:30:00.123Z [INFO] [trace_id=a1b2c3d4... span_id=1111abcd...] Coordinator started, trace_id=a1b2c3d4...
@@ -394,7 +394,7 @@ The key points:
 
 ### Gen Server with Context Propagation
 
-For gen_server processes, here is a complete example:
+For `gen_server` processes, here is a complete example:
 
 ```erlang
 -module(traced_worker).
@@ -457,4 +457,4 @@ Verify that:
 
 ## Next Steps
 
-Your traces now flow across services. In the next chapter, you will learn how to correlate logs with traces.
+Your traces now flow across services and Erlang processes. Next, we will attach logs to those same traces so the details are easier to find.

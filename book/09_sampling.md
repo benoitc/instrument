@@ -1,30 +1,30 @@
 # Sampling for Scale
 
-At scale, collecting every span is expensive. Sampling lets you control costs while maintaining visibility.
+At scale, collecting every span can become expensive. Sampling lets you keep useful visibility while controlling storage, network traffic, and backend cost.
 
 ## Why Sample?
 
-Consider:
+Consider this service:
 - 1,000 requests/second
 - 10 spans per request
 - 10,000 spans/second
 
-That's a lot of data to store and analyze. Sampling collects a representative subset.
+That is a lot of data to send, store, index, and query. Sampling keeps a representative subset instead of exporting everything.
 
 ## Sampling Basics
 
-A sampler decides whether to record each trace:
+A sampler decides whether each trace should be recorded and exported:
 
 - **Sampled**: Span is recorded and exported
 - **Not sampled**: Span is dropped (but trace context is still propagated)
 
-The sampling decision is made at trace start and propagates to all spans in the trace.
+The decision is usually made when the trace starts, then propagated to every span in that trace.
 
 ## Built-in Samplers
 
 ### Always On
 
-Records every trace. Use for development or low-traffic services.
+Records every trace. Use this for development, tests, or low-traffic services.
 
 ```erlang
 os:putenv("OTEL_TRACES_SAMPLER", "always_on"),
@@ -33,7 +33,7 @@ instrument_config:init().
 
 ### Always Off
 
-Records no traces. Use to disable tracing completely.
+Records no traces. Use this when you need to disable tracing completely.
 
 ```erlang
 os:putenv("OTEL_TRACES_SAMPLER", "always_off"),
@@ -42,7 +42,7 @@ instrument_config:init().
 
 ### Probability (TraceIdRatio)
 
-Records a percentage of traces. Use for high-traffic services.
+Records a percentage of traces. Use this for high-traffic services.
 
 ```erlang
 %% Sample 10% of traces
@@ -58,7 +58,7 @@ The ratio is a decimal between 0.0 and 1.0:
 
 ### Parent-Based Samplers
 
-Respect the parent's sampling decision. This keeps traces complete.
+Parent-based samplers respect the parent's sampling decision. That keeps traces complete instead of exporting disconnected fragments.
 
 ```erlang
 %% Default: parent-based with always_on root
@@ -76,7 +76,7 @@ Parent-based sampling:
 
 ## Programmatic Configuration
 
-Configure samplers in code:
+You can also configure samplers in code:
 
 ```erlang
 %% Always on
@@ -103,7 +103,7 @@ instrument_sampler:set_sampler(instrument_sampler_parent_based, #{
 
 ## Custom Samplers
 
-For complex requirements, implement a custom sampler:
+For more specific requirements, implement a custom sampler:
 
 ```erlang
 -module(my_sampler).
@@ -146,11 +146,11 @@ A sampling decision can be:
 | `record_only` | Yes | No |
 | `drop` | No | No |
 
-Use `record_only` when you want to process spans locally but not export them.
+Use `record_only` when you want local span processing but do not want to export those spans.
 
 ## Checking Sampling Status
 
-In your code, check if the current span is sampled:
+In your code, check whether the current span is being recorded before doing expensive work for attributes:
 
 ```erlang
 %% Check if being recorded
@@ -170,7 +170,7 @@ IsSampled = instrument_tracer:is_sampled().
 
 ### Head-based Sampling
 
-Decision made at trace start. All spans in the trace follow the same decision.
+Head-based sampling makes the decision when the trace starts. All spans in the trace follow that decision.
 
 **Pros:**
 - Simple to implement
@@ -183,7 +183,7 @@ Decision made at trace start. All spans in the trace follow the same decision.
 
 ### Tail-based Sampling (External)
 
-Decision made after trace completes. Requires a collector.
+Tail-based sampling makes the decision after the trace completes. It requires a collector that can buffer traces.
 
 **Pros:**
 - Can sample based on errors, latency, etc.
@@ -194,7 +194,7 @@ Decision made after trace completes. Requires a collector.
 - Requires buffering
 - Higher resource usage
 
-The `instrument` library uses head-based sampling. For tail-based sampling, use an OpenTelemetry Collector.
+The `instrument` library uses head-based sampling. If you need tail-based sampling, put an OpenTelemetry Collector in the export path.
 
 ## Production Recommendations
 
@@ -245,7 +245,7 @@ should_sample(_TraceId, SpanName, _Kind, Attrs, _Links, _Parent) ->
 
 ## Span Processors
 
-Span processors run before export. Use them for filtering or enrichment.
+Span processors run before export. Use them for filtering, enrichment, or batching.
 
 ### Simple Processor
 
@@ -274,7 +274,7 @@ instrument_span_processor:register(instrument_span_processor_batch, #{
 
 ## Exercise
 
-1. Measure trace volume with always_on sampling
+1. Measure trace volume with `always_on` sampling
 2. Calculate an appropriate sampling rate
 3. Configure probability sampling
 4. Verify traces are still representative
@@ -286,4 +286,4 @@ Questions to answer:
 
 ## Next Steps
 
-You now understand how to control costs with sampling. In the final chapter, you will build a complete instrumented service.
+You now know how to control trace volume. In the final chapter, we will put metrics, traces, logs, export, and sampling together in one service.

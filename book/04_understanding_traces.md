@@ -1,6 +1,6 @@
 # Understanding Traces
 
-Metrics tell you what is happening. Traces tell you why.
+Metrics tell you what is happening across the system. Traces show what happened inside one request, job, or workflow.
 
 ## What is a Trace?
 
@@ -21,7 +21,7 @@ Every trace has a unique identifier:
 Trace ID: 4bf92f3577b34da6a3ce929d0e0e4736
 ```
 
-All operations in the same request share this ID.
+Every span that belongs to the same request shares this ID.
 
 ### Spans
 
@@ -35,7 +35,7 @@ A span represents one unit of work. Each span has:
 
 ### Span Tree
 
-Spans form a tree showing the request flow:
+Spans form a tree that shows the flow of work:
 
 ```
 handle_request (100ms)
@@ -50,7 +50,7 @@ handle_request (100ms)
 
 ## Creating Your First Span
 
-The simplest way to create a span is `with_span`:
+The usual way to create a span is `with_span`:
 
 ```erlang
 instrument_tracer:with_span(<<"process_order">>, fun() ->
@@ -60,7 +60,7 @@ instrument_tracer:with_span(<<"process_order">>, fun() ->
 end).
 ```
 
-This creates a span named `process_order` that:
+This creates a span named `process_order`. It:
 - Starts when the function begins
 - Ends when the function returns
 - Captures the duration automatically
@@ -68,7 +68,7 @@ This creates a span named `process_order` that:
 
 ## See It In Action
 
-Here is a complete, runnable example you can paste into an Erlang shell:
+Here is a complete example you can paste into an Erlang shell:
 
 ```erlang
 -module(trace_demo).
@@ -137,11 +137,11 @@ Attributes: order.id = ORD-123
 ============
 ```
 
-Notice how all three spans share the same `TraceId`. The `validate` and `save` spans both have `process_order` as their parent.
+All three spans share the same `TraceId`. The `validate` and `save` spans both have `process_order` as their parent, so the backend can reconstruct the request tree.
 
 ## Span Context
 
-The span context contains the trace and span IDs needed to connect spans:
+The span context carries the trace and span IDs needed to connect spans:
 
 ```erlang
 %% Get the current span context
@@ -154,7 +154,7 @@ SpanId = instrument_tracer:span_id().      %% <<"00f067aa0ba902b7">>
 
 ## Span Kinds
 
-Spans have a "kind" that describes their role:
+Spans have a "kind" that describes their role in the larger workflow:
 
 | Kind | Use Case |
 |------|----------|
@@ -180,7 +180,7 @@ end).
 
 ## Nested Spans
 
-Child spans are created automatically within parent spans:
+When you create a span inside another span, the new span becomes a child automatically:
 
 ```erlang
 instrument_tracer:with_span(<<"handle_request">>, fun() ->
@@ -201,11 +201,11 @@ end).
 
 ## Trace Context Propagation
 
-For distributed systems, trace context must travel between services.
+For distributed systems, trace context must travel with the work. Otherwise each service creates a separate trace and you lose the full picture.
 
 ### Between Processes
 
-Use `instrument_propagation` to maintain context across process boundaries:
+Use `instrument_propagation` to preserve context across process boundaries:
 
 ```erlang
 %% Spawn with context propagated
@@ -232,7 +232,7 @@ instrument_context:attach(Ctx),
 %% Now spans will be children of the calling service's span
 ```
 
-We cover this in detail in Chapter 6.
+Chapter 6 covers this in detail.
 
 ## The Current Span
 
@@ -276,7 +276,7 @@ after
 end.
 ```
 
-Use `with_span` when possible. It handles exceptions and cleanup automatically.
+Use `with_span` when you can. It keeps the common case simple and handles exceptions and cleanup for you.
 
 ## When to Create Spans
 
@@ -291,7 +291,7 @@ Use `with_span` when possible. It handles exceptions and cleanup automatically.
 - Tight loops (creates too much overhead)
 - Every function call (too noisy)
 
-A good rule: Create spans for operations you might want to debug or optimize.
+A useful rule is to create spans for operations you might later need to debug, explain, or optimize.
 
 ## Exercise
 
@@ -316,4 +316,4 @@ process(Order) ->
 
 ## Next Steps
 
-You now understand the basics of traces. In the next chapter, you will learn how to enrich spans with attributes, events, and status information.
+You now understand the shape of a trace. In the next chapter, you will make spans more useful by adding attributes, events, and status.

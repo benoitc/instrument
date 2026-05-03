@@ -1,29 +1,29 @@
 # Introduction
 
-Welcome to the Erlang Observability Handbook. This book will guide you through instrumenting your Erlang applications using the `instrument` library.
+Welcome to the Erlang Observability Handbook. This book shows how to add useful observability to Erlang systems with the `instrument` library, without turning your application code into a pile of monitoring glue.
 
 ## What This Book Covers
 
 You will learn how to:
 
-- **Collect Metrics**: Track counters, gauges, and histograms to understand your system's behavior
-- **Create Traces**: Follow requests across your distributed system with spans and context propagation
-- **Correlate Logs**: Connect your existing logs to traces for debugging
-- **Export Data**: Send telemetry to backends like Prometheus, Jaeger, and OTLP-compatible systems
+- **Collect metrics**: Track counters, gauges, and histograms so you can see how the system behaves over time
+- **Create traces**: Follow requests across processes and services with spans and context propagation
+- **Correlate logs**: Connect ordinary Erlang logs to traces so debugging starts from the failing request, not from a timestamp guess
+- **Export data**: Send telemetry to Prometheus, Jaeger, and OTLP-compatible backends
 
 ## Prerequisites
 
-This book assumes you have:
+This book assumes you already have:
 
 - Basic Erlang knowledge (modules, functions, processes)
 - A working Erlang/OTP 25+ installation
 - rebar3 for building projects
 
-You do not need prior experience with observability tools.
+You do not need prior experience with observability tools. The early chapters explain the vocabulary before using it heavily.
 
 ## How to Read This Book
 
-Each chapter builds on previous ones. Start from the beginning if you are new to observability. If you have experience with OpenTelemetry in other languages, you can skip to specific chapters.
+The chapters build on each other. If observability is new to you, start at the beginning and follow the examples in order. If you already know OpenTelemetry from another language, you can jump to the chapters that map directly to the Erlang parts you need.
 
 **Part 1: Foundations**
 - Chapter 1: Why Observability Matters
@@ -45,7 +45,7 @@ Each chapter builds on previous ones. Start from the beginning if you are new to
 
 ## Code Examples
 
-All code examples are complete and runnable. You can type them into an Erlang shell or save them in modules.
+The examples are meant to be copied into an Erlang shell or saved as small modules. Most examples focus on one idea at a time; the final chapter brings them together into a complete service.
 
 ```erlang
 %% Start the instrument application
@@ -69,4 +69,4 @@ Install it in your `rebar.config`:
 ]}.
 ```
 
-Let's begin with understanding why observability matters for your systems.
+We will start with the practical question that motivates the rest of the book: when something is slow or broken in production, how do you find out what really happened?

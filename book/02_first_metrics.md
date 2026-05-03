@@ -1,6 +1,6 @@
 # Your First Metrics
 
-This chapter introduces the three fundamental metric types: counters, gauges, and histograms.
+Most useful metrics start with three types: counters, gauges, and histograms. Once you know when to use each one, the rest of the metrics API becomes much easier to reason about.
 
 ## Setting Up
 
@@ -18,7 +18,7 @@ application:ensure_all_started(instrument).
 
 ## Counters
 
-A counter is a value that only goes up. Use counters when you want to count events.
+A counter is a value that only goes up. Use one when you are counting events that have happened.
 
 ### Creating a Counter
 
@@ -45,7 +45,7 @@ Value = instrument_metric:get_counter(Counter).  %% Returns 6.0
 
 ### When to Use Counters
 
-Counters are ideal for:
+Counters are a good fit for:
 - Request counts
 - Error counts
 - Bytes sent/received
@@ -65,7 +65,7 @@ Counters are ideal for:
 
 ## Gauges
 
-A gauge is a value that can go up or down. Use gauges for current state.
+A gauge is a value that can go up or down. Use it for current state rather than historical totals.
 
 ### Creating a Gauge
 
@@ -95,7 +95,7 @@ Value = instrument_metric:get_gauge(Gauge).
 
 ### When to Use Gauges
 
-Gauges are ideal for:
+Gauges are a good fit for:
 - Connection pool sizes
 - Queue lengths
 - Memory usage
@@ -115,7 +115,7 @@ Gauges are ideal for:
 
 ## Histograms
 
-A histogram tracks the distribution of values. Use histograms for latencies and sizes.
+A histogram tracks the distribution of observed values. Use histograms when the shape of the data matters, especially for latencies and sizes.
 
 ### Creating a Histogram
 
@@ -152,21 +152,21 @@ instrument_metric:observe_histogram(Histogram, 0.050).
 
 ### Understanding Buckets
 
-Buckets define the boundaries for counting observations:
+Buckets define the boundaries used to count observations:
 
 ```erlang
 %% Default buckets
 [0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0]
 ```
 
-Each bucket counts observations less than or equal to its value. The histogram data includes:
+Each bucket counts observations less than or equal to its boundary. The histogram data includes:
 - `count`: Total number of observations
 - `sum`: Sum of all observed values
 - `buckets`: List of `{Boundary, Count}` pairs
 
 ### When to Use Histograms
 
-Histograms are ideal for:
+Histograms are a good fit for:
 - Request latencies
 - Response sizes
 - Batch sizes
@@ -186,7 +186,7 @@ Histograms are ideal for:
 
 ## Putting It Together
 
-Here is a complete example instrumenting an HTTP handler:
+Here is a complete example that instruments an HTTP handler:
 
 ```erlang
 -module(my_handler).
@@ -232,4 +232,4 @@ Test your instrumentation in the shell.
 
 ## Next Steps
 
-Your metrics now track individual values. In the next chapter, you will learn how to add dimensions using labels.
+You now know how to record basic measurements. In the next chapter, you will add labels so the same metric can answer more precise questions.

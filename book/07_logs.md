@@ -1,16 +1,16 @@
 # Logs That Tell the Story
 
-Logs are the most detailed form of telemetry. When correlated with traces, they become powerful debugging tools.
+Logs are often the most detailed telemetry you have. When they carry trace context, they become much easier to use during debugging.
 
 ## The Problem with Logs
 
-Traditional logs are isolated. When debugging, you:
+Traditional logs are isolated. When debugging, the workflow often looks like this:
 
 1. Find an error in logs
 2. Try to find related logs by timestamp
 3. Hope you can piece together what happened
 
-With trace correlation:
+With trace correlation, the workflow is more direct:
 
 1. Find the problematic trace
 2. See all logs for that exact request
@@ -18,7 +18,7 @@ With trace correlation:
 
 ## Logger Integration
 
-The `instrument_logger` module integrates with Erlang's logger to add trace context automatically.
+The `instrument_logger` module integrates with Erlang's `logger` and adds trace context automatically.
 
 ### Installation
 
@@ -27,7 +27,7 @@ The `instrument_logger` module integrates with Erlang's logger to add trace cont
 instrument_logger:install().
 ```
 
-This installs a logger filter that adds `trace_id` and `span_id` to all log metadata.
+This installs a logger filter that adds `trace_id` and `span_id` to log metadata.
 
 ### Basic Usage
 
@@ -46,7 +46,7 @@ instrument_tracer:with_span(<<"process_order">>, fun() ->
 end).
 ```
 
-Output includes trace context:
+The output now includes trace context:
 
 ```
 2024-01-15T10:30:00.123Z [INFO] [trace_id=abc... span_id=xyz...] Starting order processing
@@ -55,7 +55,7 @@ Output includes trace context:
 
 ## Manual Context Addition
 
-If you prefer not to install the global filter:
+If you prefer not to install the global filter, add trace context manually:
 
 ```erlang
 %% Add trace context to metadata manually
@@ -65,7 +65,7 @@ logger:info("Processing request", Meta).
 
 ## Log Exporter
 
-For backends that support the OpenTelemetry Logs data model, use the exporter mode:
+For backends that support the OpenTelemetry Logs data model, use exporter mode:
 
 ```erlang
 %% Register a log exporter
@@ -75,7 +75,7 @@ instrument_log_exporter:register(instrument_log_exporter_console:new()).
 instrument_logger:install(#{exporter => true}).
 ```
 
-This converts Erlang logs to OTel log records with proper severity mapping:
+This converts Erlang logs to OTel log records with the right severity mapping:
 
 | Erlang Level | OTel Severity |
 |--------------|---------------|
@@ -151,7 +151,7 @@ logger:critical("Out of memory, dropping messages").
 
 ### Context in Logs
 
-Include relevant context without duplicating span attributes:
+Include useful context, but avoid copying every span attribute into every log line:
 
 ```erlang
 instrument_tracer:with_span(<<"process_order">>, fun() ->
@@ -200,7 +200,7 @@ instrument_logger:install(#{exporter => true}).
 
 ## File-based Log Export
 
-For JSON log files compatible with log aggregators:
+For JSON log files that can be read by log aggregators:
 
 ```erlang
 %% Export logs to file
@@ -317,7 +317,7 @@ Run it:
 2> log_trace_demo:run().
 ```
 
-Output shows ALL logs share the same trace_id:
+All log lines should share the same `trace_id`:
 
 ```
 [INFO] [trace_id=abc123def456... span_id=1111aaaa...] Starting main task
@@ -331,11 +331,11 @@ Output shows ALL logs share the same trace_id:
 ```
 
 Key observations:
-- **Same trace_id** in all log lines - you can query all logs for this request
-- **Different span_ids** - each worker has its own span for granular timing
+- **Same trace_id** in all log lines: you can query every log for this request
+- **Different span_ids**: each worker has its own span for granular timing
 - The main task logs use span_id `1111aaaa...`, workers have their own span_ids
 
-This pattern is essential for debugging distributed workflows. When something fails, search your logs by `trace_id` to see everything that happened across all processes.
+This pattern is essential for debugging distributed workflows. When something fails, search by `trace_id` and you get the story across all participating processes.
 
 ## Exercise
 
@@ -346,8 +346,8 @@ Add logging to your order processing system:
 3. Use different log levels based on severity
 4. Verify logs include trace_id and span_id
 
-Query your logs by trace ID to see all logs for a single order.
+Query your logs by trace ID and check that you can see all log lines for a single order.
 
 ## Next Steps
 
-Your logs and traces are now connected. In the next chapter, you will learn how to export this data to various backends.
+Your logs and traces are now connected. Next, we will send metrics, traces, and logs to external backends.

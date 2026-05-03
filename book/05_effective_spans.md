@@ -1,10 +1,10 @@
 # Building Effective Spans
 
-A span captures more than timing. This chapter covers how to add context that makes debugging easier.
+A span is more than a timer. A useful span also explains what was happening, which inputs mattered, and whether the operation succeeded.
 
 ## Span Attributes
 
-Attributes are key-value pairs that describe the span. They are indexed by backends, enabling filtering and searching.
+Attributes are key-value pairs that describe the span. Backends index them, which makes traces searchable and useful for filtering.
 
 ### Setting Attributes
 
@@ -62,7 +62,7 @@ instrument_tracer:set_attribute(<<"user.premium">>, true).
 
 ## Span Events
 
-Events mark points in time within a span. They're useful for capturing milestones or occurrences.
+Events mark points in time inside a span. They are useful for milestones: something happened, but it was not long enough or important enough to deserve its own child span.
 
 ### Adding Events
 
@@ -127,7 +127,7 @@ Recorded exceptions appear as span events with:
 
 ## Span Status
 
-Set the span status to indicate success or failure:
+Set the span status to show whether the operation succeeded or failed:
 
 ```erlang
 %% Successful operation
@@ -150,11 +150,11 @@ Status values:
 - Set `ok` for successful operations
 - Set `error` for failures that need attention
 - Include a description for errors
-- Don't set status for operations that are "expected" to fail sometimes
+- Don't mark expected business outcomes as errors just because they are not successful paths
 
 ## Span Links
 
-Links connect spans that are related but not in a parent-child relationship:
+Links connect spans that are related but do not have a parent-child relationship:
 
 ```erlang
 %% Link to a span from another trace
@@ -175,7 +175,7 @@ Use links for:
 
 ## Updating the Span Name
 
-Sometimes you don't know the final name until later:
+Sometimes you do not know the best span name until later:
 
 ```erlang
 instrument_tracer:with_span(<<"http_request">>, fun() ->
@@ -266,8 +266,8 @@ Enhance the order processor from the previous chapter:
 3. Record exceptions properly
 4. Set appropriate status based on outcome
 
-Then introduce a deliberate error and observe how it appears in the span.
+Then introduce a deliberate error and look at how it appears in the exported span.
 
 ## Next Steps
 
-Your spans now carry rich context. In the next chapter, you will learn how to connect spans across service boundaries.
+Your spans now carry useful context. Next, we will connect those spans across service and process boundaries.

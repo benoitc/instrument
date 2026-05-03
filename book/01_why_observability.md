@@ -1,21 +1,21 @@
 # Why Observability Matters
 
-Before writing code, let's understand what observability means and when you need it.
+Before writing code, it helps to be clear about the problem observability solves. The goal is not to collect data for its own sake. The goal is to answer production questions quickly and with evidence.
 
 ## The Problem
 
-Your Erlang application is running in production. Users report slow responses. Where do you look?
+Your Erlang application is running in production. Users start reporting slow responses. Where do you look first?
 
 - Is the database slow?
 - Is a specific endpoint causing issues?
 - Are certain users affected more than others?
 - Did the problem start after a recent deployment?
 
-Without observability, you are flying blind.
+Without observability, you mostly guess. You inspect logs, check dashboards, restart things, and hope the signal is somewhere nearby.
 
 ## The Three Pillars
 
-Observability rests on three types of telemetry:
+Most observability systems work with three kinds of telemetry:
 
 ### Metrics
 
@@ -26,28 +26,28 @@ Metrics are numeric measurements over time. They answer "how much" and "how many
 - How many active connections?
 - What percentage of requests fail?
 
-Metrics are lightweight. You can collect thousands of metrics with minimal overhead.
+Metrics are compact and cheap to collect, which makes them a good fit for dashboards and alerts.
 
 ### Traces
 
-Traces follow a request through your system. They answer "what happened" questions:
+Traces follow one request, job, or workflow through your system. They answer "what happened to this specific thing?" questions:
 
 - Which services did this request touch?
 - Where did it spend the most time?
 - What data did it process?
 - Where did it fail?
 
-Each trace contains spans representing units of work. Spans form a tree showing the request's path.
+Each trace contains spans, and each span represents one unit of work. Together they form a tree that shows where the request went and where it spent time.
 
 ### Logs
 
-Logs are timestamped records of events. They provide detailed context:
+Logs are timestamped records of events. They are where you keep detailed, human-readable context:
 
 - What values did the function receive?
 - What error message was returned?
 - What decisions did the code make?
 
-Logs become powerful when correlated with traces, letting you find the exact log lines for a problematic request.
+Logs are much easier to use when they are correlated with traces. Instead of searching around a timestamp, you can jump straight to the log lines for one failing request.
 
 ## When to Use Each
 
@@ -71,7 +71,7 @@ Logs become powerful when correlated with traces, letting you find the exact log
 
 ## Why instrument?
 
-The `instrument` library gives you all three pillars in one package:
+The `instrument` library gives you metrics, traces, and log correlation in one Erlang package:
 
 ```erlang
 %% Metrics
@@ -91,12 +91,12 @@ logger:info("Processing user ~s", [UserId]).  %% Includes trace_id
 
 ## The Cost of Not Observing
 
-Without observability:
+When a system is not observable:
 
 - Debugging takes hours instead of minutes
-- You can't prove whether fixes work
-- You react to problems instead of preventing them
-- You can't understand your system's behavior
+- You cannot prove whether a fix worked
+- You react to problems after users notice them
+- You build an inaccurate mental model of how the system behaves
 
 ## What You Will Build
 
@@ -107,4 +107,4 @@ By the end of this book, you will have instrumented an Erlang application with:
 - Correlated logs
 - Export to Prometheus and Jaeger
 
-Let's start by creating your first metrics.
+The first step is metrics, because they give you a fast, low-cost view of what the system is doing.
