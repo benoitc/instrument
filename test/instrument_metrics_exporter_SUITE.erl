@@ -41,7 +41,9 @@
   %% OTLP scope config test
   otlp_scope_config_test/1,
   %% OTLP temporality test (OTel spec compliance)
-  otlp_temporality_export_test/1
+  otlp_temporality_export_test/1,
+  %% Console exporter file output (regression for io_device unwrap bug)
+  console_exporter_file_output_test/1
 ]).
 
 -include_lib("stdlib/include/assert.hrl").
@@ -75,7 +77,9 @@ all() ->
     %% OTLP scope config test
     otlp_scope_config_test,
     %% OTLP temporality test (OTel spec compliance)
-    otlp_temporality_export_test
+    otlp_temporality_export_test,
+    %% Console exporter file output (regression for io_device unwrap bug)
+    console_exporter_file_output_test
   ].
 
 init_per_suite(Config) ->
@@ -626,4 +630,28 @@ otlp_temporality_export_test(_Config) ->
   %% Cleanup
   ok = instrument_meter:unregister_instrument(<<"delta_temp_counter">>),
   ok = instrument_meter:unregister_instrument(<<"cumulative_temp_counter">>),
+  ok.
+
+console_exporter_file_output_test(_Config) ->
+  %% Regression: exporter_export/2 used to pass the {file, Fd} wrapper
+  %% straight to io:put_chars/2, which crashed. Verify file output now
+  %% lands on disk through the full exporter callback contract.
+  Path = "/tmp/instrument_metrics_console_export_test.log",
+  _ = file:delete(Path),
+  {ok, State} = instrument_metrics_exporter_console:exporter_init(
+                  #{format => text, output => {file, Path}}),
+  Metric = #{
+    name => <<"my_counter">>,
+    type => counter,
+    description => <<"test">>,
+    data_points => [#{attributes => #{<<"k">> => <<"v">>},
+                      value => 42,
+                      timestamp => erlang:system_time(nanosecond)}]
+  },
+  {ok, _} = instrument_metrics_exporter_console:exporter_export([Metric], State),
+  ok = instrument_metrics_exporter_console:exporter_shutdown(State),
+  {ok, Bin} = file:read_file(Path),
+  ?assert(byte_size(Bin) > 0),
+  ?assertNotEqual(nomatch, binary:match(Bin, <<"my_counter">>)),
+  _ = file:delete(Path),
   ok.
