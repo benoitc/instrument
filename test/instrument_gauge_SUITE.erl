@@ -26,7 +26,8 @@
   gauge_facade_api/1,
   gauge_by_name/1,
   gauge_concurrent/1,
-  gauge_high_concurrency/1
+  gauge_high_concurrency/1,
+  set_gauge_to_current_time_test/1
 ]).
 
 
@@ -39,7 +40,8 @@ all() ->
     gauge_facade_api,
     gauge_by_name,
     gauge_concurrent,
-    gauge_high_concurrency
+    gauge_high_concurrency,
+    set_gauge_to_current_time_test
   ].
 
 
@@ -158,6 +160,18 @@ gauge_high_concurrency(_Config) ->
   NumProcesses = length([ok || {ok, ok} <- Results]),
   Expected = float(NumProcesses * OpsPerProcess),
   Expected = instrument_metric:get_gauge(G),
+  ok.
+
+set_gauge_to_current_time_test(_Config) ->
+  G = instrument_metric:new_gauge(uptime_gauge, "current monotonic time"),
+  Before = erlang:monotonic_time(second),
+  ok = instrument_metric:set_gauge_to_current_time(G),
+  After = erlang:monotonic_time(second),
+  Got = instrument_metric:get_gauge(G),
+  true = is_float(Got),
+  %% Got is a second-resolution monotonic timestamp, in [Before, After]
+  true = Got >= float(Before),
+  true = Got =< float(After),
   ok.
 
 %% ==============

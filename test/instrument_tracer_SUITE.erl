@@ -41,7 +41,9 @@
   span_event_limit_test/1,
   span_link_limit_test/1,
   span_initial_limits_test/1,
-  span_dropped_counts_in_export_test/1
+  span_dropped_counts_in_export_test/1,
+  record_exception_test/1,
+  update_name_test/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -75,7 +77,9 @@ all() ->
     span_event_limit_test,
     span_link_limit_test,
     span_initial_limits_test,
-    span_dropped_counts_in_export_test
+    span_dropped_counts_in_export_test,
+    record_exception_test,
+    update_name_test
   ].
 
 init_per_suite(Config) ->
@@ -859,5 +863,63 @@ span_dropped_counts_in_export_test(_Config) ->
       false -> os:unsetenv("OTEL_SPAN_EVENT_COUNT_LIMIT");
       _ -> os:putenv("OTEL_SPAN_EVENT_COUNT_LIMIT", OldLimit)
     end
+  end,
+  ok.
+
+record_exception_test(_Config) ->
+  Self = self(),
+  Exporter = fun(Span) -> Self ! {exported, Span} end,
+  ok = instrument_tracer:register_exporter(Exporter),
+  try
+    instrument_tracer:with_span(<<"work">>, fun() ->
+      instrument_tracer:record_exception(badarg),
+      instrument_tracer:record_exception({not_found, missing_thing},
+                                         #{<<"http.status_code">> => 404}),
+      instrument_tracer:record_exception(badarith,
+                                         #{stacktrace => [{m, f, 1, []}]})
+    end),
+    receive
+      {exported, Span} ->
+        Events = Span#span.events,
+        ?assertEqual(3, length(Events)),
+        lists:foreach(fun(#span_event{name = N}) ->
+          ?assertEqual(<<"exception">>, N)
+        end, Events),
+        %% Spot-check attributes on the second event ({not_found, ...})
+        E2 = lists:nth(2, Events),
+        Attrs = E2#span_event.attributes,
+        ?assertEqual(<<"not_found">>, maps:get(<<"exception.type">>, Attrs)),
+        ?assert(maps:is_key(<<"exception.message">>, Attrs)),
+        ?assertEqual(404, maps:get(<<"http.status_code">>, Attrs)),
+        %% Third event has a stacktrace, folded into exception.stacktrace
+        E3 = lists:nth(3, Events),
+        StackAttrs = E3#span_event.attributes,
+        ?assertNotEqual(<<>>, maps:get(<<"exception.stacktrace">>, StackAttrs))
+    after 1000 ->
+      ct:fail(timeout_waiting_for_export)
+    end
+  after
+    ok = instrument_tracer:unregister_exporter(Exporter)
+  end,
+  ok.
+
+update_name_test(_Config) ->
+  Self = self(),
+  Exporter = fun(Span) -> Self ! {exported, Span} end,
+  ok = instrument_tracer:register_exporter(Exporter),
+  try
+    instrument_tracer:with_span(<<"original_name">>, fun() ->
+      ok = instrument_tracer:update_name(<<"renamed">>),
+      Cur = instrument_tracer:current_span(),
+      ?assertEqual(<<"renamed">>, Cur#span.name)
+    end),
+    receive
+      {exported, Span} ->
+        ?assertEqual(<<"renamed">>, Span#span.name)
+    after 1000 ->
+      ct:fail(timeout_waiting_for_export)
+    end
+  after
+    ok = instrument_tracer:unregister_exporter(Exporter)
   end,
   ok.

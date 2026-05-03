@@ -27,7 +27,9 @@
   baggage_operations/1,
   baggage_encode_decode/1,
   propagation_spawn/1,
-  propagation_inject_extract/1
+  propagation_inject_extract/1,
+  remove_value_test/1,
+  spawn_link_with_context_test/1
 ]).
 
 all() ->
@@ -44,7 +46,9 @@ all() ->
     baggage_operations,
     baggage_encode_decode,
     propagation_spawn,
-    propagation_inject_extract
+    propagation_inject_extract,
+    remove_value_test,
+    spawn_link_with_context_test
   ].
 
 init_per_suite(Config) ->
@@ -363,4 +367,40 @@ propagation_inject_extract(_Config) ->
 
   %% Clean up
   instrument_tracer:end_span(),
+  ok.
+
+remove_value_test(_Config) ->
+  Ctx = instrument_context:set_value(instrument_context:new(), foo, bar),
+  Ctx1 = instrument_context:set_value(Ctx, baz, qux),
+  bar = instrument_context:get_value(Ctx1, foo),
+  qux = instrument_context:get_value(Ctx1, baz),
+  Ctx2 = instrument_context:remove_value(Ctx1, foo),
+  undefined = instrument_context:get_value(Ctx2, foo),
+  qux = instrument_context:get_value(Ctx2, baz),
+  %% Removing absent key is a no-op
+  Ctx3 = instrument_context:remove_value(Ctx2, foo),
+  undefined = instrument_context:get_value(Ctx3, foo),
+  ok.
+
+spawn_link_with_context_test(_Config) ->
+  Ctx = instrument_context:set_value(instrument_context:new(), my_key, my_val),
+  Token = instrument_context:attach(Ctx),
+  try
+    Self = self(),
+    Pid = instrument_context:spawn_link_with_context(fun() ->
+      Got = instrument_context:get_value(instrument_context:current(), my_key),
+      Self ! {child_saw, Got}
+    end),
+    receive
+      {child_saw, my_val} -> ok
+    after 1000 ->
+      ct:fail(timeout)
+    end,
+    %% Wait for the linked process to exit cleanly so we don't get an EXIT
+    process_flag(trap_exit, true),
+    receive {'EXIT', Pid, _} -> ok after 1000 -> ok end,
+    process_flag(trap_exit, false)
+  after
+    instrument_context:detach(Token)
+  end,
   ok.

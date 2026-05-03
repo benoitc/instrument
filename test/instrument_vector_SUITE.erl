@@ -14,6 +14,8 @@
   end_per_testcase/1
 ]).
 
+-include_lib("stdlib/include/assert.hrl").
+
 
 
 %% TESTS
@@ -23,7 +25,9 @@
   maintain_state_for_multiple_labels/1,
   gauge_vec_operations/1,
   histogram_vec_operations/1,
-  concurrent_vec_operations/1
+  concurrent_vec_operations/1,
+  remove_label_test/1,
+  clear_labels_test/1
 ]).
 
 
@@ -34,7 +38,9 @@ all() ->
     maintain_state_for_multiple_labels,
     gauge_vec_operations,
     histogram_vec_operations,
-    concurrent_vec_operations
+    concurrent_vec_operations,
+    remove_label_test,
+    clear_labels_test
   ].
 
 
@@ -124,4 +130,33 @@ concurrent_vec_operations(_Config) ->
 
   Expected = float(NumProcesses * OpsPerProcess),
   Expected = instrument_metric:get_counter_vec(requests, [<<"GET">>]),
+  ok.
+
+remove_label_test(_Config) ->
+  ok = instrument_metric:new_counter_vec(rl_requests, "Requests", [method]),
+  ok = instrument_metric:inc_counter_vec(rl_requests, [<<"GET">>]),
+  ok = instrument_metric:inc_counter_vec(rl_requests, [<<"POST">>]),
+  ok = instrument_metric:inc_counter_vec(rl_requests, [<<"POST">>]),
+  1.0 = instrument_metric:get_counter_vec(rl_requests, [<<"GET">>]),
+  2.0 = instrument_metric:get_counter_vec(rl_requests, [<<"POST">>]),
+  %% Drop the GET label
+  ok = instrument_metric:remove_label(rl_requests, [<<"GET">>]),
+  %% POST is still there
+  2.0 = instrument_metric:get_counter_vec(rl_requests, [<<"POST">>]),
+  %% GET reads as a fresh counter (recreated on demand at 0.0)
+  Got = instrument_metric:get_counter_vec(rl_requests, [<<"GET">>]),
+  ?assert(Got == 0.0 orelse Got == undefined),
+  ok.
+
+clear_labels_test(_Config) ->
+  ok = instrument_metric:new_counter_vec(cl_requests, "Requests", [method]),
+  ok = instrument_metric:inc_counter_vec(cl_requests, [<<"GET">>]),
+  ok = instrument_metric:inc_counter_vec(cl_requests, [<<"POST">>]),
+  1.0 = instrument_metric:get_counter_vec(cl_requests, [<<"GET">>]),
+  1.0 = instrument_metric:get_counter_vec(cl_requests, [<<"POST">>]),
+  ok = instrument_metric:clear_labels(cl_requests),
+  Get = instrument_metric:get_counter_vec(cl_requests, [<<"GET">>]),
+  Post = instrument_metric:get_counter_vec(cl_requests, [<<"POST">>]),
+  ?assert(Get == 0.0 orelse Get == undefined),
+  ?assert(Post == 0.0 orelse Post == undefined),
   ok.

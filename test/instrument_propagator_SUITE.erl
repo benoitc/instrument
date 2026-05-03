@@ -34,7 +34,13 @@
   missing_headers_test/1,
   tracestate_limit_test/1,
   cross_service_roundtrip_test/1,
-  concurrent_propagation_test/1
+  concurrent_propagation_test/1,
+  %% Doc-API coverage
+  inject_headers_test/1,
+  extract_headers_test/1,
+  extract_headers_string_keys_test/1,
+  call_with_context_test/1,
+  cast_with_context_test/1
 ]).
 
 all() ->
@@ -54,7 +60,13 @@ all() ->
     missing_headers_test,
     tracestate_limit_test,
     cross_service_roundtrip_test,
-    concurrent_propagation_test
+    concurrent_propagation_test,
+    %% Doc-API coverage
+    inject_headers_test,
+    extract_headers_test,
+    extract_headers_string_keys_test,
+    call_with_context_test,
+    cast_with_context_test
   ].
 
 init_per_suite(Config) ->
@@ -430,4 +442,99 @@ concurrent_propagation_test(_Config) ->
 
   %% All should match
   ?assert(lists:all(fun(R) -> R =:= true end, Results)),
+  ok.
+
+%% ============================================================================
+%% Doc-API coverage: instrument_propagation
+%% ============================================================================
+
+inject_headers_test(_Config) ->
+  TraceId = instrument_id:generate_trace_id(),
+  SpanId = instrument_id:generate_span_id(),
+  SpanCtx = #span_ctx{
+    trace_id = TraceId,
+    span_id = SpanId,
+    trace_flags = 1,
+    trace_state = [],
+    is_remote = false
+  },
+  Ctx = instrument_context:set_value(instrument_context:new(), span_ctx, SpanCtx),
+  Headers = instrument_propagation:inject_headers(Ctx),
+  ?assert(is_list(Headers)),
+  ?assertNotEqual(undefined, lists:keyfind(<<"traceparent">>, 1, Headers)),
+  {<<"traceparent">>, TP} = lists:keyfind(<<"traceparent">>, 1, Headers),
+  ?assertMatch(<<"00-", _:256/bitstring, "-", _:128/bitstring, "-01">>, TP),
+  ok.
+
+extract_headers_test(_Config) ->
+  Headers = [
+    {<<"traceparent">>,
+      <<"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01">>}
+  ],
+  Ctx = instrument_propagation:extract_headers(Headers),
+  SpanCtx = instrument_context:get_value(Ctx, span_ctx),
+  ?assertNotEqual(undefined, SpanCtx),
+  ?assertEqual(instrument_id:hex_to_trace_id(<<"0af7651916cd43dd8448eb211c80319c">>),
+               SpanCtx#span_ctx.trace_id),
+  ?assertEqual(instrument_id:hex_to_span_id(<<"b7ad6b7169203331">>),
+               SpanCtx#span_ctx.span_id),
+  ?assertEqual(true, SpanCtx#span_ctx.is_remote),
+  ok.
+
+extract_headers_string_keys_test(_Config) ->
+  %% Header keys often come from HTTP libs as strings/atoms with mixed case.
+  %% extract_headers/1 normalises to lowercase binary.
+  Headers = [
+    {"Traceparent",
+      "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+    {<<"BAGGAGE">>, <<"key1=v1">>}
+  ],
+  Ctx = instrument_propagation:extract_headers(Headers),
+  SpanCtx = instrument_context:get_value(Ctx, span_ctx),
+  ?assertNotEqual(undefined, SpanCtx),
+  ok.
+
+call_with_context_test(_Config) ->
+  %% Start a tiny gen_server that unwraps {'$instrument_call', Ctx, Req}
+  %% and replies with the trace_id it sees in the context.
+  {ok, Pid} = ctx_echo_server:start_link(),
+  try
+    %% Without a span, ctx is empty; server sees no span_ctx.
+    R0 = instrument_propagation:call_with_context(Pid, who_am_i),
+    ?assertEqual(no_span, R0),
+
+    %% With a span, the server should see the span_ctx.
+    instrument_tracer:with_span(<<"caller">>, fun() ->
+      ExpectedTraceId = instrument_tracer:trace_id(),
+      R1 = instrument_propagation:call_with_context(Pid, who_am_i),
+      ?assertMatch({trace_id, _}, R1),
+      {trace_id, GotHex} = R1,
+      ?assertEqual(ExpectedTraceId, GotHex),
+
+      %% /3 form with explicit timeout
+      R2 = instrument_propagation:call_with_context(Pid, who_am_i, 5000),
+      ?assertMatch({trace_id, _}, R2)
+    end)
+  after
+    gen_server:stop(Pid)
+  end,
+  ok.
+
+cast_with_context_test(_Config) ->
+  {ok, Pid} = ctx_echo_server:start_link(),
+  try
+    Self = self(),
+    instrument_tracer:with_span(<<"caster">>, fun() ->
+      ExpectedTraceId = instrument_tracer:trace_id(),
+      ok = instrument_propagation:cast_with_context(Pid, {report_to, Self}),
+      receive
+        {ctx_seen, GotHex} ->
+          ?assertEqual(ExpectedTraceId, GotHex)
+      after 2000 ->
+          ct:fail(no_cast_response)
+      end
+    end)
+  after
+    gen_server:stop(Pid)
+  end,
   ok.

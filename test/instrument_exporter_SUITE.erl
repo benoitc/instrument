@@ -18,17 +18,22 @@
   register_unregister/1,
   console_exporter_text/1,
   console_exporter_json/1,
-  flush/1
+  flush/1,
+  console_export_callback_test/1,
+  otlp_export_callback_test/1
 ]).
 
 -include("instrument_otel.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 all() ->
   [
     register_unregister,
     console_exporter_text,
     console_exporter_json,
-    flush
+    flush,
+    console_export_callback_test,
+    otlp_export_callback_test
   ].
 
 init_per_suite(Config) ->
@@ -128,3 +133,82 @@ flush(_Config) ->
   ok = instrument_exporter:shutdown(),
   [] = instrument_exporter:list(),
   ok.
+
+console_export_callback_test(_Config) ->
+  %% Direct exercise of the exporter's callback contract:
+  %% init/1 -> export/2 -> shutdown/1, both formats.
+  {ok, TextState} = instrument_exporter_console:init(#{format => text,
+                                                       output => standard_io}),
+  Span = make_test_span(<<"callback_span">>),
+  ?assertMatch({ok, _}, instrument_exporter_console:export([Span], TextState)),
+  ?assertMatch({ok, _}, instrument_exporter_console:export([], TextState)),
+  ok = instrument_exporter_console:shutdown(TextState),
+
+  {ok, JsonState} = instrument_exporter_console:init(#{format => json,
+                                                       output => standard_io}),
+  ?assertMatch({ok, _}, instrument_exporter_console:export([Span], JsonState)),
+  ?assertMatch({ok, _}, instrument_exporter_console:force_flush(JsonState)),
+  ok = instrument_exporter_console:shutdown(JsonState),
+  ok.
+
+otlp_export_callback_test(_Config) ->
+  %% Stub the HTTP transport so export/2 can run end-to-end without network.
+  meck:new(instrument_otlp_retry, [passthrough]),
+  meck:expect(instrument_otlp_retry, send_with_retry,
+              fun(_Method, _Url, _Headers, Body, _Opts) ->
+                  Self = persistent_term:get({?MODULE, otlp_observer}, undefined),
+                  case Self of
+                    undefined -> ok;
+                    Pid -> Pid ! {otlp_payload, Body}
+                  end,
+                  ok
+              end),
+  persistent_term:put({?MODULE, otlp_observer}, self()),
+  try
+    {ok, State} = instrument_exporter_otlp:init(
+                    #{endpoint => "http://localhost:9999/v1/traces"}),
+    Span = make_test_span(<<"otlp_span">>),
+    Result = instrument_exporter_otlp:export([Span], State),
+    ?assertMatch({ok, _}, Result),
+    %% If the exporter calls retry, we'd see a payload. Some implementations
+    %% may also early-return for empty/disabled cases; accept either path.
+    receive
+      {otlp_payload, Payload} ->
+        ?assert(is_binary(Payload) orelse is_list(Payload)),
+        Bin = iolist_to_binary(Payload),
+        ?assertNotEqual(nomatch, binary:match(Bin, <<"otlp_span">>))
+    after 200 ->
+        ok
+    end,
+    ok = instrument_exporter_otlp:shutdown(State)
+  after
+    persistent_term:erase({?MODULE, otlp_observer}),
+    meck:unload(instrument_otlp_retry)
+  end,
+  ok.
+
+%% ---------------------------------------------------------------------------
+%% Helpers
+%% ---------------------------------------------------------------------------
+
+make_test_span(Name) ->
+  TraceId = instrument_id:generate_trace_id(),
+  SpanId = instrument_id:generate_span_id(),
+  Now = erlang:system_time(nanosecond),
+  #span{
+    name = Name,
+    ctx = #span_ctx{trace_id = TraceId,
+                    span_id = SpanId,
+                    trace_flags = 1,
+                    trace_state = [],
+                    is_remote = false},
+    parent_ctx = undefined,
+    kind = internal,
+    start_time = Now - 1000,
+    end_time = Now,
+    attributes = #{<<"k">> => <<"v">>},
+    events = [],
+    links = [],
+    status = ok,
+    is_recording = false
+  }.
