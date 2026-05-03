@@ -1,6 +1,6 @@
 # Appendix B: Troubleshooting
 
-Common problems and their solutions.
+Use this appendix when telemetry is missing, incomplete, or too expensive. Most problems come from one of four places: configuration, propagation, exporter connectivity, or cardinality.
 
 ## Traces Not Appearing
 
@@ -290,7 +290,7 @@ handle_call({'$instrument_call', Ctx, Request}, From, State) ->
 
 ### "Metric not found"
 
-The metric was not created before use:
+The metric was used before it was created:
 
 ```erlang
 %% Error: using before creating
@@ -303,7 +303,7 @@ instrument_metric:inc_counter(my_counter).
 
 ### "Invalid operation"
 
-Wrong operation for metric type:
+The operation does not match the metric type:
 
 ```erlang
 %% Error: histogram doesn't support inc
@@ -315,7 +315,7 @@ instrument_metric:observe_histogram(my_histogram, Value).
 
 ### "Connection refused" (OTLP)
 
-Backend not running or wrong endpoint:
+The backend is not running, or the endpoint points to the wrong place:
 
 ```bash
 # Check if Jaeger/collector is running

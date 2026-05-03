@@ -1,6 +1,6 @@
 # Appendix A: Quick Reference
 
-A cheat sheet for common operations.
+Use this appendix as a quick reminder of the common calls. The chapters explain the tradeoffs; this section is for when you already know what you need.
 
 ## Metrics Quick Reference
 

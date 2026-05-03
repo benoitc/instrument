@@ -1,6 +1,6 @@
 # Putting It All Together
 
-This chapter brings together everything you have learned to build a complete instrumented service.
+This chapter brings the pieces together in one service. The goal is to show how metrics, traces, logs, propagation, export, and sampling fit into ordinary application code.
 
 ## The Application
 
@@ -500,9 +500,9 @@ open http://localhost:16686
 
 ## What You Built
 
-You now have a service with:
+You now have a service that includes:
 
-- Request tracing across HTTP and database calls
+- Request tracing across HTTP, database, and payment calls
 - Distributed trace propagation to external services
 - Metrics for requests, latencies, and business events
 - Correlated logs with trace context
@@ -517,4 +517,4 @@ You now have a service with:
 - Create dashboards in Grafana
 - Add SLO monitoring
 
-Congratulations on completing this handbook!
+You now have the core patterns you need to instrument real Erlang services. From here, the work is mostly about choosing the right measurements for your own domain.

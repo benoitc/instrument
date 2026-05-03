@@ -1,20 +1,20 @@
 # Adding Dimensions with Labels
 
-Plain metrics answer simple questions. Labels let you slice and dice your data by dimensions.
+Plain metrics answer simple questions. Labels make those questions more useful by letting you break the data down by dimensions such as method, status, endpoint, pool, or operation.
 
 ## The Problem
 
-A counter tells you there were 1,000 requests. But you need to know:
+A counter can tell you there were 1,000 requests. In practice, that is rarely enough. You usually also need to know:
 
 - How many were GET vs POST?
 - How many returned 200 vs 500?
 - Which endpoints are busiest?
 
-Labels add these dimensions to your metrics.
+Labels add those dimensions without forcing you to create a separate metric for every case.
 
 ## The Vec API
 
-The "Vec" (vector) API creates metrics with label dimensions:
+The "Vec" (vector) API creates metrics that carry label dimensions:
 
 ```erlang
 %% Create a counter with labels
@@ -25,7 +25,7 @@ instrument_metric:new_counter_vec(
 ).
 ```
 
-The third argument is a list of label names. Each measurement includes values for these labels.
+The third argument is the list of label names. Every measurement then provides values for those labels, in the same order.
 
 ## Using Labeled Metrics
 
@@ -75,7 +75,7 @@ instrument_metric:observe_histogram_vec(db_query_duration_seconds, [<<"UPDATE">>
 
 ## The labels/2 Function
 
-For repeated operations, get a reference to a specific label combination:
+If you update the same label combination repeatedly, get a handle for it once:
 
 ```erlang
 %% Get a metric handle for specific labels
@@ -86,11 +86,11 @@ instrument_metric:inc_counter(Metric).
 instrument_metric:inc_counter(Metric, 5).
 ```
 
-This is more efficient when you will update the same combination multiple times.
+That avoids repeating the label lookup on every update.
 
 ## Cardinality: The Hidden Cost
 
-Every unique combination of label values creates a new time series. This is called cardinality.
+Every unique combination of label values creates a new time series. This is called cardinality, and it is the main cost of labeled metrics.
 
 ```erlang
 %% Labels: method (3 values) x status (5 values) = 15 combinations
@@ -131,7 +131,7 @@ instrument_metric:inc_counter_vec(requests, [<<"/users/{id}">>]).
 
 ## Removing Labels
 
-You can remove specific label combinations or clear all:
+You can remove specific label combinations, or clear all values for a metric:
 
 ```erlang
 %% Remove a specific combination
@@ -141,7 +141,7 @@ instrument_metric:remove_label(http_requests_total, [<<"DELETE">>, <<"200">>]).
 instrument_metric:clear_labels(http_requests_total).
 ```
 
-This is useful for:
+This is useful when you need to:
 - Cleaning up after tests
 - Removing discontinued endpoints
 - Managing memory in long-running systems
@@ -165,11 +165,11 @@ instrument_meter:add(Counter, 1, #{method => <<"GET">>, status => 200}).
 instrument_meter:add(Counter, 1, #{method => <<"POST">>, status => 201}).
 ```
 
-The OTel API uses maps for attributes instead of ordered lists for labels.
+The OTel API uses maps for attributes instead of ordered lists of label values. That is easier to read at call sites, especially when a metric has several dimensions.
 
 ## Practical Example
 
-Instrument a connection pool:
+Here is a connection pool example with labels for the pool name, operation, and connection state:
 
 ```erlang
 -module(pool_metrics).
@@ -223,8 +223,8 @@ Extend your cache module from the previous chapter:
 2. Add an `operation` label (get, set, delete)
 3. Track hit rate by cache name
 
-Consider: What labels would cause cardinality problems?
+Before you add a label, ask whether its possible values are bounded. A cache name is usually fine. A cache key is not.
 
 ## Next Steps
 
-You now know how to create dimensional metrics. In the next chapter, you will learn about distributed tracing and how traces complement metrics.
+You now know how to create dimensional metrics. Next, we will switch from aggregate behavior to individual requests by introducing traces.

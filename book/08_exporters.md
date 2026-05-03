@@ -1,10 +1,10 @@
 # Getting Data Out
 
-Telemetry is only useful when you can view and analyze it. This chapter covers exporting to various backends.
+Telemetry only becomes useful once you can look at it, query it, and connect it back to real behavior in your system. This chapter covers the export paths you will use most often.
 
 ## Export Destinations
 
-The `instrument` library supports multiple export formats:
+The `instrument` library supports several export formats:
 
 | Exporter | Format | Best For |
 |----------|--------|----------|
@@ -14,7 +14,7 @@ The `instrument` library supports multiple export formats:
 
 ## Console Export
 
-The console exporter prints telemetry to stdout. It's useful for development.
+The console exporter prints telemetry to stdout. It is a quick way to verify that spans, metrics, or logs are being produced before you configure a full backend.
 
 ### Spans
 
@@ -47,7 +47,7 @@ instrument_logger:install(#{exporter => true}).
 
 ## OTLP Export
 
-OTLP (OpenTelemetry Protocol) is the standard format for sending telemetry to backends like Jaeger, Grafana Tempo, and Honeycomb.
+OTLP, the OpenTelemetry Protocol, is the standard format for sending telemetry to backends such as Jaeger, Grafana Tempo, and Honeycomb.
 
 ### Configuration
 
@@ -100,7 +100,7 @@ instrument_logger:install(#{exporter => true}).
 
 ## Prometheus Export
 
-Prometheus pulls metrics by scraping an HTTP endpoint.
+Prometheus pulls metrics by scraping an HTTP endpoint exposed by your application.
 
 ### Setting Up the Endpoint
 
@@ -127,7 +127,7 @@ scrape_configs:
 
 ### Metric Naming for Prometheus
 
-Prometheus has naming conventions:
+Prometheus metric names should be stable and easy to query:
 
 ```erlang
 %% Good names
@@ -142,7 +142,7 @@ instrument_metric:new_histogram(http_request_duration_seconds, <<"Request durati
 
 ## Jaeger Setup
 
-Jaeger accepts OTLP traces. Quick setup with Docker:
+Jaeger accepts OTLP traces. For local development, you can start it with Docker:
 
 ```bash
 docker run -d --name jaeger \
@@ -163,7 +163,7 @@ View traces at `http://localhost:16686`.
 
 ## Batch Processing
 
-For production, use the batch processor to reduce overhead:
+In production, use the batch processor to reduce request-path overhead:
 
 ```erlang
 %% Configure batch span processor
@@ -186,7 +186,7 @@ Batch processing:
 
 ## Resource Configuration
 
-Resources identify your service:
+Resources identify the service that produced the telemetry:
 
 ```erlang
 %% Via environment
@@ -262,7 +262,7 @@ init() ->
 
 ## Graceful Shutdown
 
-Ensure all telemetry is exported before shutdown:
+Flush pending telemetry before shutdown:
 
 ```erlang
 %% In your application stop callback
@@ -284,8 +284,8 @@ Set up a complete observability stack:
 3. Set up Prometheus metrics endpoint
 4. Verify data appears in both backends
 
-Generate some traffic and explore the UIs.
+Generate traffic, then confirm that traces and metrics appear where you expect.
 
 ## Next Steps
 
-Your telemetry is now flowing to backends. In the next chapter, you will learn how to control costs through sampling.
+Your telemetry is now flowing to backends. Next, we will control trace volume and cost with sampling.
