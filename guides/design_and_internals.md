@@ -69,7 +69,7 @@ The supervisor (`instrument_sup`) starts these children with `one_for_all` strat
 | Metrics | `instrument_counter`, `instrument_gauge`, `instrument_histogram` | Metric types |
 | Context | `instrument_context`, `instrument_propagator`, `instrument_propagator_*` | Context propagation |
 | Processing | `instrument_span_processor`, `instrument_span_processor_*`, `instrument_exporter` | Span processing pipeline |
-| Flight Recorder | `instrument_flight_recorder`, `instrument_tracer_pool`, `instrument_tracer_nif` | Message capture |
+| Flight Recorder | `instrument_flight_recorder`, `instrument_tracer_pool`, `instrument_tracer_nif` | Message/process tracing via `erl_tracer` NIF (not used by the span hot path) |
 | Registry | `instrument_registry`, `instrument_lib` | Metric storage |
 
 ### Module Dependencies
@@ -94,7 +94,7 @@ instrument_tracer
 
 **instrument_exporter**: Batches completed spans and distributes them to registered exporters. Default batch size is 512 spans with a 5-second timeout.
 
-**instrument_flight_recorder**: Low-overhead message tracing using `erlang:trace` with a custom erl_tracer NIF. Distributes trace events across a worker pool to avoid single-process bottlenecks.
+**instrument_flight_recorder**: Low-overhead message tracing using `erlang:trace` with a custom erl_tracer NIF. Distributes trace events across a worker pool to avoid single-process bottlenecks. The NIF (`instrument_tracer_nif`) implements BEAM `erl_tracer` callbacks (`enabled/3`, `trace/5`, plus the specialised variants) and is invoked by the VM, not by user code. It is not in the `start_span`/`end_span` path and cannot be reused to accelerate span operations; see [Span Export Path](#span-export-path) for how spans actually reach exporters.
 
 ## Key Data Structures
 
@@ -249,6 +249,27 @@ end_span(Span)
     v
 Return ok
 ```
+
+### Span Export Path
+
+The Span End Flow above shows two exit doors. Following each one to OTLP:
+
+**1. Span processor chain (batched, async).** `instrument_tracer:end_span/1` (`src/instrument_tracer.erl:370`) calls `instrument_span_processor:on_end_inline/1`, which reads the cached processor list from `persistent_term` and invokes `Module:on_end(Span)` on each. With the batch processor registered, that cast queues the span; a worker spawned from the batch processor's gen_server later calls `Exporter:export(OrderedSpans, State)` (`src/processors/instrument_span_processor_batch.erl:476`). For OTLP that becomes a JSON-encoded HTTP POST to the configured endpoint, with retry handling in `instrument_otlp_retry`.
+
+**2. Direct exporter hooks (synchronous, sampled spans only).** `instrument_tracer:export_span/1` reads exporter funs registered via `instrument_tracer:register_exporter/1` from `persistent_term` and runs them inline on the span-ending process. This path only fires when `trace_flags = 1` (sampled).
+
+Call chain for the batched OTLP path:
+
+```
+instrument_tracer:end_span/1                     (src/instrument_tracer.erl:370)
+    -> instrument_span_processor:on_end_inline/1
+    -> instrument_span_processor_batch:on_end/1
+    -> gen_server cast, batched
+    -> instrument_exporter_otlp:export/2         (src/exporters/instrument_exporter_otlp.erl:104)
+    -> instrument_otlp_retry over HTTP POST
+```
+
+**Default state: nothing leaves the VM.** No processor or exporter is registered out of the box. Spans complete, `on_end_inline` finds an empty processor list, and the data is discarded. To export traces, register a processor (typically the batch processor) configured with the OTLP exporter, or set the OTLP env vars that `instrument_config` auto-wires (`src/instrument_config.erl:573`, `:644`). Non-recording spans (sampler decision = `drop`) short-circuit before the export path entirely; only spans with `trace_flags = 1` reach the direct `register_exporter/1` hooks.
 
 ### Metrics Recording Flow
 
