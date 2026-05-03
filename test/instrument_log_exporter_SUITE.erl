@@ -27,10 +27,13 @@
   otlp_exporter_init/1,
   batch_export/1,
   flush/1,
-  logger_handler_integration/1
+  logger_handler_integration/1,
+  add_trace_context_test/1,
+  emit_test/1
 ]).
 
 -include("instrument_otel.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 all() ->
   [
@@ -46,7 +49,9 @@ all() ->
     otlp_exporter_init,
     batch_export,
     flush,
-    logger_handler_integration
+    logger_handler_integration,
+    add_trace_context_test,
+    emit_test
   ].
 
 init_per_suite(Config) ->
@@ -453,3 +458,86 @@ logger_handler_integration(_Config) ->
   %% Flush to ensure export
   ok = instrument_log_exporter:flush(),
   ok.
+
+add_trace_context_test(_Config) ->
+  %% No span: metadata is unchanged
+  M0 = instrument_logger:add_trace_context(#{foo => bar}),
+  ?assertEqual(#{foo => bar}, M0),
+  ?assertNot(maps:is_key(trace_id, M0)),
+
+  %% With a span: trace_id, span_id, trace_flags injected
+  instrument_tracer:with_span(<<"ctx_test">>, fun() ->
+    M1 = instrument_logger:add_trace_context(#{foo => bar}),
+    ?assert(maps:is_key(trace_id, M1)),
+    ?assert(maps:is_key(span_id, M1)),
+    ?assert(maps:is_key(trace_flags, M1)),
+    %% existing keys preserved
+    ?assertEqual(bar, maps:get(foo, M1)),
+    %% trace_id is hex-encoded
+    TraceIdHex = maps:get(trace_id, M1),
+    ?assertEqual(32, byte_size(TraceIdHex))
+  end),
+  ok.
+
+emit_test(_Config) ->
+  %% Capture logs by registering a synchronous custom log exporter that
+  %% deposits records into our mailbox. emit/1 and emit/2 should produce
+  %% log records that get exported via the registered logger handler.
+  Self = self(),
+  meck:new(emit_test_exporter, [non_strict]),
+  meck:expect(emit_test_exporter, exporter_init, fun(_) -> {ok, Self} end),
+  meck:expect(emit_test_exporter, exporter_export,
+              fun(LogRecords, S) ->
+                  S ! {log_records, LogRecords},
+                  {ok, S}
+              end),
+  meck:expect(emit_test_exporter, exporter_shutdown, fun(_) -> ok end),
+  meck:expect(emit_test_exporter, exporter_force_flush, fun(S) -> {ok, S} end),
+  ok = instrument_log_exporter:register(#{module => emit_test_exporter,
+                                          config => #{}}),
+  instrument_logger:install(#{exporter => true, level => debug}),
+  OldLevel = logger:get_primary_config(),
+  logger:set_primary_config(level, debug),
+  try
+    instrument_tracer:with_span(<<"emit_test_span">>, fun() ->
+      ok = instrument_logger:emit(<<"hello from emit/1">>),
+      ok = instrument_logger:emit(warning, <<"hello from emit/2">>)
+    end),
+    ok = instrument_log_exporter:flush(),
+    Bodies = collect_log_bodies(800),
+    ?assert(lists:any(fun(B) ->
+      binary:match(B, <<"hello from emit/1">>) =/= nomatch
+    end, Bodies)),
+    ?assert(lists:any(fun(B) ->
+      binary:match(B, <<"hello from emit/2">>) =/= nomatch
+    end, Bodies))
+  after
+    logger:set_primary_config(level, maps:get(level, OldLevel, info)),
+    instrument_logger:uninstall(),
+    instrument_log_exporter:unregister(emit_test_exporter),
+    meck:unload(emit_test_exporter)
+  end,
+  ok.
+
+%% Collect log bodies from log_records messages until the time budget is up.
+collect_log_bodies(TimeoutMs) ->
+  Deadline = erlang:monotonic_time(millisecond) + TimeoutMs,
+  collect_log_bodies(Deadline, []).
+
+collect_log_bodies(Deadline, Acc) ->
+  Remaining = Deadline - erlang:monotonic_time(millisecond),
+  case Remaining =< 0 of
+    true -> Acc;
+    false ->
+      receive
+        {log_records, Records} ->
+          NewBodies = [body_to_binary(R#log_record.body) || R <- Records],
+          collect_log_bodies(Deadline, Acc ++ NewBodies)
+      after Remaining ->
+        Acc
+      end
+  end.
+
+body_to_binary(B) when is_binary(B) -> B;
+body_to_binary(B) ->
+  iolist_to_binary(io_lib:format("~ts", [B])).

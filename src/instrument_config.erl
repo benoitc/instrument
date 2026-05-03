@@ -60,7 +60,16 @@
   %% Span limits (OTel spec defaults: 128 each)
   get_span_attribute_count_limit/0,
   get_span_event_count_limit/0,
-  get_span_link_count_limit/0
+  get_span_link_count_limit/0,
+  get_span_event_attribute_count_limit/0,
+  get_span_link_attribute_count_limit/0,
+  get_span_attribute_value_length_limit/0,
+  %% Metric cardinality limit (OTel spec recommendation: 2000)
+  get_metric_cardinality_limit/0,
+  %% OTLP retry settings
+  get_otlp_max_retries/0,
+  get_otlp_retry_initial_delay_ms/0,
+  get_otlp_retry_max_delay_ms/0
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
@@ -353,6 +362,61 @@ get_span_event_count_limit() ->
 -spec get_span_link_count_limit() -> pos_integer().
 get_span_link_count_limit() ->
   read_span_limit("OTEL_SPAN_LINK_COUNT_LIMIT", 128).
+
+%% @doc Gets the per-event attribute count limit.
+%% Reads from OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT env var, defaults to 128.
+-spec get_span_event_attribute_count_limit() -> pos_integer().
+get_span_event_attribute_count_limit() ->
+  read_span_limit("OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT", 128).
+
+%% @doc Gets the per-link attribute count limit.
+%% Reads from OTEL_LINK_ATTRIBUTE_COUNT_LIMIT env var, defaults to 128.
+-spec get_span_link_attribute_count_limit() -> pos_integer().
+get_span_link_attribute_count_limit() ->
+  read_span_limit("OTEL_LINK_ATTRIBUTE_COUNT_LIMIT", 128).
+
+%% @doc Gets the per-attribute value length limit.
+%% Reads from OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT, returns `unlimited' when
+%% unset (the spec default). When set, string and binary attribute values
+%% longer than the limit are truncated; list elements are truncated
+%% individually.
+-spec get_span_attribute_value_length_limit() -> pos_integer() | unlimited.
+get_span_attribute_value_length_limit() ->
+  case os:getenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT") of
+    false -> unlimited;
+    Value ->
+      case catch list_to_integer(Value) of
+        Int when is_integer(Int), Int > 0 -> Int;
+        _ -> unlimited
+      end
+  end.
+
+%% @doc Gets the per-metric cardinality limit.
+%% Reads from OTEL_METRIC_CARDINALITY_LIMIT env var, defaults to 2000.
+%% When a vector metric reaches this many distinct label sets, subsequent
+%% label sets are aggregated into a single overflow series identified by
+%% `otel.metric.overflow=true'.
+-spec get_metric_cardinality_limit() -> pos_integer().
+get_metric_cardinality_limit() ->
+  read_span_limit("OTEL_METRIC_CARDINALITY_LIMIT", 2000).
+
+%% @doc Maximum number of OTLP export attempts per batch.
+%% Reads from OTEL_EXPORTER_OTLP_MAX_RETRIES, defaults to 3.
+-spec get_otlp_max_retries() -> non_neg_integer().
+get_otlp_max_retries() ->
+  read_span_limit("OTEL_EXPORTER_OTLP_MAX_RETRIES", 3).
+
+%% @doc Initial delay between OTLP retries in milliseconds.
+%% Reads from OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY_MS, defaults to 1000.
+-spec get_otlp_retry_initial_delay_ms() -> pos_integer().
+get_otlp_retry_initial_delay_ms() ->
+  read_span_limit("OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY_MS", 1000).
+
+%% @doc Maximum delay between OTLP retries in milliseconds.
+%% Reads from OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY_MS, defaults to 30000.
+-spec get_otlp_retry_max_delay_ms() -> pos_integer().
+get_otlp_retry_max_delay_ms() ->
+  read_span_limit("OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY_MS", 30000).
 
 %% ============================================================================
 %% Internal Functions

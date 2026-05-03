@@ -254,9 +254,9 @@ instrument_propagator:set_propagators([
 
 %% Register metric views
 instrument_metric_view:register(#metric_view{
-  instrument_name => <<"http_request_duration">>,
-  name => <<"http.server.duration">>,
-  attribute_keys => [<<"http.method">>, <<"http.status_code">>]
+  instrument_name = <<"http_request_duration">>,
+  name = <<"http.server.duration">>,
+  attribute_keys = [<<"http.method">>, <<"http.status_code">>]
 }).
 ```
 

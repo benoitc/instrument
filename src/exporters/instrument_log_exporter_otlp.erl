@@ -97,7 +97,10 @@ exporter_init(Config) ->
   end.
 
 %% @doc Exports log records to the OTLP endpoint.
--spec exporter_export([#log_record{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
+-spec exporter_export([#log_record{}], #state{}) ->
+  {ok, #state{}}
+  | {error, retryable, #state{}}
+  | {error, permanent, #state{}}.
 exporter_export([], State) ->
   {ok, State};
 exporter_export(LogRecords, #state{} = State) ->
@@ -105,8 +108,8 @@ exporter_export(LogRecords, #state{} = State) ->
   case send_request(Payload, State) of
     ok ->
       {ok, State};
-    {error, Reason} ->
-      {error, Reason, State}
+    {error, Kind, _Reason} when Kind =:= retryable; Kind =:= permanent ->
+      {error, Kind, State}
   end.
 
 %% @doc Shuts down the exporter.
@@ -295,14 +298,7 @@ send_request(Payload, #state{
     {connect_timeout, Timeout}
   ],
 
-  case hackney:request(post, Url, Headers, Body, Options) of
-    {ok, StatusCode, _RespHeaders, _RespBody} when StatusCode >= 200, StatusCode < 300 ->
-      ok;
-    {ok, StatusCode, _RespHeaders, ResponseBody} ->
-      {error, {http_error, StatusCode, ResponseBody}};
-    {error, Reason} ->
-      {error, Reason}
-  end.
+  instrument_otlp_retry:send_with_retry(post, Url, Headers, Body, Options).
 
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_list(V) -> list_to_binary(V);

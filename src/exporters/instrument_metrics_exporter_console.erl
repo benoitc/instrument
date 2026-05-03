@@ -65,10 +65,11 @@ exporter_init(Config) ->
 %% @doc Exports metrics to the console.
 -spec exporter_export([map()], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
 exporter_export(Metrics, #state{format = Format, output = Output} = State) ->
+  Device = io_device(Output),
   try
     lists:foreach(fun(Metric) ->
       Line = format_metric(Metric, Format),
-      io:put_chars(Output, Line)
+      io:put_chars(Device, Line)
     end, Metrics),
     {ok, State}
   catch
@@ -97,6 +98,11 @@ open_output({file, Path}) ->
     {ok, Fd} -> {ok, {file, Fd}};
     Error -> Error
   end.
+
+%% @private Unwrap the {file, Fd} wrapper used to discriminate file outputs
+%% in exporter_shutdown/1. Standard IO devices pass through unchanged.
+io_device({file, Fd}) -> Fd;
+io_device(Device) -> Device.
 
 format_metric(Metric, text) ->
   format_metric_text(Metric);

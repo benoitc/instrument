@@ -522,51 +522,6 @@ force_flush(State) ->
     {ok, State}.
 ```
 
-### Example: Kafka Exporter
-
-```erlang
--module(instrument_exporter_kafka).
-
--export([new/1, init/1, export/2, shutdown/1, force_flush/1]).
-
--record(state, {
-    topic :: binary(),
-    producer :: pid()
-}).
-
-new(Config) ->
-    #{module => ?MODULE, config => Config}.
-
-init(#{topic := Topic, brokers := Brokers}) ->
-    {ok, Producer} = kafka_producer:start(Brokers),
-    {ok, #state{topic = Topic, producer = Producer}}.
-
-export(Spans, #state{topic = Topic, producer = Producer} = State) ->
-    Messages = [encode_span(S) || S <- Spans],
-    ok = kafka_producer:send(Producer, Topic, Messages),
-    {ok, State}.
-
-shutdown(#state{producer = Producer}) ->
-    kafka_producer:stop(Producer),
-    ok.
-
-force_flush(State) ->
-    {ok, State}.
-
-encode_span(Span) ->
-    %% Convert span to your preferred format
-    json:encode(span_to_map(Span)).
-```
-
-### Registering Custom Exporters
-
-```erlang
-instrument_exporter:register(instrument_exporter_kafka:new(#{
-    topic => <<"traces">>,
-    brokers => ["localhost:9092"]
-})).
-```
-
 ## Batch Processing
 
 The exporter manager batches spans for efficient export.
@@ -869,42 +824,50 @@ Endpoint = instrument_config:get_otlp_endpoint().
 Exporters receive spans with the following structure:
 
 ```erlang
-#span{
-    name :: binary(),              %% Span name
-    ctx :: #span_ctx{              %% Span context
-        trace_id :: <<_:128>>,
-        span_id :: <<_:64>>,
-        trace_flags :: 0 | 1,
-        trace_state :: [{binary(), binary()}],
-        is_remote :: boolean()
-    },
+-record(span_ctx, {
+    trace_id :: <<_:128>> | undefined,
+    span_id :: <<_:64>> | undefined,
+    trace_flags = 1 :: 0 | 1,
+    trace_state = [] :: [{binary(), binary()}],
+    is_remote = false :: boolean()
+}).
+
+-record(span, {
+    name :: binary(),
+    ctx :: #span_ctx{},
     parent_ctx :: #span_ctx{} | undefined,
-    kind :: client | server | producer | consumer | internal,
-    start_time :: integer(),       %% Monotonic nanoseconds
+    tracer :: #tracer{} | undefined,
+    kind = internal :: client | server | producer | consumer | internal,
+    start_time :: integer(),                     %% Wall clock, ns
     end_time :: integer() | undefined,
-    attributes :: map(),
-    events :: [#span_event{}],
-    links :: [#span_link{}],
-    status :: unset | ok | {error, binary()},
-    is_recording :: boolean()
-}
+    attributes = #{} :: map(),
+    events = [] :: [#span_event{}],
+    links = [] :: [#span_link{}],
+    status = unset :: unset | ok | {error, binary()},
+    is_recording = true :: boolean(),
+    dropped_attributes_count = 0 :: non_neg_integer(),
+    dropped_events_count = 0 :: non_neg_integer(),
+    dropped_links_count = 0 :: non_neg_integer()
+}).
 ```
 
 For events:
 
 ```erlang
-#span_event{
+-record(span_event, {
     name :: binary(),
-    timestamp :: integer(),
-    attributes :: map()
-}
+    timestamp :: integer(),                      %% Wall clock, ns
+    attributes = #{} :: map(),
+    dropped_attributes_count = 0 :: non_neg_integer()
+}).
 ```
 
 For links:
 
 ```erlang
-#span_link{
+-record(span_link, {
     ctx :: #span_ctx{},
-    attributes :: map()
-}
+    attributes = #{} :: map(),
+    dropped_attributes_count = 0 :: non_neg_integer()
+}).
 ```

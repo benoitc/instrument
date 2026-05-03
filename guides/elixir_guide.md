@@ -423,7 +423,7 @@ end
 
 # Handling
 :telemetry.attach("request-counter", [:my_app, :request], fn _name, measurements, metadata, _config ->
-  # Forward to monitoring system
+  forward_to_monitoring(measurements, metadata)
 end, nil)
 ```
 
@@ -543,13 +543,16 @@ defmodule MyApp.Metrics do
   def setup do
     meter = :instrument_meter.get_meter("my_app")
 
-    :instrument_meter.create_counter(meter, "orders_created_total", %{
+    counter = :instrument_meter.create_counter(meter, "orders_created_total", %{
       description: "Total orders created"
     })
+
+    :persistent_term.put(:orders_counter, counter)
   end
 
   def record_order_created(order) do
-    :instrument_meter.add("orders_created_total", 1, %{
+    counter = :persistent_term.get(:orders_counter)
+    :instrument_meter.add(counter, 1, %{
       customer_tier: order.customer.tier
     })
   end

@@ -68,18 +68,33 @@ with_label_1(VectorMetric, Label, Mod, Fun, Args) ->
     fun(#metric{ name=Name, handle = Vector }) ->
       case find_label(Label, Vector) of
         {ok, Metric} ->
-          case Mod of
-            undefined -> erlang:apply(Fun, [Metric | Args]);
-            _ -> erlang:apply(Mod, Fun, [Metric | Args])
-          end;
+          apply_label_fun(Metric, Mod, Fun, Args);
         {error, _}=Error ->
           Error;
         error ->
-          ok = instrument_registry:create_vector_metric(Name, Label),
-          with_label(Name, Label, Fun)
+          case cardinality_limit_reached(Name) of
+            true ->
+              case instrument_registry:get_or_create_overflow(Name) of
+                undefined -> ok;
+                OverflowMetric ->
+                  apply_label_fun(OverflowMetric, Mod, Fun, Args)
+              end;
+            false ->
+              ok = instrument_registry:create_vector_metric(Name, Label),
+              with_label(Name, Label, Fun)
+          end
       end
     end
   ).
+
+apply_label_fun(Metric, undefined, Fun, Args) ->
+  erlang:apply(Fun, [Metric | Args]);
+apply_label_fun(Metric, Mod, Fun, Args) ->
+  erlang:apply(Mod, Fun, [Metric | Args]).
+
+cardinality_limit_reached(Name) ->
+  Limit = instrument_config:get_metric_cardinality_limit(),
+  instrument_registry:label_count(Name) >= Limit.
 
 with(VectorMetric, Fun) ->
   instrument_registry:with(
@@ -173,17 +188,25 @@ get_or_create_label(Name, LabelValues) ->
           case length(LabelValues) =:= length(LabelNames) of
             false -> {error, invalid_labels};
             true ->
-              ok = instrument_registry:create_vector_metric(Name, LabelValues),
-              case instrument_registry:lookup(Name) of
-                #metric{handle = #vector{labels_map = Map}} ->
-                  case maps:find(LabelValues, Map) of
-                    {ok, Metric} ->
-                      instrument_registry:cache_label(Name, LabelValues, Metric),
-                      {ok, Metric};
-                    error ->
-                      {error, not_found}
+              case cardinality_limit_reached(Name) of
+                true ->
+                  case instrument_registry:get_or_create_overflow(Name) of
+                    undefined -> {error, not_found};
+                    OverflowMetric -> {ok, OverflowMetric}
                   end;
-                _ -> {error, not_found}
+                false ->
+                  ok = instrument_registry:create_vector_metric(Name, LabelValues),
+                  case instrument_registry:lookup(Name) of
+                    #metric{handle = #vector{labels_map = Map}} ->
+                      case maps:find(LabelValues, Map) of
+                        {ok, Metric} ->
+                          instrument_registry:cache_label(Name, LabelValues, Metric),
+                          {ok, Metric};
+                        error ->
+                          {error, not_found}
+                      end;
+                    _ -> {error, not_found}
+                  end
               end
           end
       end;

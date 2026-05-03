@@ -112,9 +112,18 @@ list() ->
   gen_server:call(?SERVER, list).
 
 %% @doc Called when a span starts. Returns potentially modified span.
+%% This is the legacy path; the tracer hot path goes through
+%% {@link on_start_inline/2} via the persistent_term cache and never reaches
+%% this gen_server. The 5 s timeout is a safety net for processors whose
+%% on_start callback hangs.
 -spec on_start(#span{}, #span_ctx{} | undefined) -> #span{}.
 on_start(Span, ParentCtx) ->
-  gen_server:call(?SERVER, {on_start, Span, ParentCtx}).
+  try
+    gen_server:call(?SERVER, {on_start, Span, ParentCtx}, 5000)
+  catch
+    exit:{timeout, _} -> Span;
+    exit:{noproc, _}  -> Span
+  end.
 
 %% @doc Called when a span ends.
 -spec on_end(#span{}) -> ok.

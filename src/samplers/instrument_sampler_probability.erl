@@ -72,16 +72,17 @@ get_description(Config) ->
 
 %% @private
 %% Determines if a trace ID should be sampled based on the ratio.
-%% Uses the lower 8 bytes of the trace ID for deterministic sampling.
+%% Uses the upper 8 bytes of the trace ID for deterministic sampling, in
+%% line with the OTel reference (Java/Go/Python) implementations so that
+%% samples are consistent across SDKs in the same trace.
 should_sample_trace_id(_TraceId, Ratio) when Ratio >= 1.0 ->
   true;
 should_sample_trace_id(_TraceId, Ratio) when Ratio =< 0.0 ->
   false;
 should_sample_trace_id(TraceId, Ratio) when is_binary(TraceId), byte_size(TraceId) =:= 16 ->
-  %% Use lower 8 bytes of trace ID for deterministic sampling
-  <<_:64, LowerBytes:64/unsigned-big>> = TraceId,
+  <<UpperBytes:64/unsigned-big, _:64>> = TraceId,
   Threshold = trunc(Ratio * ?MAX_UINT64),
-  LowerBytes < Threshold;
+  UpperBytes < Threshold;
 should_sample_trace_id(_TraceId, _Ratio) ->
   %% Invalid trace ID, default to sampling
   true.

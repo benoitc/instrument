@@ -36,7 +36,9 @@
   span_attribute_limit_config_test/1,
   span_event_limit_config_test/1,
   span_link_limit_config_test/1,
-  span_limit_invalid_values_test/1
+  span_limit_invalid_values_test/1,
+  verbose_tracing_toggle_test/1,
+  exporter_toggle_test/1
 ]).
 
 all() ->
@@ -59,7 +61,9 @@ all() ->
     span_attribute_limit_config_test,
     span_event_limit_config_test,
     span_link_limit_config_test,
-    span_limit_invalid_values_test
+    span_limit_invalid_values_test,
+    verbose_tracing_toggle_test,
+    exporter_toggle_test
   ].
 
 init_per_suite(Config) ->
@@ -334,4 +338,34 @@ span_limit_invalid_values_test(_Config) ->
   os:putenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10.5"),
   ?assertEqual(128, instrument_config:get_span_attribute_count_limit()),
   os:unsetenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT"),
+  ok.
+
+verbose_tracing_toggle_test(_Config) ->
+  %% Default is false
+  ?assertEqual(false, instrument_config:is_verbose_tracing()),
+  ok = instrument_config:set_verbose_tracing(true),
+  ?assertEqual(true, instrument_config:is_verbose_tracing()),
+  ok = instrument_config:set_verbose_tracing(false),
+  ?assertEqual(false, instrument_config:is_verbose_tracing()),
+  ok.
+
+exporter_toggle_test(_Config) ->
+  %% Unknown module is enabled by default
+  ?assertEqual(true,
+               instrument_config:is_exporter_enabled(some_fake_exporter)),
+
+  %% Disable, then verify
+  ok = instrument_config:disable_exporter(some_fake_exporter),
+  ?assertEqual(false,
+               instrument_config:is_exporter_enabled(some_fake_exporter)),
+
+  %% Re-enable, then verify
+  ok = instrument_config:enable_exporter(some_fake_exporter),
+  ?assertEqual(true,
+               instrument_config:is_exporter_enabled(some_fake_exporter)),
+
+  %% Enabling something never disabled is a no-op
+  ok = instrument_config:enable_exporter(another_fake_exporter),
+  ?assertEqual(true,
+               instrument_config:is_exporter_enabled(another_fake_exporter)),
   ok.

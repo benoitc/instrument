@@ -47,6 +47,7 @@
     log_collection/1,
     log_assert_exists/1,
     log_assert_properties/1,
+    log_assert_trace_context/1,
     log_clear/1
 ]).
 
@@ -81,6 +82,7 @@ all() ->
         log_collection,
         log_assert_exists,
         log_assert_properties,
+        log_assert_trace_context,
         log_clear,
         reset_clears_all
     ].
@@ -534,6 +536,38 @@ log_clear(_Config) ->
     ok = instrument_test:clear_logs(),
     0 = length(instrument_test:get_logs()),
     ok.
+
+log_assert_trace_context(_Config) ->
+    %% Log with trace context: assertion passes
+    Good = #log_record{
+        body = <<"With trace ctx">>,
+        timestamp = erlang:system_time(nanosecond),
+        trace_id = <<1:128>>,
+        span_id = <<2:64>>
+    },
+    instrument_test:add_test_log(Good),
+    ok = instrument_test:assert_log_trace_context(<<"With trace ctx">>),
+
+    %% Log without trace context: assertion fails with missing_trace_id
+    Bad = #log_record{
+        body = <<"No trace ctx">>,
+        timestamp = erlang:system_time(nanosecond)
+    },
+    instrument_test:add_test_log(Bad),
+    try
+        instrument_test:assert_log_trace_context(<<"No trace ctx">>),
+        ct:fail(should_have_thrown)
+    catch
+        error:{assertion_failed, {missing_trace_id, _}} -> ok
+    end,
+
+    %% Log not present: assertion fails with log_not_found
+    try
+        instrument_test:assert_log_trace_context(<<"absent">>),
+        ct:fail(should_have_thrown)
+    catch
+        error:{assertion_failed, {log_not_found, _, _}} -> ok
+    end.
 
 %% ============================================================================
 %% Reset Tests

@@ -20,9 +20,7 @@ The console exporter prints telemetry to stdout. It's useful for development.
 
 ```erlang
 %% Register console span exporter
-instrument_tracer:register_exporter(
-    fun(Span) -> instrument_exporter_console:export(Span) end
-).
+instrument_exporter:register(instrument_exporter_console:new()).
 
 %% Now spans print when they end
 instrument_tracer:with_span(<<"test">>, fun() ->
@@ -73,13 +71,10 @@ Exporter = instrument_exporter_otlp:new(#{
 ### Trace Export
 
 ```erlang
-%% Register OTLP span exporter
-OtlpExporter = instrument_exporter_otlp:new(#{
+%% Register OTLP span exporter (goes through the batched manager)
+instrument_exporter:register(instrument_exporter_otlp:new(#{
     endpoint => "http://jaeger:4318/v1/traces"
-}),
-instrument_tracer:register_exporter(fun(Span) ->
-    instrument_exporter_otlp:export(OtlpExporter, Span)
-end).
+})).
 ```
 
 ### Metric Export
@@ -172,12 +167,13 @@ For production, use the batch processor to reduce overhead:
 
 ```erlang
 %% Configure batch span processor
-instrument_span_processor_batch:start_link(#{
-    exporter => instrument_exporter_otlp:new(#{
+instrument_span_processor:register(instrument_span_processor_batch, #{
+    exporter => instrument_exporter_otlp,
+    exporter_config => #{
         endpoint => "http://collector:4318/v1/traces"
-    }),
+    },
     max_queue_size => 2048,
-    scheduled_delay => 5000,  %% 5 seconds
+    schedule_delay_millis => 5000,  %% 5 seconds
     max_export_batch_size => 512
 }).
 ```
@@ -212,15 +208,12 @@ You can export to multiple destinations:
 
 ```erlang
 %% Console for development
-instrument_tracer:register_exporter(
-    fun(Span) -> instrument_exporter_console:export(Span) end
-),
+instrument_exporter:register(instrument_exporter_console:new()),
 
 %% OTLP for production
-OtlpExporter = instrument_exporter_otlp:new(#{endpoint => "http://collector:4318/v1/traces"}),
-instrument_tracer:register_exporter(
-    fun(Span) -> instrument_exporter_otlp:export(OtlpExporter, Span) end
-).
+instrument_exporter:register(instrument_exporter_otlp:new(#{
+    endpoint => "http://collector:4318/v1/traces"
+})).
 ```
 
 ## Complete Setup Example
@@ -234,12 +227,13 @@ init() ->
     instrument_config:init(),
 
     %% Set up batch processor for traces
-    {ok, _} = instrument_span_processor_batch:start_link(#{
-        exporter => instrument_exporter_otlp:new(#{
+    ok = instrument_span_processor:register(instrument_span_processor_batch, #{
+        exporter => instrument_exporter_otlp,
+        exporter_config => #{
             endpoint => os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318") ++ "/v1/traces"
-        }),
+        },
         max_queue_size => 2048,
-        scheduled_delay => 5000,
+        schedule_delay_millis => 5000,
         max_export_batch_size => 512
     }),
 

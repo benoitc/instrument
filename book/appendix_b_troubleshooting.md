@@ -213,9 +213,11 @@ os:putenv("OTEL_TRACES_SAMPLER_ARG", "0.1").  %% 10%
 
 2. Use batch processor:
 ```erlang
-instrument_span_processor_batch:start_link(#{
+instrument_span_processor:register(instrument_span_processor_batch, #{
+    exporter => instrument_exporter_otlp,
+    exporter_config => #{endpoint => "http://localhost:4318/v1/traces"},
     max_queue_size => 2048,
-    scheduled_delay => 5000
+    schedule_delay_millis => 5000
 }).
 ```
 
@@ -278,7 +280,7 @@ instrument_propagation:call_with_context(Server, Request).
 handle_call({'$instrument_call', Ctx, Request}, From, State) ->
     Token = instrument_context:attach(Ctx),
     try
-        %% Handle request
+        do_handle(Request, From, State)
     after
         instrument_context:detach(Token)
     end.

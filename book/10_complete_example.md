@@ -131,17 +131,14 @@ setup_tracing() ->
     case os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT") of
         false ->
             %% Development: console export
-            instrument_tracer:register_exporter(
-                fun(Span) -> instrument_exporter_console:export(Span) end
-            );
+            instrument_exporter:register(instrument_exporter_console:new());
         Endpoint ->
             %% Production: batch OTLP export
-            {ok, _} = instrument_span_processor_batch:start_link(#{
-                exporter => instrument_exporter_otlp:new(#{
-                    endpoint => Endpoint ++ "/v1/traces"
-                }),
+            ok = instrument_span_processor:register(instrument_span_processor_batch, #{
+                exporter => instrument_exporter_otlp,
+                exporter_config => #{endpoint => Endpoint ++ "/v1/traces"},
                 max_queue_size => 2048,
-                scheduled_delay => 5000,
+                schedule_delay_millis => 5000,
                 max_export_batch_size => 512
             })
     end,

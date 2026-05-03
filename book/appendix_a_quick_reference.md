@@ -169,9 +169,7 @@ ContentType = instrument_prometheus:content_type().
 ### Console
 
 ```erlang
-instrument_tracer:register_exporter(
-    fun(Span) -> instrument_exporter_console:export(Span) end
-).
+instrument_exporter:register(instrument_exporter_console:new()).
 ```
 
 ### OTLP

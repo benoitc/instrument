@@ -159,7 +159,7 @@ instrument_tracer:with_span(<<"process_order">>, fun() ->
     instrument_tracer:set_attribute(<<"order.id">>, OrderId),
 
     %% Log adds detail not in span
-    logger:info("Order has ~p items, total $~.2f", [ItemCount, Total]).
+    logger:info("Order has ~p items, total $~.2f", [ItemCount, Total])
 end).
 ```
 

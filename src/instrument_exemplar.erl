@@ -26,7 +26,8 @@
   new_reservoir_ref/1,
   offer_ref/3,
   collect_ref/1,
-  reset_ref/1
+  reset_ref/1,
+  delete_reservoir/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -193,6 +194,19 @@ reset_ref(Ref) ->
       ets:insert(?EXEMPLAR_TABLE, {Ref, NewReservoir}),
       ok;
     [] ->
+      ok
+  end.
+
+%% @doc Deletes the reservoir identified by reference. Safe to call with
+%% `undefined' or a reference that is no longer present.
+-spec delete_reservoir(reference() | undefined) -> ok.
+delete_reservoir(undefined) ->
+  ok;
+delete_reservoir(Ref) when is_reference(Ref) ->
+  case ets:whereis(?EXEMPLAR_TABLE) of
+    undefined -> ok;
+    _ ->
+      ets:delete(?EXEMPLAR_TABLE, Ref),
       ok
   end.
 

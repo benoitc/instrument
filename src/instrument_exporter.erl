@@ -170,10 +170,11 @@ handle_call(flush, _From, State) ->
 
 handle_call(shutdown, _From, State) ->
   State2 = do_flush(State),
-  %% Unregister the hook to prevent leaks across restarts
+  %% Hook unregister is cheap (ETS + persistent_term) but keep it off the
+  %% call's reply path so the caller is never blocked behind it.
   case State2#state.hook_fun of
     undefined -> ok;
-    HookFun -> instrument_tracer:unregister_exporter(HookFun)
+    HookFun -> gen_server:cast(self(), {unregister_hook, HookFun})
   end,
   lists:foreach(fun(#{module := M, state := S}) ->
     catch M:shutdown(S)
@@ -194,6 +195,10 @@ handle_cast({export_spans, Spans}, State) ->
   State2 = State#state{batch = NewBatch},
   State3 = do_flush(State2),
   {noreply, State3};
+
+handle_cast({unregister_hook, HookFun}, State) ->
+  catch instrument_tracer:unregister_exporter(HookFun),
+  {noreply, State};
 
 handle_cast(_Msg, State) ->
   {noreply, State}.
