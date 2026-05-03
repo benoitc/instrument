@@ -337,7 +337,7 @@ get_sdk_version() ->
     undefined ->
       case application:get_key(instrument, vsn) of
         {ok, Vsn} -> version_to_binary(Vsn);
-        undefined -> <<"0.4.0">>
+        undefined -> <<"1.0.0">>
       end
   end.
 

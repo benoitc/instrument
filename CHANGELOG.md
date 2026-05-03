@@ -2,6 +2,92 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-05-03
+
+First stable release. Hardens the runtime under contention and at high
+cardinality, brings the OTLP path up to spec, fixes deadlock and leak
+risks in the export pipeline, and lands a full audit of the documentation
+against the actual public API.
+
+### Added
+- `OTEL_METRIC_CARDINALITY_LIMIT` (default 2000) caps distinct label sets
+  per vector metric. Excess label sets aggregate into one shared series
+  tagged `otel.metric.overflow=true`. Dropped count exposed via
+  `instrument_registry:cardinality_dropped/1`.
+- `instrument_otlp_retry` module: bounded exponential backoff with
+  `Retry-After` honoured, classifying transport and HTTP errors per the
+  OTel spec. Configurable via `OTEL_EXPORTER_OTLP_MAX_RETRIES`,
+  `OTEL_EXPORTER_OTLP_RETRY_INITIAL_DELAY_MS`,
+  `OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY_MS`.
+- Span attribute value length limit
+  (`OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`), per-event and per-link attribute
+  count limits (`OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT`,
+  `OTEL_LINK_ATTRIBUTE_COUNT_LIMIT`); excess attributes counted in
+  `dropped_attributes_count` and emitted as `droppedAttributesCount` in
+  OTLP.
+- Tracestate caps at 32 entries / 256 bytes; baggage caps at 180
+  entries / 8192 bytes per W3C trace-context.
+- `instrument_attributes:apply_limits/2,3` and `truncate_value/2`
+  helpers.
+- Span Export Path section in the design and internals guide explaining
+  the full chain from `end_span` to OTLP, with explicit notes that
+  `instrument_tracer_nif` serves the flight recorder only.
+- Test coverage for 28 documented public APIs that previously had no
+  call sites in CT (`instrument_propagation:inject_headers/extract_headers/call_with_context/cast_with_context`,
+  `instrument_context:remove_value/spawn_link_with_context`,
+  `instrument_config:set_verbose_tracing/is_verbose_tracing/enable_exporter/disable_exporter`,
+  `instrument_tracer:record_exception/update_name`,
+  `instrument_test:assert_log_trace_context`,
+  `instrument_logger:add_trace_context/emit`,
+  `instrument_metric:remove_label/clear_labels/set_gauge_to_current_time`,
+  exporter callback contracts).
+
+### Changed
+- Batch processor `force_flush/0` and the max-batch-size trigger no
+  longer block the gen_server loop. An export worker is spawned and
+  completion arrives as `{export_done, ...}`; concurrent flush callers
+  are batched and replied to via `gen_server:reply/2`. A kill timer
+  enforces `export_timeout_millis` without blocking the loop.
+- `instrument_exporter` shutdown now casts the hook unregister so the
+  reply path stays unblocked.
+- `instrument_span_processor:on_start/2` now has a 5 s safety timeout;
+  the tracer hot path uses the inline `persistent_term` form.
+- OTLP exporters return `{error, retryable, _}` vs `{error, permanent, _}`.
+  The batch processor keeps retryable batches for up to
+  `max_batch_retries` cycles and drops permanent errors.
+- Probability sampler hashes the upper 8 bytes of the trace id, matching
+  the Java/Go/Python reference SDKs.
+- Status transitions now follow the OTel spec: `unset -> ok|error`,
+  `error -> ok` (success overrides), `error -> error` updates the
+  description, `ok` is final.
+- Batch processor clamps `max_export_batch_size` to `max_queue_size` on
+  init with a warning.
+- Documentation snippets fixed across `guides/`, `book/`, and `README.md`:
+  6 syntax bugs, 8+ calls to non-existent or wrong-arity functions,
+  wrong arg shapes for `set_sampler`, `parent_based` config,
+  `metric_view` record literal, `exporter_otlp:export`, and stale config
+  keys (`schedule_delay_millis`, `export_timeout_millis`).
+- Book chapter prose smoothed for readability.
+
+### Fixed
+- Histogram exemplar reservoirs are now freed on unregister.
+- Registry unregister no longer scans the global `persistent_term`
+  index; iterates the metric's own `labels_map` instead.
+- Baggage `set/remove/clear` use `set_current/1` so process-dictionary
+  context tokens no longer accumulate.
+- `instrument_exporter_console:export/2` and
+  `instrument_metrics_exporter_console:exporter_export/2` no longer
+  crash when configured with `output => {file, Path}`. The `{file, Fd}`
+  wrapper used by `shutdown/1` is now unwrapped before
+  `io:put_chars/2`.
+
+### Removed
+- `instrument_exporter_kafka` documentation section: the module never
+  existed in `src/exporters/`.
+
+### Deprecated
+- _None._
+
 ## [0.6.1] - 2026-04-16
 
 ### Fixed
