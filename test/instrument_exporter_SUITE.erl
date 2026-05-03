@@ -136,10 +136,12 @@ flush(_Config) ->
 
 console_export_callback_test(_Config) ->
   %% Direct exercise of the exporter's callback contract:
-  %% init/1 -> export/2 -> shutdown/1, both formats.
+  %% init/1 -> export/2 -> shutdown/1, both formats and all output kinds.
+  Span = make_test_span(<<"callback_span">>),
+
+  %% standard_io
   {ok, TextState} = instrument_exporter_console:init(#{format => text,
                                                        output => standard_io}),
-  Span = make_test_span(<<"callback_span">>),
   ?assertMatch({ok, _}, instrument_exporter_console:export([Span], TextState)),
   ?assertMatch({ok, _}, instrument_exporter_console:export([], TextState)),
   ok = instrument_exporter_console:shutdown(TextState),
@@ -149,6 +151,18 @@ console_export_callback_test(_Config) ->
   ?assertMatch({ok, _}, instrument_exporter_console:export([Span], JsonState)),
   ?assertMatch({ok, _}, instrument_exporter_console:force_flush(JsonState)),
   ok = instrument_exporter_console:shutdown(JsonState),
+
+  %% File output: data should land on disk and shutdown closes the fd.
+  Path = "/tmp/instrument_console_export_test.log",
+  _ = file:delete(Path),
+  {ok, FileState} = instrument_exporter_console:init(#{format => text,
+                                                       output => {file, Path}}),
+  {ok, _} = instrument_exporter_console:export([Span], FileState),
+  ok = instrument_exporter_console:shutdown(FileState),
+  {ok, Bin} = file:read_file(Path),
+  ?assert(byte_size(Bin) > 0),
+  ?assertNotEqual(nomatch, binary:match(Bin, <<"callback_span">>)),
+  _ = file:delete(Path),
   ok.
 
 otlp_export_callback_test(_Config) ->

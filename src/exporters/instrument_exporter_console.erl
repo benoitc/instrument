@@ -67,16 +67,22 @@ init(Config) ->
 %% @doc Exports spans to the console.
 -spec export([#span{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
 export(Spans, #state{format = Format, output = Output} = State) ->
+  Device = io_device(Output),
   try
     lists:foreach(fun(Span) ->
       Line = format_span(Span, Format),
-      io:put_chars(Output, Line)
+      io:put_chars(Device, Line)
     end, Spans),
     {ok, State}
   catch
     _:Reason ->
       {error, Reason, State}
   end.
+
+%% @private Unwrap the {file, Fd} wrapper used to discriminate file outputs
+%% in shutdown/1. Standard IO devices pass through unchanged.
+io_device({file, Fd}) -> Fd;
+io_device(Device) -> Device.
 
 %% @doc Shuts down the exporter.
 -spec shutdown(#state{}) -> ok.
