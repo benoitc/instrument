@@ -95,7 +95,7 @@ concurrent_histogram(_Config) ->
   TestBuckets = [0.0, 0.5, 1.0, 2.0],
   Mutations = 1000,
   ConcLevel = 5,
-  Total = float(Mutations * ConcLevel),
+  Total = Mutations * ConcLevel,
   M = instrument_histogram:new_histogram(test_histogram, "", TestBuckets),
   All = pmap(
     fun(_) ->
@@ -152,7 +152,7 @@ get_cumulative_counts(Vars, Buckets) ->
     Counts,
     Vars
   ),
-  [float(C) || C <- tuple_to_list(Counts2)].
+  tuple_to_list(Counts2).
 
 fold_buckets_counts([Boundary | Rest], Counts1, Value, I) when Boundary > Value ->
   Counts2 = erlang:setelement(I, Counts1, erlang:element(I, Counts1) + 1),
@@ -171,7 +171,7 @@ histogram_concurrent_observe(_Config) ->
   TestBuckets = [0.0, 1.0, 5.0, 10.0, 50.0, 100.0],
   NumProcesses = 50,
   ObservationsPerProcess = 200,
-  ExpectedCount = float(NumProcesses * ObservationsPerProcess),
+  ExpectedCount = NumProcesses * ObservationsPerProcess,
 
   M = instrument_histogram:new_histogram(conc_observe_hist, "concurrent observe test", TestBuckets),
 
@@ -198,7 +198,7 @@ histogram_consistency(_Config) ->
   TestBuckets = [0.0, 0.25, 0.5, 0.75, 1.0],
   NumProcesses = 100,
   ObservationsPerProcess = 100,
-  ExpectedCount = float(NumProcesses * ObservationsPerProcess),
+  ExpectedCount = NumProcesses * ObservationsPerProcess,
 
   M = instrument_histogram:new_histogram(consistency_hist, "consistency test", TestBuckets),
 

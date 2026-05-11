@@ -19,6 +19,16 @@
 %%%   <li>`exponential_buckets/3' - Exponentially growing buckets</li>
 %%% </ul>
 %%%
+%%% == Storage ==
+%%% A histogram with N user-defined boundaries plus an implicit +Inf bucket
+%%% is backed by a single OTP `atomics' array of size N+2:
+%%% <ul>
+%%%   <li>slot 1 — IEEE-754 bit pattern of the running `sum' (float)</li>
+%%%   <li>slots 2..N+2 — bucket counts (signed int64)</li>
+%%% </ul>
+%%% This eliminates per-bucket NIF resources and gives `observe_histogram'
+%%% one cheap CAS-loop on the sum plus one `atomics:add' on the bucket.
+%%%
 %%% == Example ==
 %%% ```
 %%% %% Create histogram with default buckets
@@ -56,13 +66,15 @@
 -include("instrument.hrl").
 
 -define(DEFAULT_BUCKETS, [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]).
+-define(SUM_SLOT, 1).
+-define(BUCKET_SLOT_OFFSET, 1).  %% buckets start at slot 2
 
 -record(histogram, {
   bucket_boundaries = [],
-  bucket_counts = [],
-  sum = 0.0,
-  start_time :: integer(),  % wall clock time in nanoseconds when histogram was created
-  exemplar_key :: reference() | undefined  % Key for ETS-stored exemplar reservoir
+  atomics_ref,                          %% atomics ref, arity = N+2
+  inf_slot :: pos_integer(),            %% slot index of the +Inf bucket
+  start_time :: integer(),              %% wall clock time in nanoseconds when histogram was created
+  exemplar_key :: reference() | undefined  %% Key for ETS-stored exemplar reservoir
 }).
 
 new_histogram(Name, Help) -> new_histogram(Name, Help, ?DEFAULT_BUCKETS).
@@ -78,20 +90,17 @@ new_histogram(Name, Help, Buckets) ->
 
 mk_histogram(Buckets) ->
   ok = validate_buckets(Buckets),
-  %% Create N+1 bucket counts: one for each boundary plus +Inf bucket
-  Counts = lists:map(
-    fun(_) ->
-      {ok, Ref} = instrument_nif:new_gauge(),
-      Ref
-    end, Buckets ++ [infinity]),
-  {ok, Sum} =  instrument_nif:new_gauge(),
+  %% N boundaries + 1 (+Inf) bucket counts + 1 sum slot = N + 2 slots
+  N = length(Buckets),
+  Arity = N + 2,
+  Ref = instrument_atomics:new(Arity),
   StartTime = erlang:system_time(nanosecond),
   ExemplarKey = instrument_exemplar:new_reservoir_ref(),
 
   #histogram{
     bucket_boundaries = Buckets,
-    bucket_counts = list_to_tuple(Counts),
-    sum = Sum,
+    atomics_ref = Ref,
+    inf_slot = Arity,
     start_time = StartTime,
     exemplar_key = ExemplarKey
   }.
@@ -115,17 +124,17 @@ validate_buckets([], _) ->
 
 observe_histogram(#metric{handle=Hist}, Value) ->
   #histogram{bucket_boundaries = Boundaries,
-    bucket_counts = Counts,
-    sum = Sum,
+    atomics_ref = Ref,
+    inf_slot = InfSlot,
     exemplar_key = ExemplarKey} = Hist,
 
-  %% Find bucket index (1-based), or use +Inf bucket (last one) if above all boundaries
-  Idx = case find(Boundaries, Value, 1) of
-    -1 -> tuple_size(Counts);  %% +Inf bucket is the last one
-    I -> I
+  %% Find bucket slot. Boundaries map to slots 2..N+1; +Inf is the last slot.
+  Slot = case find(Boundaries, Value, ?BUCKET_SLOT_OFFSET + 1) of
+    -1 -> InfSlot;
+    S -> S
   end,
-  instrument_nif:inc_gauge(element(Idx, Counts)),
-  instrument_nif:inc_gauge(Sum, float(Value)),
+  instrument_atomics:inc_int_at(Ref, Slot, 1),
+  instrument_atomics:inc_at(Ref, ?SUM_SLOT, float(Value)),
   %% Capture exemplar with trace context
   case ExemplarKey of
     undefined -> ok;
@@ -143,13 +152,13 @@ find([], _Value, _I) -> -1.
 get_histogram(#metric{handle=Hist}) ->
   #histogram{
     bucket_boundaries = Boundaries,
-    bucket_counts = Counts,
-    sum = Sum
+    atomics_ref = Ref,
+    inf_slot = InfSlot
   } = Hist,
-  SumValue = instrument_nif:get_gauge(Sum),
-  CountsList = [instrument_nif:get_gauge(C) || C <- tuple_to_list(Counts)],
-  SampleCount = lists:foldl(fun(Count, Acc) ->  Acc + Count end, 0, CountsList),
-  Buckets = cumulative_count(CountsList, Boundaries, 0.0, []),
+  SumValue = instrument_atomics:get_at(Ref, ?SUM_SLOT),
+  CountsList = read_counts(Ref, ?BUCKET_SLOT_OFFSET + 1, InfSlot),
+  SampleCount = lists:foldl(fun(Count, Acc) -> Acc + Count end, 0, CountsList),
+  Buckets = cumulative_count(CountsList, Boundaries, 0, []),
   #{count => SampleCount,
     sum => SumValue,
     buckets => Buckets }.
@@ -158,6 +167,11 @@ get_histogram(#metric{handle=Hist}) ->
 -spec get_bucket_boundaries(#metric{}) -> [number()].
 get_bucket_boundaries(#metric{handle = Hist}) ->
   Hist#histogram.bucket_boundaries.
+
+read_counts(Ref, Slot, EndSlot) when Slot =< EndSlot ->
+  [instrument_atomics:get_int_at(Ref, Slot) | read_counts(Ref, Slot + 1, EndSlot)];
+read_counts(_Ref, _Slot, _EndSlot) ->
+  [].
 
 cumulative_count([Count | RestCounts], [Boundary | RestBoundaries], Acc, Buckets) ->
   Acc2 = Acc + Count,
@@ -215,18 +229,18 @@ collect(Info, Hist) ->
   #metric_info{name=Name, help=Help} = Info,
   #histogram{
     bucket_boundaries = Boundaries,
-    bucket_counts = Counts,
-    sum = Sum,
+    atomics_ref = Ref,
+    inf_slot = InfSlot,
     start_time = StartTime,
     exemplar_key = ExemplarKey
   } = Hist,
-  SumValue = instrument_nif:get_gauge(Sum),
-  CountsList = [instrument_nif:get_gauge(C) || C <- tuple_to_list(Counts)],
-  SampleCount = lists:foldl(fun(Count, Acc) ->  Acc + Count end, 0, CountsList),
-  Buckets = cumulative_count(CountsList, Boundaries, 0.0, []),
+  SumValue = instrument_atomics:get_at(Ref, ?SUM_SLOT),
+  CountsList = read_counts(Ref, ?BUCKET_SLOT_OFFSET + 1, InfSlot),
+  SampleCount = lists:foldl(fun(Count, Acc) -> Acc + Count end, 0, CountsList),
+  Buckets = cumulative_count(CountsList, Boundaries, 0, []),
   Exemplars = instrument_exemplar:collect_ref(ExemplarKey),
 
-  %% Returns a complete histogram collection with all required fields for export.
+  %% Returns a histogram collection with all required fields for export.
   %% This format is compatible with Prometheus and OpenTelemetry metric exporters.
   #{name => Name,
     help => Help,
@@ -236,4 +250,3 @@ collect(Info, Hist) ->
     buckets => Buckets,
     start_time => StartTime,
     exemplars => Exemplars}.
-    

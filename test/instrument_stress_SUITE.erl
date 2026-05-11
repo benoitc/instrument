@@ -217,7 +217,7 @@ histogram_concurrent_observations(_Config) ->
   %% Many concurrent observations
   NumProcesses = 100,
   ObservationsPerProcess = 5000,
-  ExpectedCount = float(NumProcesses * ObservationsPerProcess),
+  ExpectedCount = NumProcesses * ObservationsPerProcess,
 
   Buckets = [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
   M = instrument_metric:new_histogram(stress_histogram, <<"stress histogram">>, Buckets),
@@ -273,7 +273,7 @@ histogram_read_during_write(_Config) ->
 
   %% Final verification
   #{count := FinalCount} = instrument_metric:get_histogram(M),
-  ExpectedCount = float(NumWriters * ObservationsPerWriter),
+  ExpectedCount = NumWriters * ObservationsPerWriter,
   ?assertEqual(ExpectedCount, FinalCount),
   ok.
 
