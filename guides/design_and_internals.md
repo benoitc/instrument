@@ -50,7 +50,7 @@ The supervisor (`instrument_sup`) starts these children with `one_for_all` strat
 
 ### Design Principles
 
-**Lock-free Operations**: Metrics use NIF-based C11 atomics for updates, avoiding locks entirely.
+**Lock-free Operations**: Counters and gauges use NIF-based C11 atomics for updates. Histograms use the OTP `atomics` module, with bucket counts stored as int64 slots and the running sum kept as IEEE-754 bits in a CAS-retry loop. Both paths avoid locks entirely.
 
 **Scheduler-aware Storage**: ETS tables are partitioned per-scheduler (`instrument_registry_1` through `instrument_registry_N`) to eliminate cross-scheduler contention.
 
@@ -519,9 +519,10 @@ fields() ->
 
 ## Performance Design Choices
 
-### NIF-based Atomic Metrics
+### Lock-free Metric Storage
 
-Metrics use C11 atomics via NIFs for lock-free updates:
+Counters and gauges use C11 `_Atomic double` via a small NIF. Inc/dec
+run a CAS loop in C, set/get are single atomic load/stores:
 
 ```c
 // From c_src/gauge.c
@@ -532,10 +533,19 @@ static void instrument_gauge_change(instrument_gauge_t *g, double delta) {
 }
 ```
 
-This provides:
-- Lock-free updates using CAS (compare-and-swap)
+Histograms use the OTP `atomics` module instead. Each histogram owns
+one atomics array of size N+2:
+
+- slot 1 — IEEE-754 bit pattern of the running sum, updated via
+  `atomics:compare_exchange/4` in a small Erlang CAS loop
+  (see `instrument_atomics:inc_at/3`).
+- slots 2..N+2 — bucket counts as signed int64, updated via
+  `atomics:add/3`.
+
+Both paths give:
+- Lock-free updates using CAS
 - No contention between concurrent writers
-- Sub-microsecond update latency
+- Sub-microsecond update latency on the hot path
 
 ### Scheduler-aware ETS Tables
 
