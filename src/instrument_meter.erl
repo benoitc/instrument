@@ -268,8 +268,7 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
         %% Observer pattern callback - can observe multiple values with attributes
         %% Create an observer function that the callback can call
         Observer = fun(Value, Attrs) ->
-          %% Store observation with attributes
-          store_observable_observation(Name, Value, Attrs, Handle)
+          store_observable_observation(Name, Kind, Value, Attrs, Handle)
         end,
         Callback(Observer)
     end
@@ -279,14 +278,21 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
 collect_observable(_) ->
   ok.
 
-%% Store an observable observation with attributes
-store_observable_observation(_Name, Value, Attrs, Handle) when map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric
-  do_set(Handle, gauge, Value, #{});
-store_observable_observation(_Name, Value, Attrs, Handle) ->
-  %% With attributes - use vec metric
+%% Store an observable observation. The Kind argument is consulted via
+%% storage_type/1 to pick the right vec storage tag (observable_counter
+%% gets its own tag; observable_gauge / observable_up_down_counter both
+%% collapse to gauge).
+store_observable_observation(_Name, _Kind, Value, Attrs, Handle)
+    when map_size(Attrs) =:= 0 ->
+  do_set(Handle, undefined, Value, #{});
+store_observable_observation(_Name, Kind, Value, Attrs, Handle) ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecName = ensure_vec_metric(get_internal_metric_name(Handle), gauge, LabelNames, Handle),
+  VecKind = storage_type(Kind),
+  VecName = ensure_vec_metric(get_internal_metric_name(Handle),
+                              VecKind, LabelNames, Handle),
+  %% All three observable kinds use set-semantics on gauge-shaped vec
+  %% storage (callbacks return absolute values). Wire-type rendering for
+  %% observable_counter is driven by instrument_vector:wire_type/1.
   instrument_metric:set_gauge_vec(VecName, LabelValues, Value).
 
 %% @doc Unregisters an instrument by name.
@@ -472,6 +478,18 @@ create_observable_underlying(Name, observable_up_down_counter) ->
 create_observable_underlying(Name, observable_gauge) ->
   create_underlying_metric(Name, gauge, #{}).
 
+%% Map OTel kind → vec storage type tag used when registering labeled vec
+%% metrics. observable_counter gets its own tag (so the formatter can render
+%% it as counter via wire_type/1); the other observable kinds collapse to
+%% gauge because OTel→Prometheus maps both to gauge.
+storage_type(counter)                    -> counter;
+storage_type(up_down_counter)            -> gauge;
+storage_type(gauge)                      -> gauge;
+storage_type(histogram)                  -> histogram;
+storage_type(observable_counter)         -> observable_counter;
+storage_type(observable_up_down_counter) -> gauge;
+storage_type(observable_gauge)           -> gauge.
+
 register_instrument(Name, Instrument) ->
   Key = {otel_instrument, Name},
   persistent_term:put(Key, Instrument),
@@ -582,8 +600,14 @@ ensure_vec_metric(BaseName, histogram, LabelNames, BaseMetric) ->
     _ ->
       VecName
   end;
-%% Counter and gauge don't need special handling
-ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
+%% Counter, gauge, and observable_counter all use the same lazy-creation
+%% pattern. observable_counter bypasses the public new_*_vec helpers and
+%% calls instrument_vector:new/4 directly because the call site is
+%% internal-only — there is no public observable_counter vec entry point.
+ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric)
+        when Type =:= counter;
+             Type =:= gauge;
+             Type =:= observable_counter ->
   VecName = make_vec_name(BaseName, LabelNames),
   case instrument_registry:lookup(VecName) of
     undefined ->
@@ -592,7 +616,10 @@ ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
           counter ->
             instrument_metric:new_counter_vec(VecName, <<>>, LabelNames);
           gauge ->
-            instrument_metric:new_gauge_vec(VecName, <<>>, LabelNames)
+            instrument_metric:new_gauge_vec(VecName, <<>>, LabelNames);
+          observable_counter ->
+            _ = instrument_vector:new(LabelNames, observable_counter,
+                                      VecName, <<>>)
         end,
         track_vec_metric(BaseName, VecName),
         VecName

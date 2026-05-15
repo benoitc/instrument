@@ -29,7 +29,8 @@
   observable_observer_callback_test/1,
   observable_legacy_callback_test/1,
   observable_multi_attribute_test/1,
-  observable_counter_unlabeled_renders_as_counter/1
+  observable_counter_unlabeled_renders_as_counter/1,
+  observable_counter_renders_as_counter/1
 ]).
 
 all() ->
@@ -44,7 +45,8 @@ all() ->
     observable_observer_callback_test,
     observable_legacy_callback_test,
     observable_multi_attribute_test,
-    observable_counter_unlabeled_renders_as_counter
+    observable_counter_unlabeled_renders_as_counter,
+    observable_counter_renders_as_counter
   ].
 
 init_per_suite(Config) ->
@@ -346,4 +348,30 @@ observable_counter_unlabeled_renders_as_counter(_Config) ->
   %% Must NOT be misrendered as gauge.
   ?assertEqual(nomatch,
                binary:match(Output, <<"# TYPE obs_counter_unlabeled gauge">>)),
+  ok.
+
+observable_counter_renders_as_counter(_Config) ->
+  Meter = instrument_meter:get_meter(<<"obs_counter_labeled_test">>),
+
+  %% 1-arity callback emits one labeled observation per scrape.
+  Callback = fun(Observer) ->
+    Observer(7, #{region => <<"us-east">>})
+  end,
+  _ = instrument_meter:create_observable_counter(
+        Meter, <<"obs_counter_labeled">>, Callback),
+
+  ok = instrument_meter:collect_observables(),
+  Output = instrument_prometheus:format(),
+
+  %% The labeled vec name carries the sorted-attrs suffix (`_region`).
+  %% format_counter adds `_total` on top of that.
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_labeled_region_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output,
+                               <<"obs_counter_labeled_region_total{region=\"us-east\"} 7.0">>)),
+
+  %% Must NOT be misrendered as gauge.
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"# TYPE obs_counter_labeled_region gauge">>)),
   ok.
