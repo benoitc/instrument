@@ -28,7 +28,8 @@
   %% Observer callback tests (OTel spec compliance)
   observable_observer_callback_test/1,
   observable_legacy_callback_test/1,
-  observable_multi_attribute_test/1
+  observable_multi_attribute_test/1,
+  observable_counter_unlabeled_renders_as_counter/1
 ]).
 
 all() ->
@@ -42,7 +43,8 @@ all() ->
     %% Observer callback tests (OTel spec compliance)
     observable_observer_callback_test,
     observable_legacy_callback_test,
-    observable_multi_attribute_test
+    observable_multi_attribute_test,
+    observable_counter_unlabeled_renders_as_counter
   ].
 
 init_per_suite(Config) ->
@@ -317,4 +319,31 @@ observable_multi_attribute_test(_Config) ->
 
   %% Should have recorded observations (at least one data point)
   ?assert(TotalDataPoints >= 1),
+  ok.
+
+observable_counter_unlabeled_renders_as_counter(_Config) ->
+  CountRef = atomics:new(1, [{signed, false}]),
+  atomics:put(CountRef, 1, 0),
+
+  Meter = instrument_meter:get_meter(<<"obs_counter_unlabeled_test">>),
+  Callback = fun() ->
+    atomics:add(CountRef, 1, 1),
+    atomics:get(CountRef, 1)
+  end,
+  _Counter = instrument_meter:create_observable_counter(
+              Meter, <<"obs_counter_unlabeled">>, Callback),
+
+  ok = instrument_meter:collect_observables(),
+
+  Output = instrument_prometheus:format(),
+
+  %% Render must include the counter type tag and the `_total` suffix.
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_unlabeled_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"obs_counter_unlabeled_total 1">>)),
+
+  %% Must NOT be misrendered as gauge.
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"# TYPE obs_counter_unlabeled gauge">>)),
   ok.

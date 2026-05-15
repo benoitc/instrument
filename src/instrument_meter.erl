@@ -263,7 +263,7 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
       {arity, 0} ->
         %% Legacy 0-arity callback - returns single value
         Value = Callback(),
-        do_set(Handle, gauge, Value, #{});
+        do_set(Handle, Kind, Value, #{});
       {arity, 1} ->
         %% Observer pattern callback - can observe multiple values with attributes
         %% Create an observer function that the callback can call
@@ -392,8 +392,7 @@ create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_bin
   end,
   case get_instrument(Name) of
     undefined ->
-      %% Create a gauge that will be updated by callback
-      Handle = create_underlying_metric(Name, gauge, #{}),
+      Handle = create_observable_underlying(Name, Kind),
       Instrument = #otel_instrument{
         name = Name,
         kind = Kind,
@@ -461,6 +460,18 @@ create_underlying_metric(Name, gauge, Opts) ->
   ok = instrument_metric:register(Metric),
   Metric.
 
+%% Map observable kind → underlying storage by delegating to the synchronous
+%% create_underlying_metric/3. The underlying storage shape and the
+%% collect MFA both follow the synchronous counter / gauge / up_down_counter
+%% behaviour. instrument_counter:collect/2 and instrument_gauge:collect/2
+%% are already exported (called via erlang:apply/3 from instrument_registry).
+create_observable_underlying(Name, observable_counter) ->
+  create_underlying_metric(Name, counter, #{});
+create_observable_underlying(Name, observable_up_down_counter) ->
+  create_underlying_metric(Name, up_down_counter, #{});
+create_observable_underlying(Name, observable_gauge) ->
+  create_underlying_metric(Name, gauge, #{}).
+
 register_instrument(Name, Instrument) ->
   Key = {otel_instrument, Name},
   persistent_term:put(Key, Instrument),
@@ -513,6 +524,9 @@ do_record(#metric{name = Name} = Metric, _Kind, Value, Attrs)
 do_record(_, _, _, _) ->
   {error, invalid_handle}.
 
+do_set(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0 ->
+  instrument_nif:set_gauge(Ref, float(Value));
 do_set(#metric{handle = Ref}, _Kind, Value, Attrs)
         when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
   instrument_nif:set_gauge(Ref, float(Value));
