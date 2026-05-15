@@ -478,14 +478,10 @@ create_observable_underlying(Name, observable_up_down_counter) ->
 create_observable_underlying(Name, observable_gauge) ->
   create_underlying_metric(Name, gauge, #{}).
 
-%% Map OTel kind → vec storage type tag used when registering labeled vec
-%% metrics. observable_counter gets its own tag (so the formatter can render
-%% it as counter via wire_type/1); the other observable kinds collapse to
-%% gauge because OTel→Prometheus maps both to gauge.
-storage_type(counter)                    -> counter;
-storage_type(up_down_counter)            -> gauge;
-storage_type(gauge)                      -> gauge;
-storage_type(histogram)                  -> histogram;
+%% Map OTel observable kind → vec storage type tag used when registering
+%% labeled vec metrics. observable_counter gets its own tag (so the formatter
+%% can render it as counter via wire_type/1); the other observable kinds
+%% collapse to gauge because OTel→Prometheus maps both to gauge.
 storage_type(observable_counter)         -> observable_counter;
 storage_type(observable_up_down_counter) -> gauge;
 storage_type(observable_gauge)           -> gauge.
