@@ -498,9 +498,11 @@ register_instrument(Name, Instrument) ->
 %% Unlabeled — kind-agnostic; gauge NIF is sign-permissive.
 do_add(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
         when is_number(Value), map_size(Attrs) =:= 0 ->
+  %% counter-shaped handle (start_time tracked for cumulative temporality)
   instrument_nif:inc_gauge(Ref, float(Value));
 do_add(#metric{handle = Ref}, _Kind, Value, Attrs)
         when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
+  %% gauge-shaped handle (plain ref)
   instrument_nif:inc_gauge(Ref, float(Value));
 
 %% Labeled counter — unchanged behaviour (monotonic vec storage).
@@ -540,9 +542,11 @@ do_record(_, _, _, _) ->
 
 do_set(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
         when is_number(Value), map_size(Attrs) =:= 0 ->
+  %% counter-shaped handle (observable_counter unlabeled write)
   instrument_nif:set_gauge(Ref, float(Value));
 do_set(#metric{handle = Ref}, _Kind, Value, Attrs)
         when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
+  %% gauge-shaped handle (gauge / up_down_counter / observable_gauge / observable_up_down_counter)
   instrument_nif:set_gauge(Ref, float(Value));
 do_set(#metric{name = Name} = Metric, _Kind, Value, Attrs)
         when is_number(Value), map_size(Attrs) > 0 ->
