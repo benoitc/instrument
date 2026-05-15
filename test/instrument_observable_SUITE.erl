@@ -30,7 +30,8 @@
   observable_legacy_callback_test/1,
   observable_multi_attribute_test/1,
   observable_counter_unlabeled_renders_as_counter/1,
-  observable_counter_renders_as_counter/1
+  observable_counter_renders_as_counter/1,
+  observable_counter_with_multiple_label_schemas/1
 ]).
 
 all() ->
@@ -46,7 +47,8 @@ all() ->
     observable_legacy_callback_test,
     observable_multi_attribute_test,
     observable_counter_unlabeled_renders_as_counter,
-    observable_counter_renders_as_counter
+    observable_counter_renders_as_counter,
+    observable_counter_with_multiple_label_schemas
   ].
 
 init_per_suite(Config) ->
@@ -374,4 +376,33 @@ observable_counter_renders_as_counter(_Config) ->
   %% Must NOT be misrendered as gauge.
   ?assertEqual(nomatch,
                binary:match(Output, <<"# TYPE obs_counter_labeled_region gauge">>)),
+  ok.
+
+observable_counter_with_multiple_label_schemas(_Config) ->
+  Meter = instrument_meter:get_meter(<<"obs_counter_multi_schema_test">>),
+
+  %% One observable counter, two distinct attribute-key schemas
+  %% emitted from a single scrape.
+  Callback = fun(Observer) ->
+    Observer(5, #{a => <<"x">>}),
+    Observer(7, #{a => <<"x">>, b => <<"y">>})
+  end,
+  _ = instrument_meter:create_observable_counter(
+        Meter, <<"obs_counter_multi_schema">>, Callback),
+
+  ok = instrument_meter:collect_observables(),
+  Output = instrument_prometheus:format(),
+
+  %% Each label-key schema produces its own vec (suffix derived from
+  %% sorted attribute keys).
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_multi_schema_a_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"obs_counter_multi_schema_a_total{a=\"x\"} 5.0">>)),
+
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_multi_schema_a_b_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output,
+                               <<"obs_counter_multi_schema_a_b_total{a=\"x\",b=\"y\"} 7.0">>)),
   ok.
