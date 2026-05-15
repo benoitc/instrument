@@ -192,9 +192,9 @@ add(Instrument, Value) ->
 %% @doc Adds a value to a Counter or UpDownCounter with attributes.
 -spec add(instrument(), number(), map()) -> ok.
 add(#otel_instrument{kind = counter, handle = Handle}, Value, Attrs) when Value >= 0 ->
-  do_add(Handle, Value, Attrs);
+  do_add(Handle, counter, Value, Attrs);
 add(#otel_instrument{kind = up_down_counter, handle = Handle}, Value, Attrs) ->
-  do_add(Handle, Value, Attrs);
+  do_add(Handle, up_down_counter, Value, Attrs);
 add(_, _, _) ->
   {error, invalid_operation}.
 
@@ -206,7 +206,7 @@ record(Instrument, Value) ->
 %% @doc Records a value in a Histogram with attributes.
 -spec record(instrument(), number(), map()) -> ok.
 record(#otel_instrument{kind = histogram, handle = Handle}, Value, Attrs) ->
-  do_record(Handle, Value, Attrs);
+  do_record(Handle, histogram, Value, Attrs);
 record(_, _, _) ->
   {error, invalid_operation}.
 
@@ -218,7 +218,7 @@ set(Instrument, Value) ->
 %% @doc Sets a value on a Gauge with attributes.
 -spec set(instrument(), number(), map()) -> ok.
 set(#otel_instrument{kind = gauge, handle = Handle}, Value, Attrs) ->
-  do_set(Handle, Value, Attrs);
+  do_set(Handle, gauge, Value, Attrs);
 set(_, _, _) ->
   {error, invalid_operation}.
 
@@ -263,7 +263,7 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
       {arity, 0} ->
         %% Legacy 0-arity callback - returns single value
         Value = Callback(),
-        do_set(Handle, Value, #{});
+        do_set(Handle, gauge, Value, #{});
       {arity, 1} ->
         %% Observer pattern callback - can observe multiple values with attributes
         %% Create an observer function that the callback can call
@@ -282,7 +282,7 @@ collect_observable(_) ->
 %% Store an observable observation with attributes
 store_observable_observation(_Name, Value, Attrs, Handle) when map_size(Attrs) =:= 0 ->
   %% No attributes - use base metric
-  do_set(Handle, Value, #{});
+  do_set(Handle, gauge, Value, #{});
 store_observable_observation(_Name, Value, Attrs, Handle) ->
   %% With attributes - use vec metric
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
@@ -470,40 +470,58 @@ register_instrument(Name, Instrument) ->
     false -> persistent_term:put(otel_instruments, [Name | Names])
   end.
 
-do_add(#metric{handle = {Ref, _StartTime}}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric directly (counter with start_time tracking)
+%% Unlabeled — kind-agnostic; gauge NIF is sign-permissive.
+do_add(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0 ->
   instrument_nif:inc_gauge(Ref, float(Value));
-do_add(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
-  %% No attributes - use base metric directly (plain gauge ref)
+do_add(#metric{handle = Ref}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
   instrument_nif:inc_gauge(Ref, float(Value));
-do_add(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - use vec API
+
+%% Labeled counter — unchanged behaviour (monotonic vec storage).
+do_add(#metric{name = Name} = Metric, counter, Value, Attrs)
+        when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, counter, LabelNames, Metric),
   instrument_metric:inc_counter_vec(VecName, LabelValues, Value);
-do_add(_, _, _) ->
+
+%% Labeled up_down_counter — gauge-shaped vec storage, split on sign so the
+%% existing inc_gauge_vec / dec_gauge_vec primitives apply (both have a >= 0
+%% guard at the gauge layer).
+do_add(#metric{name = Name} = Metric, up_down_counter, Value, Attrs)
+        when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
+  instrument_metric:inc_gauge_vec(VecName, LabelValues, Value);
+do_add(#metric{name = Name} = Metric, up_down_counter, Value, Attrs)
+        when is_number(Value), Value < 0, map_size(Attrs) > 0 ->
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
+  instrument_metric:dec_gauge_vec(VecName, LabelValues, -Value);
+
+do_add(_, _, _, _) ->
   {error, invalid_handle}.
 
-do_record(#metric{} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric directly
+do_record(#metric{} = Metric, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0 ->
   instrument_histogram:observe_histogram(Metric, Value);
-do_record(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - use vec API
+do_record(#metric{name = Name} = Metric, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) > 0 ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, histogram, LabelNames, Metric),
   instrument_metric:observe_histogram_vec(VecName, LabelValues, Value);
-do_record(_, _, _) ->
+do_record(_, _, _, _) ->
   {error, invalid_handle}.
 
-do_set(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric directly
+do_set(#metric{handle = Ref}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
   instrument_nif:set_gauge(Ref, float(Value));
-do_set(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - use vec API
+do_set(#metric{name = Name} = Metric, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) > 0 ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
   instrument_metric:set_gauge_vec(VecName, LabelValues, Value);
-do_set(_, _, _) ->
+do_set(_, _, _, _) ->
   {error, invalid_handle}.
 
 default_boundaries() ->
