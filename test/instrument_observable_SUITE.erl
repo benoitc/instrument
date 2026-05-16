@@ -28,7 +28,10 @@
   %% Observer callback tests (OTel spec compliance)
   observable_observer_callback_test/1,
   observable_legacy_callback_test/1,
-  observable_multi_attribute_test/1
+  observable_multi_attribute_test/1,
+  observable_counter_unlabeled_renders_as_counter/1,
+  observable_counter_renders_as_counter/1,
+  observable_counter_with_multiple_label_schemas/1
 ]).
 
 all() ->
@@ -42,7 +45,10 @@ all() ->
     %% Observer callback tests (OTel spec compliance)
     observable_observer_callback_test,
     observable_legacy_callback_test,
-    observable_multi_attribute_test
+    observable_multi_attribute_test,
+    observable_counter_unlabeled_renders_as_counter,
+    observable_counter_renders_as_counter,
+    observable_counter_with_multiple_label_schemas
   ].
 
 init_per_suite(Config) ->
@@ -317,4 +323,86 @@ observable_multi_attribute_test(_Config) ->
 
   %% Should have recorded observations (at least one data point)
   ?assert(TotalDataPoints >= 1),
+  ok.
+
+observable_counter_unlabeled_renders_as_counter(_Config) ->
+  CountRef = atomics:new(1, [{signed, false}]),
+  atomics:put(CountRef, 1, 0),
+
+  Meter = instrument_meter:get_meter(<<"obs_counter_unlabeled_test">>),
+  Callback = fun() ->
+    atomics:add(CountRef, 1, 1),
+    atomics:get(CountRef, 1)
+  end,
+  _Counter = instrument_meter:create_observable_counter(
+              Meter, <<"obs_counter_unlabeled">>, Callback),
+
+  ok = instrument_meter:collect_observables(),
+
+  Output = instrument_prometheus:format(),
+
+  %% Render must include the counter type tag and the `_total` suffix.
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_unlabeled_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"obs_counter_unlabeled_total 1">>)),
+
+  %% Must NOT be misrendered as gauge.
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"# TYPE obs_counter_unlabeled gauge">>)),
+  ok.
+
+observable_counter_renders_as_counter(_Config) ->
+  Meter = instrument_meter:get_meter(<<"obs_counter_labeled_test">>),
+
+  %% 1-arity callback emits one labeled observation per scrape.
+  Callback = fun(Observer) ->
+    Observer(7, #{region => <<"us-east">>})
+  end,
+  _ = instrument_meter:create_observable_counter(
+        Meter, <<"obs_counter_labeled">>, Callback),
+
+  ok = instrument_meter:collect_observables(),
+  Output = instrument_prometheus:format(),
+
+  %% The labeled vec name carries the sorted-attrs suffix (`_region`).
+  %% format_counter adds `_total` on top of that.
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_labeled_region_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output,
+                               <<"obs_counter_labeled_region_total{region=\"us-east\"} 7.0">>)),
+
+  %% Must NOT be misrendered as gauge.
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"# TYPE obs_counter_labeled_region gauge">>)),
+  ok.
+
+observable_counter_with_multiple_label_schemas(_Config) ->
+  Meter = instrument_meter:get_meter(<<"obs_counter_multi_schema_test">>),
+
+  %% One observable counter, two distinct attribute-key schemas
+  %% emitted from a single scrape.
+  Callback = fun(Observer) ->
+    Observer(5, #{a => <<"x">>}),
+    Observer(7, #{a => <<"x">>, b => <<"y">>})
+  end,
+  _ = instrument_meter:create_observable_counter(
+        Meter, <<"obs_counter_multi_schema">>, Callback),
+
+  ok = instrument_meter:collect_observables(),
+  Output = instrument_prometheus:format(),
+
+  %% Each label-key schema produces its own vec (suffix derived from
+  %% sorted attribute keys).
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_multi_schema_a_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"obs_counter_multi_schema_a_total{a=\"x\"} 5.0">>)),
+
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"# TYPE obs_counter_multi_schema_a_b_total counter">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output,
+                               <<"obs_counter_multi_schema_a_b_total{a=\"x\",b=\"y\"} 7.0">>)),
   ok.

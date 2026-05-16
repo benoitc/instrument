@@ -192,9 +192,9 @@ add(Instrument, Value) ->
 %% @doc Adds a value to a Counter or UpDownCounter with attributes.
 -spec add(instrument(), number(), map()) -> ok.
 add(#otel_instrument{kind = counter, handle = Handle}, Value, Attrs) when Value >= 0 ->
-  do_add(Handle, Value, Attrs);
+  do_add(Handle, counter, Value, Attrs);
 add(#otel_instrument{kind = up_down_counter, handle = Handle}, Value, Attrs) ->
-  do_add(Handle, Value, Attrs);
+  do_add(Handle, up_down_counter, Value, Attrs);
 add(_, _, _) ->
   {error, invalid_operation}.
 
@@ -206,7 +206,7 @@ record(Instrument, Value) ->
 %% @doc Records a value in a Histogram with attributes.
 -spec record(instrument(), number(), map()) -> ok.
 record(#otel_instrument{kind = histogram, handle = Handle}, Value, Attrs) ->
-  do_record(Handle, Value, Attrs);
+  do_record(Handle, histogram, Value, Attrs);
 record(_, _, _) ->
   {error, invalid_operation}.
 
@@ -218,7 +218,7 @@ set(Instrument, Value) ->
 %% @doc Sets a value on a Gauge with attributes.
 -spec set(instrument(), number(), map()) -> ok.
 set(#otel_instrument{kind = gauge, handle = Handle}, Value, Attrs) ->
-  do_set(Handle, Value, Attrs);
+  do_set(Handle, gauge, Value, Attrs);
 set(_, _, _) ->
   {error, invalid_operation}.
 
@@ -263,13 +263,12 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
       {arity, 0} ->
         %% Legacy 0-arity callback - returns single value
         Value = Callback(),
-        do_set(Handle, Value, #{});
+        do_set(Handle, Kind, Value, #{});
       {arity, 1} ->
         %% Observer pattern callback - can observe multiple values with attributes
         %% Create an observer function that the callback can call
         Observer = fun(Value, Attrs) ->
-          %% Store observation with attributes
-          store_observable_observation(Name, Value, Attrs, Handle)
+          store_observable_observation(Name, Kind, Value, Attrs, Handle)
         end,
         Callback(Observer)
     end
@@ -279,14 +278,21 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
 collect_observable(_) ->
   ok.
 
-%% Store an observable observation with attributes
-store_observable_observation(_Name, Value, Attrs, Handle) when map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric
-  do_set(Handle, Value, #{});
-store_observable_observation(_Name, Value, Attrs, Handle) ->
-  %% With attributes - use vec metric
+%% Store an observable observation. The Kind argument is consulted via
+%% storage_type/1 to pick the right vec storage tag (observable_counter
+%% gets its own tag; observable_gauge / observable_up_down_counter both
+%% collapse to gauge).
+store_observable_observation(_Name, _Kind, Value, Attrs, Handle)
+    when map_size(Attrs) =:= 0 ->
+  do_set(Handle, undefined, Value, #{});
+store_observable_observation(_Name, Kind, Value, Attrs, Handle) ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecName = ensure_vec_metric(get_internal_metric_name(Handle), gauge, LabelNames, Handle),
+  VecKind = storage_type(Kind),
+  VecName = ensure_vec_metric(get_internal_metric_name(Handle),
+                              VecKind, LabelNames, Handle),
+  %% All three observable kinds use set-semantics on gauge-shaped vec
+  %% storage (callbacks return absolute values). Wire-type rendering for
+  %% observable_counter is driven by instrument_vector:wire_type/1.
   instrument_metric:set_gauge_vec(VecName, LabelValues, Value).
 
 %% @doc Unregisters an instrument by name.
@@ -392,8 +398,7 @@ create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_bin
   end,
   case get_instrument(Name) of
     undefined ->
-      %% Create a gauge that will be updated by callback
-      Handle = create_underlying_metric(Name, gauge, #{}),
+      Handle = create_observable_underlying(Name, Kind),
       Instrument = #otel_instrument{
         name = Name,
         kind = Kind,
@@ -461,6 +466,26 @@ create_underlying_metric(Name, gauge, Opts) ->
   ok = instrument_metric:register(Metric),
   Metric.
 
+%% Map observable kind → underlying storage by delegating to the synchronous
+%% create_underlying_metric/3. The underlying storage shape and the
+%% collect MFA both follow the synchronous counter / gauge / up_down_counter
+%% behaviour. instrument_counter:collect/2 and instrument_gauge:collect/2
+%% are already exported (called via erlang:apply/3 from instrument_registry).
+create_observable_underlying(Name, observable_counter) ->
+  create_underlying_metric(Name, counter, #{});
+create_observable_underlying(Name, observable_up_down_counter) ->
+  create_underlying_metric(Name, up_down_counter, #{});
+create_observable_underlying(Name, observable_gauge) ->
+  create_underlying_metric(Name, gauge, #{}).
+
+%% Map OTel observable kind → vec storage type tag used when registering
+%% labeled vec metrics. observable_counter gets its own tag (so the formatter
+%% can render it as counter via wire_type/1); the other observable kinds
+%% collapse to gauge because OTel→Prometheus maps both to gauge.
+storage_type(observable_counter)         -> observable_counter;
+storage_type(observable_up_down_counter) -> gauge;
+storage_type(observable_gauge)           -> gauge.
+
 register_instrument(Name, Instrument) ->
   Key = {otel_instrument, Name},
   persistent_term:put(Key, Instrument),
@@ -470,40 +495,65 @@ register_instrument(Name, Instrument) ->
     false -> persistent_term:put(otel_instruments, [Name | Names])
   end.
 
-do_add(#metric{handle = {Ref, _StartTime}}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric directly (counter with start_time tracking)
+%% Unlabeled — kind-agnostic; gauge NIF is sign-permissive.
+do_add(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0 ->
+  %% counter-shaped handle (start_time tracked for cumulative temporality)
   instrument_nif:inc_gauge(Ref, float(Value));
-do_add(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
-  %% No attributes - use base metric directly (plain gauge ref)
+do_add(#metric{handle = Ref}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
+  %% gauge-shaped handle (plain ref)
   instrument_nif:inc_gauge(Ref, float(Value));
-do_add(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - use vec API
+
+%% Labeled counter — unchanged behaviour (monotonic vec storage).
+do_add(#metric{name = Name} = Metric, counter, Value, Attrs)
+        when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, counter, LabelNames, Metric),
   instrument_metric:inc_counter_vec(VecName, LabelValues, Value);
-do_add(_, _, _) ->
+
+%% Labeled up_down_counter — gauge-shaped vec storage, split on sign so the
+%% existing inc_gauge_vec / dec_gauge_vec primitives apply (both have a >= 0
+%% guard at the gauge layer).
+do_add(#metric{name = Name} = Metric, up_down_counter, Value, Attrs)
+        when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
+  instrument_metric:inc_gauge_vec(VecName, LabelValues, Value);
+do_add(#metric{name = Name} = Metric, up_down_counter, Value, Attrs)
+        when is_number(Value), Value < 0, map_size(Attrs) > 0 ->
+  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
+  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
+  instrument_metric:dec_gauge_vec(VecName, LabelValues, -Value);
+
+do_add(_, _, _, _) ->
   {error, invalid_handle}.
 
-do_record(#metric{} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric directly
+do_record(#metric{} = Metric, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0 ->
   instrument_histogram:observe_histogram(Metric, Value);
-do_record(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - use vec API
+do_record(#metric{name = Name} = Metric, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) > 0 ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, histogram, LabelNames, Metric),
   instrument_metric:observe_histogram_vec(VecName, LabelValues, Value);
-do_record(_, _, _) ->
+do_record(_, _, _, _) ->
   {error, invalid_handle}.
 
-do_set(#metric{handle = Ref}, Value, Attrs) when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% No attributes - use base metric directly
+do_set(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0 ->
+  %% counter-shaped handle (observable_counter unlabeled write)
   instrument_nif:set_gauge(Ref, float(Value));
-do_set(#metric{name = Name} = Metric, Value, Attrs) when is_number(Value), map_size(Attrs) > 0 ->
-  %% With attributes - use vec API
+do_set(#metric{handle = Ref}, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
+  %% gauge-shaped handle (gauge / up_down_counter / observable_gauge / observable_up_down_counter)
+  instrument_nif:set_gauge(Ref, float(Value));
+do_set(#metric{name = Name} = Metric, _Kind, Value, Attrs)
+        when is_number(Value), map_size(Attrs) > 0 ->
   {LabelNames, LabelValues} = attrs_to_labels(Attrs),
   VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
   instrument_metric:set_gauge_vec(VecName, LabelValues, Value);
-do_set(_, _, _) ->
+do_set(_, _, _, _) ->
   {error, invalid_handle}.
 
 default_boundaries() ->
@@ -550,8 +600,14 @@ ensure_vec_metric(BaseName, histogram, LabelNames, BaseMetric) ->
     _ ->
       VecName
   end;
-%% Counter and gauge don't need special handling
-ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
+%% Counter, gauge, and observable_counter all use the same lazy-creation
+%% pattern. observable_counter bypasses the public new_*_vec helpers and
+%% calls instrument_vector:new/4 directly because the call site is
+%% internal-only — there is no public observable_counter vec entry point.
+ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric)
+        when Type =:= counter;
+             Type =:= gauge;
+             Type =:= observable_counter ->
   VecName = make_vec_name(BaseName, LabelNames),
   case instrument_registry:lookup(VecName) of
     undefined ->
@@ -560,7 +616,10 @@ ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric) ->
           counter ->
             instrument_metric:new_counter_vec(VecName, <<>>, LabelNames);
           gauge ->
-            instrument_metric:new_gauge_vec(VecName, <<>>, LabelNames)
+            instrument_metric:new_gauge_vec(VecName, <<>>, LabelNames);
+          observable_counter ->
+            _ = instrument_vector:new(LabelNames, observable_counter,
+                                      VecName, <<>>)
         end,
         track_vec_metric(BaseName, VecName),
         VecName

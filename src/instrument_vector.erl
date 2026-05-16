@@ -118,10 +118,11 @@ remove_label(Name, Label) ->
 clear_labels(Name) ->
   instrument_registry:clear_labels(Name).
 
-validate_metric_type(counter) -> ok;
-validate_metric_type(gauge) -> ok;
-validate_metric_type(histogram) -> ok;
-validate_metric_type(_) -> erlang:error(bad_metric).
+validate_metric_type(counter)            -> ok;
+validate_metric_type(gauge)              -> ok;
+validate_metric_type(histogram)          -> ok;
+validate_metric_type(observable_counter) -> ok;
+validate_metric_type(_)                  -> erlang:error(bad_metric).
 
 find_label(Label, Vector) when is_list(Label) ->
   VLen = length(Label),
@@ -151,10 +152,12 @@ collect(Name) ->
     undefined ->
       #{name => Name, type => unknown, data => []};
     #metric{handle = #vector{} = Vector} ->
-      #vector{help = Help, metric = Type, labels = LabelNames, labels_map = LabelsMap} = Vector,
+      #vector{help = Help, metric = StoredType,
+              labels = LabelNames, labels_map = LabelsMap} = Vector,
+      WireType = wire_type(StoredType),
       Data = maps:fold(
         fun(LabelValues, Metric, Acc) ->
-          Val = collect_metric_value(Type, Metric),
+          Val = collect_metric_value(StoredType, Metric),
           [{LabelNames, LabelValues, Val} | Acc]
         end,
         [],
@@ -162,7 +165,7 @@ collect(Name) ->
       ),
       #{name => Name,
         help => Help,
-        type => Type,
+        type => WireType,
         labels => LabelNames,
         data => Data}
   end.
@@ -172,7 +175,15 @@ collect_metric_value(counter, Metric) ->
 collect_metric_value(gauge, Metric) ->
   instrument_gauge:get_gauge(Metric);
 collect_metric_value(histogram, Metric) ->
-  instrument_histogram:get_histogram(Metric).
+  instrument_histogram:get_histogram(Metric);
+collect_metric_value(observable_counter, Metric) ->
+  instrument_gauge:get_gauge(Metric).
+
+%% Map an internal storage type to the Prometheus wire type used by the
+%% formatter. observable_counter is gauge-shaped under the hood but renders
+%% as counter (and gets the `_total` suffix via format_counter).
+wire_type(observable_counter) -> counter;
+wire_type(T)                  -> T.
 
 %% get_or_create_label/2 - get or create labeled metric instance
 -spec get_or_create_label(metric_name(), label_values()) -> {ok, #metric{}} | {error, term()}.

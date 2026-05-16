@@ -37,7 +37,8 @@
   %% Temporality tests (OTel spec compliance)
   temporality_option_cumulative_test/1,
   temporality_option_delta_test/1,
-  temporality_default_test/1
+  temporality_default_test/1,
+  add_negative_to_labeled_up_down_counter/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -67,7 +68,8 @@ all() ->
     %% Temporality tests (OTel spec compliance)
     temporality_option_cumulative_test,
     temporality_option_delta_test,
-    temporality_default_test
+    temporality_default_test,
+    add_negative_to_labeled_up_down_counter
   ].
 
 init_per_suite(Config) ->
@@ -550,4 +552,28 @@ temporality_default_test(_Config) ->
   %% Cleanup
   ok = instrument_meter:unregister_instrument(<<"default_temp_counter">>),
   ok = instrument_meter:unregister_instrument(<<"default_temp_histogram">>),
+  ok.
+
+%% Labeled up_down_counter previously crashed on negative deltas because the
+%% labeled write path hardcoded counter-shaped storage.
+add_negative_to_labeled_up_down_counter(_Config) ->
+  Meter = instrument_meter:get_meter(<<"signed_updc_test">>),
+  Counter = instrument_meter:create_up_down_counter(Meter, <<"signed_active">>),
+
+  %% Establish a positive baseline at one label set.
+  ok = instrument_meter:add(Counter, 5, #{a => <<"x">>}),
+
+  %% Negative delta at the same label set — must not crash.
+  ok = instrument_meter:add(Counter, -2, #{a => <<"x">>}),
+
+  %% Rendered exposition must reflect 5 - 2 = 3.0 for {a="x"}.
+  Output1 = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output1, <<"signed_active_a{a=\"x\"} 3.0">>)),
+
+  %% A negative-only label set must register and render as a negative gauge.
+  ok = instrument_meter:add(Counter, -1, #{a => <<"y">>}),
+  Output2 = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output2, <<"signed_active_a{a=\"y\"} -1.0">>)),
   ok.

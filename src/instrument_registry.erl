@@ -382,6 +382,8 @@ mk_metric(#vector{ name=Name, help=Help, metric=counter }) ->
   instrument_counter:new_counter(Name, Help);
 mk_metric(#vector{ name=Name, help=Help, metric=gauge }) ->
   instrument_gauge:new_gauge(Name, Help);
+mk_metric(#vector{ name=Name, help=Help, metric=observable_counter }) ->
+  instrument_gauge:new_gauge(Name, Help);
 mk_metric(#vector{ name=Name, help=Help, metric=histogram, buckets=Buckets }) ->
   instrument_histogram:new_histogram(Name, Help, Buckets).
 
