@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-05-16
+
+### Fixed
+- `observable_counter` instruments now render as Prometheus `counter`
+  with the `_total` suffix instead of `gauge`, in both unlabeled and
+  labeled exposition. Previously `create_observable_instrument/3`
+  hardcoded gauge-shaped underlying storage and the labeled write path
+  tagged the vec as `gauge`, so tooling that relies on `# TYPE … counter`
+  to decide rate-ability (Grafana, `rate()`, alerting rules) saw the
+  wrong type.
+- `instrument_meter:add/3` on a labeled `up_down_counter` no longer
+  crashes on negative deltas. The labeled write path previously hardcoded
+  counter-shaped vec storage and hit `instrument_counter:inc_counter/2`'s
+  `Val >= 0` guard. It now routes through gauge-shaped vec storage with
+  a sign split, so `add(Instrument, -1, #{label => ...})` decrements the
+  per-label-set value.
+
 ## [1.1.0] - 2026-05-11
 
 ### Changed
