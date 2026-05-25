@@ -96,6 +96,10 @@ create_vector_metric(Name, Label) ->
 init([]) ->
   _ = create_tables(),
   _ = create_label_counts_table(),
+  %% A registry restart is a clean slate: erase any stale instrument-owned
+  %% persistent_term entries left by a previous incarnation before resetting
+  %% the index, so get_instrument/1 returns undefined and create_* re-registers.
+  clear_instrument_persistent_terms(),
   %% Initialize persistent_term index as empty
   persistent_term:put(instrument_metrics, []),
   {ok, #state{metrics_set = sets:new()}}.
@@ -260,19 +264,35 @@ do_delete_all() ->
                end,
   lists:foreach(fun release_exemplar_reservoirs/1, AllMetrics),
   [ets:delete_all_objects(T) || T <- instrument_lib:tables()],
-  %% Clear all persistent_term entries
-  Keys = persistent_term:get(),
-  [persistent_term:erase(K) || {K, _} <- Keys,
-   is_tuple(K), tuple_size(K) >= 2,
-   element(1, K) =:= instrument_metric orelse
-   element(1, K) =:= instrument_label orelse
-   element(1, K) =:= instrument_label_overflow],
+  %% Clear all instrument-owned persistent_term entries
+  clear_instrument_persistent_terms(),
   %% Clear label accounting
   case ets:info(?LABEL_COUNTS_TABLE, name) of
     undefined -> ok;
     _ -> ets:delete_all_objects(?LABEL_COUNTS_TABLE)
   end,
   persistent_term:put(instrument_metrics, []).
+
+
+%% Erase every instrument-owned persistent_term entry so a registry restart or
+%% full reset is a clean slate. The NIF/atomics resources held by the erased
+%% records are released by refcount when the entries are erased.
+clear_instrument_persistent_terms() ->
+  [persistent_term:erase(K)
+   || {K, _} <- persistent_term:get(), is_instrument_key(K)].
+
+is_instrument_key(otel_instruments) ->
+  true;
+is_instrument_key(K) when is_tuple(K), tuple_size(K) >= 2 ->
+  case element(1, K) of
+    instrument_metric         -> true;
+    instrument_label          -> true;
+    instrument_label_overflow -> true;
+    otel_instrument           -> true;
+    _                         -> false
+  end;
+is_instrument_key(_) ->
+  false.
 
 
 tables() -> instrument_lib:tables().

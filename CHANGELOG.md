@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.2] - 2026-05-25
+
+### Fixed
+- A registry restart no longer silently drops previously-created OTel
+  instruments. `instrument_registry:init/1` recreated the ETS tables empty
+  and reset the `instrument_metrics` index to `[]`, but left the per-name
+  `persistent_term` entries behind. The surviving `{otel_instrument, Name}`
+  made `instrument_meter:get_instrument/1` return a stale record, so
+  `create_counter` / `create_up_down_counter` / `create_histogram`
+  short-circuited and never re-registered the underlying metric, while the
+  index stayed empty — the metric vanished from `collect_all/0` and the
+  Prometheus export even though `add`/`record` kept succeeding. `init/1` now
+  erases the stale `otel_instrument`, `otel_instruments`, `instrument_metric`,
+  `instrument_label`, and `instrument_label_overflow` entries, so
+  `get_instrument/1` returns `undefined` after a restart and the metric
+  self-heals on the next `create_*`. `unregister_all` clears the same set
+  (it previously missed `otel_instrument` / `otel_instruments`).
+
 ## [1.1.1] - 2026-05-16
 
 ### Fixed
