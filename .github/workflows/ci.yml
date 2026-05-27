@@ -22,6 +22,8 @@ jobs:
             otp: '27'
           - os: ubuntu-latest
             otp: '28'
+          - os: ubuntu-latest
+            otp: '29'
           - os: macos-latest
             otp: '27'
 
@@ -32,7 +34,7 @@ jobs:
         uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ matrix.otp }}
-          rebar3-version: '3.24'
+          rebar3-version: '3.25'
 
       - name: Install CMake (Ubuntu)
         if: runner.os == 'Linux'
@@ -59,7 +61,7 @@ jobs:
         uses: erlef/setup-beam@v1
         with:
           otp-version: '27'
-          rebar3-version: '3.24'
+          rebar3-version: '3.25'
 
       - name: Install CMake
         run: sudo apt-get update && sudo apt-get install -y cmake
@@ -90,7 +92,7 @@ jobs:
         uses: erlef/setup-beam@v1
         with:
           otp-version: '27'
-          rebar3-version: '3.24'
+          rebar3-version: '3.25'
 
       - name: Install CMake
         run: sudo apt-get update && sudo apt-get install -y cmake
