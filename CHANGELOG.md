@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.3] - 2026-05-28
+
+### Fixed
+- OTP 29 compatibility: replaced the deprecated prefix `catch` operator
+  with `try ... catch ... end` throughout `src/` and `test/`. Under OTP 29
+  the prefix form emits a deprecation warning, which `warnings_as_errors`
+  turned into a build failure.
+
+### Changed
+- CI now builds and runs the test suite on OTP 29, alongside OTP 27 and 28.
+- Bumped the `meck` test dependency to 1.2.0. Older versions use the
+  deprecated prefix `catch` in their own source and fail to compile on
+  OTP 29.
+
 ## [1.1.2] - 2026-05-25
 
 ### Fixed
