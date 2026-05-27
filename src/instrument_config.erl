@@ -503,8 +503,7 @@ maybe_add_int(EnvVar, Key, Config) ->
     false -> Config;
     Value ->
       try list_to_integer(Value) of
-        Int when is_integer(Int) -> maps:put(Key, Int, Config);
-        _ -> Config
+        Int when is_integer(Int) -> maps:put(Key, Int, Config)
       catch _:_ -> Config
       end
   end.
@@ -546,15 +545,13 @@ read_log_level() ->
 
 parse_float(Value, Default) ->
   try list_to_float(Value) of
-    F when is_float(F) -> F;
-    _ -> parse_float_as_int(Value, Default)
+    F when is_float(F) -> F
   catch _:_ -> parse_float_as_int(Value, Default)
   end.
 
 parse_float_as_int(Value, Default) ->
   try list_to_integer(Value) of
-    I when is_integer(I) -> float(I);
-    _ -> Default
+    I when is_integer(I) -> float(I)
   catch _:_ -> Default
   end.
 
