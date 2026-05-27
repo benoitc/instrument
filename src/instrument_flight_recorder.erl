@@ -279,7 +279,7 @@ handle_info(_Info, State) ->
 
 terminate(_Reason, _State) ->
   %% Stop the pool
-  catch instrument_tracer_pool:stop_pool(),
+  try instrument_tracer_pool:stop_pool() catch _:_ -> ok end,
   persistent_term:put(?ENABLED_KEY, false),
   ok.
 

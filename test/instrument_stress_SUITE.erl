@@ -93,7 +93,7 @@ init_per_testcase(_TestCase, Config) ->
 
 end_per_testcase(_TestCase, _Config) ->
   %% Clean up any registered metrics
-  catch instrument_metric:unregister_all(),
+  try instrument_metric:unregister_all() catch _:_ -> ok end,
   %% Clear context
   erlang:erase('$instrument_context'),
   ok.

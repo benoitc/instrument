@@ -76,9 +76,9 @@ init_per_testcase(_, Config) ->
   erlang:erase('$instrument_flight_label'),
   erlang:erase('$instrument_flight_session_ref'),
   %% Disable any existing trace on this process
-  catch erlang:trace(self(), false, [send, 'receive']),
+  try erlang:trace(self(), false, [send, 'receive']) catch _:_ -> ok end,
   %% Clear flight recorder buffer
-  catch instrument_flight_recorder:clear(),
+  try instrument_flight_recorder:clear() catch _:_ -> ok end,
   Config.
 
 end_per_testcase(_, _Config) ->
@@ -86,10 +86,10 @@ end_per_testcase(_, _Config) ->
   erlang:erase('$instrument_flight_label'),
   erlang:erase('$instrument_flight_session_ref'),
   %% Disable any existing trace on this process
-  catch erlang:trace(self(), false, [send, 'receive']),
+  try erlang:trace(self(), false, [send, 'receive']) catch _:_ -> ok end,
   %% Disable and clear after each test
-  catch instrument_flight_recorder:disable(),
-  catch instrument_flight_recorder:clear(),
+  try instrument_flight_recorder:disable() catch _:_ -> ok end,
+  try instrument_flight_recorder:clear() catch _:_ -> ok end,
   ok.
 
 %% ============================================================================

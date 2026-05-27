@@ -152,7 +152,7 @@ handle_call({unregister, Module}, _From, State) ->
   ),
   %% Shutdown removed exporters
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:exporter_shutdown(S)
+    try M:exporter_shutdown(S) catch _:_ -> ok end
   end, Removed),
   {reply, ok, State#state{exporters = Remaining}};
 
@@ -168,7 +168,7 @@ handle_call(flush, _From, State) ->
 handle_call(shutdown, _From, State) ->
   State2 = do_flush(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:exporter_shutdown(S)
+    try M:exporter_shutdown(S) catch _:_ -> ok end
   end, State2#state.exporters),
   {reply, ok, State2#state{exporters = []}};
 
@@ -201,7 +201,7 @@ terminate(_Reason, State) ->
   %% Final flush and shutdown
   State2 = do_flush(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:exporter_shutdown(S)
+    try M:exporter_shutdown(S) catch _:_ -> ok end
   end, State2#state.exporters),
   ok.
 
@@ -234,13 +234,15 @@ do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
         %% Skip disabled exporter
         Exporter;
       true ->
-        case catch M:exporter_export(Batch, S) of
+        try M:exporter_export(Batch, S) of
           {ok, NewState} ->
             Exporter#{state => NewState};
           {error, _Reason, NewState} ->
             Exporter#{state => NewState};
           _ ->
             Exporter
+        catch _:_ ->
+          Exporter
         end
     end
   end, Exporters),
@@ -249,11 +251,13 @@ do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
 do_force_flush(#state{exporters = Exporters} = State) ->
   %% Force flush all registered exporters
   NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    case catch M:exporter_force_flush(S) of
+    try M:exporter_force_flush(S) of
       {ok, NewState} ->
         Exporter#{state => NewState};
       _ ->
         Exporter
+    catch _:_ ->
+      Exporter
     end
   end, Exporters),
   State#state{exporters = NewExporters}.

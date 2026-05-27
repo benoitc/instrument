@@ -49,11 +49,11 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TC, Config) ->
   reset_stub(),
-  _ = catch instrument_span_processor_batch:shutdown(),
+  try instrument_span_processor_batch:shutdown() catch _:_ -> ok end,
   Config.
 
 end_per_testcase(_TC, _Config) ->
-  _ = catch instrument_span_processor_batch:shutdown(),
+  try instrument_span_processor_batch:shutdown() catch _:_ -> ok end,
   ok.
 
 %% Classification tests

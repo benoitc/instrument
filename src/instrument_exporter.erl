@@ -156,7 +156,7 @@ handle_call({unregister, Module}, _From, State) ->
   ),
   %% Shutdown removed exporters
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    try M:shutdown(S) catch _:_ -> ok end
   end, Removed),
   {reply, ok, State#state{exporters = Remaining}};
 
@@ -177,7 +177,7 @@ handle_call(shutdown, _From, State) ->
     HookFun -> gen_server:cast(self(), {unregister_hook, HookFun})
   end,
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    try M:shutdown(S) catch _:_ -> ok end
   end, State2#state.exporters),
   {reply, ok, State2#state{exporters = [], hook_fun = undefined}};
 
@@ -197,7 +197,7 @@ handle_cast({export_spans, Spans}, State) ->
   {noreply, State3};
 
 handle_cast({unregister_hook, HookFun}, State) ->
-  catch instrument_tracer:unregister_exporter(HookFun),
+  try instrument_tracer:unregister_exporter(HookFun) catch _:_ -> ok end,
   {noreply, State};
 
 handle_cast(_Msg, State) ->
@@ -219,7 +219,7 @@ terminate(_Reason, State) ->
     HookFun -> instrument_tracer:unregister_exporter(HookFun)
   end,
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:shutdown(S)
+    try M:shutdown(S) catch _:_ -> ok end
   end, State2#state.exporters),
   ok.
 
@@ -252,13 +252,15 @@ do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
         %% Skip disabled exporter
         Exporter;
       true ->
-        case catch M:export(Batch, S) of
+        try M:export(Batch, S) of
           {ok, NewState} ->
             Exporter#{state => NewState};
           {error, _Reason, NewState} ->
             Exporter#{state => NewState};
           _ ->
             Exporter
+        catch _:_ ->
+          Exporter
         end
     end
   end, Exporters),
