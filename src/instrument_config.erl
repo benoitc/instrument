@@ -385,9 +385,10 @@ get_span_attribute_value_length_limit() ->
   case os:getenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT") of
     false -> unlimited;
     Value ->
-      case catch list_to_integer(Value) of
+      try list_to_integer(Value) of
         Int when is_integer(Int), Int > 0 -> Int;
         _ -> unlimited
+      catch _:_ -> unlimited
       end
   end.
 
@@ -426,9 +427,10 @@ read_span_limit(EnvVar, Default) ->
   case os:getenv(EnvVar) of
     false -> Default;
     Value ->
-      case catch list_to_integer(Value) of
+      try list_to_integer(Value) of
         Int when is_integer(Int), Int > 0 -> Int;
         _ -> Default
+      catch _:_ -> Default
       end
   end.
 
@@ -500,9 +502,10 @@ maybe_add_int(EnvVar, Key, Config) ->
   case os:getenv(EnvVar) of
     false -> Config;
     Value ->
-      case catch list_to_integer(Value) of
+      try list_to_integer(Value) of
         Int when is_integer(Int) -> maps:put(Key, Int, Config);
         _ -> Config
+      catch _:_ -> Config
       end
   end.
 
@@ -542,13 +545,17 @@ read_log_level() ->
   end.
 
 parse_float(Value, Default) ->
-  case catch list_to_float(Value) of
+  try list_to_float(Value) of
     F when is_float(F) -> F;
-    _ ->
-      case catch list_to_integer(Value) of
-        I when is_integer(I) -> float(I);
-        _ -> Default
-      end
+    _ -> parse_float_as_int(Value, Default)
+  catch _:_ -> parse_float_as_int(Value, Default)
+  end.
+
+parse_float_as_int(Value, Default) ->
+  try list_to_integer(Value) of
+    I when is_integer(I) -> float(I);
+    _ -> Default
+  catch _:_ -> Default
   end.
 
 apply_config(Config) ->

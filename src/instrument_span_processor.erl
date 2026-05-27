@@ -211,14 +211,14 @@ handle_call({unregister, ProcessorModule}, _From, State) ->
   case lists:keyfind(ProcessorModule, 1, State#state.processors) of
     {ProcessorModule, external} ->
       %% Stop externally managed gen_server (batch processor)
-      catch ProcessorModule:shutdown(),
-      catch stop_batch_processor(),
+      try ProcessorModule:shutdown() catch _:_ -> ok end,
+      try stop_batch_processor() catch _:_ -> ok end,
       NewProcessors = lists:keydelete(ProcessorModule, 1, State#state.processors),
       NewState = State#state{processors = NewProcessors},
       refresh_processor_cache(NewState),
       {reply, ok, NewState};
     {ProcessorModule, ProcessorState} ->
-      catch ProcessorModule:shutdown(ProcessorState),
+      try ProcessorModule:shutdown(ProcessorState) catch _:_ -> ok end,
       NewProcessors = lists:keydelete(ProcessorModule, 1, State#state.processors),
       NewState = State#state{processors = NewProcessors},
       refresh_processor_cache(NewState),
@@ -255,10 +255,10 @@ handle_call({on_start, Span, ParentCtx}, _From, State) ->
 handle_call(shutdown, _From, State) ->
   lists:foreach(
     fun({Module, external}) ->
-      catch Module:shutdown(),
-      catch stop_batch_processor();
+      try Module:shutdown() catch _:_ -> ok end,
+      try stop_batch_processor() catch _:_ -> ok end;
     ({Module, ProcessorState}) ->
-      catch Module:shutdown(ProcessorState)
+      try Module:shutdown(ProcessorState) catch _:_ -> ok end
     end,
     State#state.processors
   ),
@@ -267,9 +267,9 @@ handle_call(shutdown, _From, State) ->
 handle_call(force_flush, _From, State) ->
   lists:foreach(
     fun({Module, external}) ->
-      catch Module:force_flush();
+      try Module:force_flush() catch _:_ -> ok end;
     ({Module, ProcessorState}) ->
-      catch Module:force_flush(ProcessorState)
+      try Module:force_flush(ProcessorState) catch _:_ -> ok end
     end,
     State#state.processors
   ),
@@ -307,10 +307,10 @@ terminate(_Reason, State) ->
   %% Shutdown all processors
   lists:foreach(
     fun({Module, external}) ->
-      catch Module:shutdown(),
-      catch stop_batch_processor();
+      try Module:shutdown() catch _:_ -> ok end,
+      try stop_batch_processor() catch _:_ -> ok end;
     ({Module, ProcessorState}) ->
-      catch Module:shutdown(ProcessorState)
+      try Module:shutdown(ProcessorState) catch _:_ -> ok end
     end,
     State#state.processors
   ),

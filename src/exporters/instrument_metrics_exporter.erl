@@ -169,7 +169,7 @@ handle_call({unregister, Module}, _From, State) ->
     State#state.exporters
   ),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:exporter_shutdown(S)
+    try M:exporter_shutdown(S) catch _:_ -> ok end
   end, Removed),
   {reply, ok, State#state{exporters = Remaining}};
 
@@ -184,7 +184,7 @@ handle_call(flush, _From, State) ->
 handle_call(shutdown, _From, State) ->
   State2 = do_export(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:exporter_shutdown(S)
+    try M:exporter_shutdown(S) catch _:_ -> ok end
   end, State2#state.exporters),
   cancel_timer(State2),
   {reply, ok, State2#state{exporters = []}};
@@ -209,7 +209,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, State) ->
   do_export(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    catch M:exporter_shutdown(S)
+    try M:exporter_shutdown(S) catch _:_ -> ok end
   end, State#state.exporters),
   ok.
 
@@ -243,13 +243,15 @@ do_export(#state{exporters = Exporters} = State) ->
         %% Skip disabled exporter
         Exporter;
       true ->
-        case catch M:exporter_export(TransformedMetrics, S) of
+        try M:exporter_export(TransformedMetrics, S) of
           {ok, NewState} ->
             Exporter#{state => NewState};
           {error, _Reason, NewState} ->
             Exporter#{state => NewState};
           _ ->
             Exporter
+        catch _:_ ->
+          Exporter
         end
     end
   end, Exporters),

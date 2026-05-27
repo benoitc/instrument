@@ -88,7 +88,7 @@ init_per_suite(Config) ->
   end.
 
 end_per_suite(Config) ->
-  catch application:stop(instrument),
+  try application:stop(instrument) catch _:_ -> ok end,
   Config.
 
 init_per_group(prometheus, Config) ->
@@ -204,7 +204,7 @@ end_per_group(prometheus, Config) ->
 
 end_per_group(jaeger, Config) ->
   %% Unregister exporter
-  catch instrument_exporter:unregister(instrument_exporter_otlp),
+  try instrument_exporter:unregister(instrument_exporter_otlp) catch _:_ -> ok end,
   %% Stop container
   case proplists:get_value(jaeger_container, Config) of
     undefined -> ok;

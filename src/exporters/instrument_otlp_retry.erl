@@ -124,9 +124,10 @@ retry_after_ms(Headers) ->
     undefined -> undefined;
     Value ->
       Trimmed = string:trim(to_binary(Value)),
-      case catch binary_to_integer(Trimmed) of
+      try binary_to_integer(Trimmed) of
         Sec when is_integer(Sec), Sec >= 0 -> Sec * 1000;
         _ -> undefined
+      catch _:_ -> undefined
       end
   end.
 

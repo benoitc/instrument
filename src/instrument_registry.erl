@@ -213,8 +213,8 @@ do_unreg_metric(Name) ->
   %% Delete from all ETS tables (they're partitioned by scheduler)
   [ets:delete(T, Name) || T <- tables()],
   %% Remove from persistent_term
-  catch persistent_term:erase({instrument_metric, Name}),
-  catch persistent_term:erase({instrument_label_overflow, Name}),
+  try persistent_term:erase({instrument_metric, Name}) catch _:_ -> ok end,
+  try persistent_term:erase({instrument_label_overflow, Name}) catch _:_ -> ok end,
   %% Erase cached labels for this metric
   _ = erase_cached_labels(Name, Metric),
   _ = release_exemplar_reservoirs(Metric),

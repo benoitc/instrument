@@ -74,7 +74,7 @@ init_per_testcase(_TestCase, Config) ->
     instrument_span_processor:unregister(M)
   end, instrument_span_processor:list()),
   %% Clear persistent term state
-  catch persistent_term:erase({instrument_span_processor_tail_sampler, state}),
+  try persistent_term:erase({instrument_span_processor_tail_sampler, state}) catch _:_ -> ok end,
   Config.
 
 end_per_testcase(_TestCase, _Config) ->
@@ -82,7 +82,7 @@ end_per_testcase(_TestCase, _Config) ->
   lists:foreach(fun(M) ->
     instrument_span_processor:unregister(M)
   end, instrument_span_processor:list()),
-  catch persistent_term:erase({instrument_span_processor_tail_sampler, state}),
+  try persistent_term:erase({instrument_span_processor_tail_sampler, state}) catch _:_ -> ok end,
   ok.
 
 %% ============================================================================

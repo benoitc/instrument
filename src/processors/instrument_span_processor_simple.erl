@@ -102,7 +102,7 @@ shutdown() ->
     undefined ->
       ok;
     #state{exporter = Exporter, exporter_state = ExporterState} ->
-      catch Exporter:shutdown(ExporterState),
+      try Exporter:shutdown(ExporterState) catch _:_ -> ok end,
       persistent_term:erase({?MODULE, state})
   end,
   ok.

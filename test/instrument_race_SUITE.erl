@@ -93,16 +93,16 @@ end_per_group(_Group, _Config) ->
 init_per_testcase(_TestCase, Config) ->
   %% Clean up processors
   lists:foreach(fun(M) ->
-    catch instrument_span_processor:unregister(M)
+    try instrument_span_processor:unregister(M) catch _:_ -> ok end
   end, instrument_span_processor:list()),
   Config.
 
 end_per_testcase(_TestCase, _Config) ->
   %% Clean up any registered metrics
-  catch instrument_metric:unregister_all(),
+  try instrument_metric:unregister_all() catch _:_ -> ok end,
   %% Clean up processors
   lists:foreach(fun(M) ->
-    catch instrument_span_processor:unregister(M)
+    try instrument_span_processor:unregister(M) catch _:_ -> ok end
   end, instrument_span_processor:list()),
   %% Clear context
   erlang:erase('$instrument_context'),
@@ -232,7 +232,7 @@ registry_double_register(_Config) ->
     ?assert(HasSuccess),
 
     %% Clean up
-    catch instrument_metric:unregister(Name)
+    try instrument_metric:unregister(Name) catch _:_ -> ok end
   end, lists:seq(1, NumIterations)),
   ok.
 
@@ -496,7 +496,7 @@ batch_flush_during_batch(_Config) ->
   %% Flusher
   FlusherPid = spawn_link(fun() ->
     lists:foreach(fun(_) ->
-      catch instrument_span_processor:force_flush(),
+      try instrument_span_processor:force_flush() catch _:_ -> ok end,
       timer:sleep(30)
     end, lists:seq(1, 5)),
     Parent ! {self(), done}

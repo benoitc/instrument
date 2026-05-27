@@ -391,7 +391,8 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
         SessionRef -> instrument_tracer_nif:deactivate_session_resource(SessionRef)
       end,
       %% Fully disable tracing for this process (all flags + tracer)
-      catch erlang:trace(self(), false, [send, 'receive', set_on_spawn, set_on_link]);
+      try erlang:trace(self(), false, [send, 'receive', set_on_spawn, set_on_link])
+      catch _:_ -> ok end;
     _ ->
       ok
   end,
