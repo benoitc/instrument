@@ -505,6 +505,12 @@ observable_context_shared_source_test(_Config) ->
 %% erase entries added by callbacks that ran before it (merge, not replace).
 %% A seed writer runs first so the accumulator is non-empty when the
 %% fresh-map writer returns: wholesale replacement would erase the seed.
+%%
+%% The "Created FIRST -> runs LAST" ordering used by this and the following
+%% tests relies on register_instrument prepending to the otel_instruments
+%% list (collection iterates it head-first). The public API leaves collection
+%% order unspecified; these tests pin it down only to make merge-precedence
+%% assertions deterministic.
 observable_context_merge_semantics_test(_Config) ->
   Parent = self(),
   Meter = instrument_meter:get_meter(<<"ctx_merge_test">>),
