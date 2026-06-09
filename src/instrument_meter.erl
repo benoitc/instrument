@@ -160,6 +160,11 @@ create_gauge(Meter, Name, Opts) ->
 %% Callback can be:
 %% - 0-arity: fun() -> number() - returns a single value
 %% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+%% - 2-arity: fun(Observe, Ctx) -> map() - like 1-arity, but additionally
+%%   receives the per-cycle context map shared by all arity-2 callbacks of
+%%   one collect_observables/0 cycle; the returned map is merged into it.
+%%   Use it to source an expensive value once per cycle under an agreed key
+%%   and reuse it from the other callbacks. See {@link collect_observables/0}.
 -spec create_observable_counter(meter(), binary() | atom(), fun()) -> instrument().
 create_observable_counter(Meter, Name, Callback) when is_function(Callback) ->
   create_observable_instrument(Meter, Name, observable_counter, Callback).
@@ -168,6 +173,11 @@ create_observable_counter(Meter, Name, Callback) when is_function(Callback) ->
 %% Callback can be:
 %% - 0-arity: fun() -> number() - returns a single value
 %% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+%% - 2-arity: fun(Observe, Ctx) -> map() - like 1-arity, but additionally
+%%   receives the per-cycle context map shared by all arity-2 callbacks of
+%%   one collect_observables/0 cycle; the returned map is merged into it.
+%%   Use it to source an expensive value once per cycle under an agreed key
+%%   and reuse it from the other callbacks. See {@link collect_observables/0}.
 -spec create_observable_gauge(meter(), binary() | atom(), fun()) -> instrument().
 create_observable_gauge(Meter, Name, Callback) when is_function(Callback) ->
   create_observable_instrument(Meter, Name, observable_gauge, Callback).
@@ -176,6 +186,11 @@ create_observable_gauge(Meter, Name, Callback) when is_function(Callback) ->
 %% Callback can be:
 %% - 0-arity: fun() -> number() - returns a single value
 %% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+%% - 2-arity: fun(Observe, Ctx) -> map() - like 1-arity, but additionally
+%%   receives the per-cycle context map shared by all arity-2 callbacks of
+%%   one collect_observables/0 cycle; the returned map is merged into it.
+%%   Use it to source an expensive value once per cycle under an agreed key
+%%   and reuse it from the other callbacks. See {@link collect_observables/0}.
 -spec create_observable_up_down_counter(meter(), binary() | atom(), fun()) -> instrument().
 create_observable_up_down_counter(Meter, Name, Callback) when is_function(Callback) ->
   create_observable_instrument(Meter, Name, observable_up_down_counter, Callback).
@@ -247,6 +262,17 @@ list_instruments() ->
 
 %% @doc Invokes all observable instrument callbacks.
 %% This should be called before metrics collection to update observable values.
+%%
+%% A fresh context map (`#{}') is threaded through the callbacks of one
+%% collection cycle. Arity-2 callbacks (`fun(Observe, Ctx)') receive it and
+%% return a map that is merged into it (`maps:merge/2', callback entries
+%% win), which lets several observables reuse a value that is expensive to
+%% source (compute it once under an agreed key, read it everywhere else).
+%% The map lives for exactly one cycle. Arity-0/1 callbacks never see it.
+%% Collection order is unspecified: use get-or-compute in every callback
+%% (the first one to need the value sources and stores it) rather than
+%% designating a producer callback. A non-map return is ignored - the
+%% context is kept unchanged and the callback's observations still count.
 -spec collect_observables() -> ok.
 collect_observables() ->
   Instruments = list_instruments(),

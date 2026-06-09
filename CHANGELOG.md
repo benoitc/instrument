@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Observable instrument callbacks can now take arity 2:
+  `fun(Observe, Ctx)`. `Ctx` is a plain map seeded empty at the start of
+  each `instrument_meter:collect_observables/0` cycle and threaded through
+  the callbacks; the callback's returned map is merged into it (callback
+  entries win). Callbacks that derive several metrics from one expensive
+  source (e.g. a single heavy RPC) can store the fetched payload under an
+  agreed key and reuse it within the cycle instead of fetching once per
+  instrument. Arity-0 and arity-1 callbacks are unchanged.
+
 ## [1.1.3] - 2026-05-28
 
 ### Fixed
