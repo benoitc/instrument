@@ -36,7 +36,7 @@
 -author("benoitc").
 
 %% Public API
--export([new/1]).
+-export([new/1, encode_metrics/1]).
 
 %% Exporter callbacks
 -export([exporter_init/1, exporter_export/2, exporter_shutdown/1]).
@@ -237,8 +237,8 @@ encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := 
   %% Get individual bucket counts (not cumulative)
   BucketCounts = [maps:get(count, B, 0) || B <- Buckets],
   %% ExplicitBounds excludes +Inf
-  ExplicitBounds = [maps:get(upper_bound, B) || B <- Buckets,
-                    maps:get(upper_bound, B) =/= infinity],
+  ExplicitBounds = [maps:get(bound, B) || B <- Buckets,
+                    maps:get(bound, B) =/= infinity],
   Exemplars = maps:get(exemplars, Value, []),
   Base = #{
     <<"attributes">> => encode_attributes(Attrs),
