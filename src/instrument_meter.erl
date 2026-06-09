@@ -250,10 +250,18 @@ list_instruments() ->
 -spec collect_observables() -> ok.
 collect_observables() ->
   Instruments = list_instruments(),
-  lists:foreach(fun collect_observable/1, Instruments),
+  _ = lists:foldl(fun collect_observable/2, #{}, Instruments),
   ok.
 
-collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observable, Handle, Callback}})
+%% Runs one observable instrument's callback and threads the per-cycle
+%% context map. Arity-0/1 callbacks never see the context and pass it
+%% through unchanged. Arity-2 callbacks receive it and return a map that
+%% is merged into the accumulator (callback entries win). Entries are
+%% only ever added or overwritten during a cycle, never removed. The
+%% non-map guard and the merge both run INSIDE the try: a throwing
+%% callback or a bad return resolves to the unchanged context and
+%% collection continues.
+collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observable, Handle, Callback}}, Ctx)
     when Kind =:= observable_counter;
          Kind =:= observable_gauge;
          Kind =:= observable_up_down_counter ->
@@ -263,20 +271,32 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
       {arity, 0} ->
         %% Legacy 0-arity callback - returns single value
         Value = Callback(),
-        do_set(Handle, Kind, Value, #{});
+        do_set(Handle, Kind, Value, #{}),
+        Ctx;
       {arity, 1} ->
         %% Observer pattern callback - can observe multiple values with attributes
         %% Create an observer function that the callback can call
         Observer = fun(Value, Attrs) ->
           store_observable_observation(Name, Kind, Value, Attrs, Handle)
         end,
-        Callback(Observer)
+        Callback(Observer),
+        Ctx;
+      {arity, 2} ->
+        %% Shared-context callback - additionally receives the per-cycle
+        %% context map so callbacks can reuse an expensively sourced value
+        Observer = fun(Value, Attrs) ->
+          store_observable_observation(Name, Kind, Value, Attrs, Handle)
+        end,
+        case Callback(Observer, Ctx) of
+          NewCtx when is_map(NewCtx) -> maps:merge(Ctx, NewCtx);
+          _ -> Ctx
+        end
     end
   catch
-    _:_ -> ok
+    _:_ -> Ctx
   end;
-collect_observable(_) ->
-  ok.
+collect_observable(_, Ctx) ->
+  Ctx.
 
 %% Store an observable observation. The Kind argument is consulted via
 %% storage_type/1 to pick the right vec storage tag (observable_counter
@@ -389,11 +409,12 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_m
 create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_atom(Name) ->
   create_observable_instrument(Meter, atom_to_binary(Name, utf8), Kind, Callback);
 create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_binary(Name), is_function(Callback) ->
-  %% Validate callback arity (0 or 1)
+  %% Validate callback arity (0, 1, or 2)
   Arity = erlang:fun_info(Callback, arity),
   case Arity of
     {arity, 0} -> ok;
     {arity, 1} -> ok;
+    {arity, 2} -> ok;
     _ -> error({invalid_callback_arity, Arity})
   end,
   case get_instrument(Name) of

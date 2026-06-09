@@ -31,7 +31,10 @@
   observable_multi_attribute_test/1,
   observable_counter_unlabeled_renders_as_counter/1,
   observable_counter_renders_as_counter/1,
-  observable_counter_with_multiple_label_schemas/1
+  observable_counter_with_multiple_label_schemas/1,
+  %% Shared collection-context tests
+  observable_context_callback_test/1,
+  observable_context_shared_source_test/1
 ]).
 
 all() ->
@@ -48,7 +51,10 @@ all() ->
     observable_multi_attribute_test,
     observable_counter_unlabeled_renders_as_counter,
     observable_counter_renders_as_counter,
-    observable_counter_with_multiple_label_schemas
+    observable_counter_with_multiple_label_schemas,
+    %% Shared collection-context tests
+    observable_context_callback_test,
+    observable_context_shared_source_test
   ].
 
 init_per_suite(Config) ->
@@ -405,4 +411,82 @@ observable_counter_with_multiple_label_schemas(_Config) ->
   ?assertNotEqual(nomatch,
                   binary:match(Output,
                                <<"obs_counter_multi_schema_a_b_total{a=\"x\",b=\"y\"} 7.0">>)),
+  ok.
+
+%% ============================================================================
+%% Shared Collection-Context Tests
+%% ============================================================================
+
+%% An arity-2 callback is accepted at registration, is invoked with an
+%% observer and a map context, and its observations are recorded like any
+%% other observable.
+observable_context_callback_test(_Config) ->
+  Parent = self(),
+  Meter = instrument_meter:get_meter(<<"ctx_cb_test">>),
+  Gauge = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_cb_gauge">>,
+    fun(Observe, Ctx) ->
+      Parent ! {ctx_seen, Ctx},
+      Observe(42.0, #{host => <<"a">>}),
+      Ctx
+    end
+  ),
+  ?assertEqual(observable_gauge, Gauge#otel_instrument.kind),
+  ?assertEqual(<<"ctx_cb_gauge">>, Gauge#otel_instrument.name),
+  ok = instrument_meter:collect_observables(),
+  receive
+    {ctx_seen, Ctx} -> ?assert(is_map(Ctx))
+  after 1000 ->
+    ct:fail(arity2_callback_not_invoked)
+  end,
+  %% Note: collect/0 triggers a second collection cycle internally;
+  %% a second {ctx_seen, _} message may sit in the mailbox. Harmless.
+  Metrics = instrument_metrics_exporter:collect(),
+  GaugeMetrics = [M || #{name := N} = M <- Metrics,
+                       binary:match(N, <<"ctx_cb_gauge">>) =/= nomatch],
+  ?assert(length(GaugeMetrics) >= 1),
+  ok.
+
+%% Two callbacks share one expensive source through the context: the source
+%% runs exactly once per cycle, and again on the next cycle (fresh map).
+observable_context_shared_source_test(_Config) ->
+  SourceCalls = atomics:new(1, [{signed, false}]),
+  GetOrCompute = fun(Ctx) ->
+    case Ctx of
+      #{ctx_shared_stats := S} ->
+        {S, Ctx};
+      _ ->
+        atomics:add(SourceCalls, 1, 1),
+        S = #{queue_depth => 5, connections => 3},
+        {S, Ctx#{ctx_shared_stats => S}}
+    end
+  end,
+  Meter = instrument_meter:get_meter(<<"ctx_shared_test">>),
+  _G1 = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_shared_queue_depth">>,
+    fun(Observe, Ctx) ->
+      {Stats, Ctx1} = GetOrCompute(Ctx),
+      Observe(maps:get(queue_depth, Stats), #{}),
+      Ctx1
+    end
+  ),
+  _G2 = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_shared_connections">>,
+    fun(Observe, Ctx) ->
+      {Stats, Ctx1} = GetOrCompute(Ctx),
+      Observe(maps:get(connections, Stats), #{}),
+      Ctx1
+    end
+  ),
+  %% One cycle: whichever callback runs first computes; the other reuses.
+  %% (Do NOT call instrument_metrics_exporter:collect/0 here - it runs an
+  %% extra cycle and would skew the source-call count.)
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(1, atomics:get(SourceCalls, 1)),
+  %% Next cycle seeds a fresh map: the source is computed again.
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(2, atomics:get(SourceCalls, 1)),
   ok.
