@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- OTLP metrics: a histogram no longer raises `{badkey, upper_bound}` during
+  encoding. Previously any histogram present caused the encoder to crash and,
+  because the whole batch is encoded under one `catch`, silently dropped every
+  metric in that export (counters and gauges included).
+- OTLP histogram `bucketCounts` are now per-bucket counts as the OTLP spec
+  requires, instead of the cumulative counts stored internally (which made
+  every bucket over-count on spec-compliant backends).
+
 ## [1.1.3] - 2026-05-28
 
 ### Fixed
