@@ -1,9 +1,10 @@
 -module(instrument_otlp_histogram_SUITE).
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 -export([histogram_batch_encodes_test/1]).
+-export([histogram_bucket_counts_per_bucket_test/1]).
 -include_lib("stdlib/include/assert.hrl").
 
-all() -> [histogram_batch_encodes_test].
+all() -> [histogram_batch_encodes_test, histogram_bucket_counts_per_bucket_test].
 
 init_per_suite(Config) ->
   _ = application:ensure_all_started(crypto),
@@ -43,4 +44,17 @@ histogram_batch_encodes_test(_Config) ->
   Names = [maps:get(<<"name">>, M) || M <- all_metrics(decode(Json))],
   ?assert(lists:member(<<"c_otlp">>, Names)),
   ?assert(lists:member(<<"h_otlp">>, Names)),
+  ok.
+
+%% bucketCounts must be PER-BUCKET deltas, not cumulative. explicitBounds
+%% excludes +Inf and is exactly one shorter than bucketCounts.
+histogram_bucket_counts_per_bucket_test(_Config) ->
+  Json = instrument_metrics_exporter_otlp:encode_metrics([hist_metric(<<"h_otlp">>)]),
+  [Hist] = [M || M <- all_metrics(decode(Json)), maps:get(<<"name">>, M) =:= <<"h_otlp">>],
+  [DP] = maps:get(<<"dataPoints">>, maps:get(<<"histogram">>, Hist)),
+  %% cumulative [2,5,7,8] -> per-bucket [2,3,2,1]; counts are encoded as strings
+  ?assertEqual([<<"2">>, <<"3">>, <<"2">>, <<"1">>], maps:get(<<"bucketCounts">>, DP)),
+  ?assertEqual([1, 5, 10], maps:get(<<"explicitBounds">>, DP)),
+  ?assertEqual(4, length(maps:get(<<"bucketCounts">>, DP))),
+  ?assertEqual(3, length(maps:get(<<"explicitBounds">>, DP))),
   ok.
