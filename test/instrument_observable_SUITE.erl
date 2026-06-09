@@ -34,7 +34,12 @@
   observable_counter_with_multiple_label_schemas/1,
   %% Shared collection-context tests
   observable_context_callback_test/1,
-  observable_context_shared_source_test/1
+  observable_context_shared_source_test/1,
+  observable_context_merge_semantics_test/1,
+  observable_context_same_key_overwrite_test/1,
+  observable_context_nonmap_return_test/1,
+  observable_context_error_test/1,
+  observable_context_mixed_arity_test/1
 ]).
 
 all() ->
@@ -54,7 +59,12 @@ all() ->
     observable_counter_with_multiple_label_schemas,
     %% Shared collection-context tests
     observable_context_callback_test,
-    observable_context_shared_source_test
+    observable_context_shared_source_test,
+    observable_context_merge_semantics_test,
+    observable_context_same_key_overwrite_test,
+    observable_context_nonmap_return_test,
+    observable_context_error_test,
+    observable_context_mixed_arity_test
   ].
 
 init_per_suite(Config) ->
@@ -489,4 +499,208 @@ observable_context_shared_source_test(_Config) ->
   %% Next cycle seeds a fresh map: the source is computed again.
   ok = instrument_meter:collect_observables(),
   ?assertEqual(2, atomics:get(SourceCalls, 1)),
+  ok.
+
+%% A callback that returns a fresh map containing only its own key must not
+%% erase entries added by callbacks that ran before it (merge, not replace).
+%% A seed writer runs first so the accumulator is non-empty when the
+%% fresh-map writer returns: wholesale replacement would erase the seed.
+observable_context_merge_semantics_test(_Config) ->
+  Parent = self(),
+  Meter = instrument_meter:get_meter(<<"ctx_merge_test">>),
+  %% Created FIRST -> runs LAST: must see BOTH the seed and the writer's key.
+  _Reader = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_merge_reader">>,
+    fun(Observe, Ctx) ->
+      Parent ! {merge_reader,
+                maps:get(ctx_merge_key, Ctx, missing),
+                maps:get(ctx_merge_seed, Ctx, missing)},
+      Observe(1, #{}),
+      Ctx
+    end
+  ),
+  %% Created SECOND -> runs SECOND. Returns a FRESH map (not Ctx#{...}):
+  %% under merge semantics its entry is added and the seed is NOT erased.
+  _Writer = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_merge_writer">>,
+    fun(Observe, _Ctx) ->
+      Observe(1, #{}),
+      #{ctx_merge_key => merge_value}
+    end
+  ),
+  %% Created THIRD -> runs FIRST: seeds the accumulator.
+  _Seed = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_merge_seed_writer">>,
+    fun(Observe, Ctx) ->
+      Observe(1, #{}),
+      Ctx#{ctx_merge_seed => seeded}
+    end
+  ),
+  ok = instrument_meter:collect_observables(),
+  receive
+    {merge_reader, KeyV, SeedV} ->
+      ?assertEqual(merge_value, KeyV),
+      ?assertEqual(seeded, SeedV)
+  after 1000 ->
+    ct:fail(merge_reader_not_invoked)
+  end,
+  ok.
+
+%% When two callbacks write the same key, the later-running callback's
+%% entry wins (maps:merge/2 with the callback's return on the right).
+observable_context_same_key_overwrite_test(_Config) ->
+  Parent = self(),
+  Meter = instrument_meter:get_meter(<<"ctx_overwrite_test">>),
+  %% Created FIRST -> runs LAST: reads the surviving value.
+  _Reader = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_overwrite_reader">>,
+    fun(Observe, Ctx) ->
+      Parent ! {overwrite_reader, maps:get(ctx_contested_key, Ctx, missing)},
+      Observe(1, #{}),
+      Ctx
+    end
+  ),
+  %% Created SECOND -> runs SECOND: overwrites the first runner's entry.
+  _W2 = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_overwrite_w2">>,
+    fun(Observe, _Ctx) ->
+      Observe(1, #{}),
+      #{ctx_contested_key => second_writer}
+    end
+  ),
+  %% Created THIRD -> runs FIRST: writes the initial entry.
+  _W1 = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_overwrite_w1">>,
+    fun(Observe, _Ctx) ->
+      Observe(1, #{}),
+      #{ctx_contested_key => first_writer}
+    end
+  ),
+  ok = instrument_meter:collect_observables(),
+  receive
+    {overwrite_reader, V} -> ?assertEqual(second_writer, V)
+  after 1000 ->
+    ct:fail(overwrite_reader_not_invoked)
+  end,
+  ok.
+
+%% A callback that forgets to return a map only loses its own contribution;
+%% the context accumulated so far flows on to later callbacks.
+observable_context_nonmap_return_test(_Config) ->
+  Parent = self(),
+  Meter = instrument_meter:get_meter(<<"ctx_nonmap_test">>),
+  %% Created FIRST -> runs LAST: must still see the writer's key.
+  _Reader = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_nonmap_reader">>,
+    fun(Observe, Ctx) ->
+      Parent ! {nonmap_reader, maps:get(ctx_nonmap_key, Ctx, missing)},
+      Observe(1, #{}),
+      Ctx
+    end
+  ),
+  %% Created SECOND -> runs SECOND: returns ok instead of a map.
+  _Sloppy = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_nonmap_sloppy">>,
+    fun(Observe, _Ctx) ->
+      Observe(1, #{}),
+      ok
+    end
+  ),
+  %% Created THIRD -> runs FIRST: writes the key.
+  _Writer = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_nonmap_writer">>,
+    fun(Observe, Ctx) ->
+      Observe(1, #{}),
+      Ctx#{ctx_nonmap_key => present}
+    end
+  ),
+  ok = instrument_meter:collect_observables(),
+  receive
+    {nonmap_reader, V} -> ?assertEqual(present, V)
+  after 1000 ->
+    ct:fail(nonmap_reader_not_invoked)
+  end,
+  %% The sloppy callback's observation is still recorded - only its context
+  %% contribution is lost. (collect/0 runs an extra collection cycle; the
+  %% context assertion above has already been consumed, so it's harmless.)
+  Metrics = instrument_metrics_exporter:collect(),
+  Names = [N || #{name := N} <- Metrics],
+  ?assert(lists:any(fun(N) -> binary:match(N, <<"ctx_nonmap_sloppy">>) =/= nomatch end, Names)),
+  ok.
+
+%% A throwing arity-2 callback is swallowed like any other observable
+%% callback error; collection continues and earlier context entries remain
+%% visible to later callbacks.
+observable_context_error_test(_Config) ->
+  Parent = self(),
+  Meter = instrument_meter:get_meter(<<"ctx_error_test">>),
+  %% Created FIRST -> runs LAST: must still see the writer's key.
+  _Reader = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_error_reader">>,
+    fun(Observe, Ctx) ->
+      Parent ! {error_reader, maps:get(ctx_error_key, Ctx, missing)},
+      Observe(1, #{}),
+      Ctx
+    end
+  ),
+  %% Created SECOND -> runs SECOND: throws.
+  _Thrower = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_error_thrower">>,
+    fun(_Observe, _Ctx) ->
+      error(intentional_ctx_error)
+    end
+  ),
+  %% Created THIRD -> runs FIRST: writes the key.
+  _Writer = instrument_meter:create_observable_gauge(
+    Meter,
+    <<"ctx_error_writer">>,
+    fun(Observe, Ctx) ->
+      Observe(1, #{}),
+      Ctx#{ctx_error_key => survived}
+    end
+  ),
+  ok = instrument_meter:collect_observables(),
+  receive
+    {error_reader, V} -> ?assertEqual(survived, V)
+  after 1000 ->
+    ct:fail(error_reader_not_invoked)
+  end,
+  ok.
+
+%% Arity-0, arity-1 and arity-2 callbacks coexist in one registry and all
+%% record their observations in the same collection cycle.
+observable_context_mixed_arity_test(_Config) ->
+  ValueRef = atomics:new(1, [{signed, true}]),
+  atomics:put(ValueRef, 1, 11),
+  Meter = instrument_meter:get_meter(<<"ctx_mixed_test">>),
+  _A0 = instrument_meter:create_observable_gauge(
+    Meter, <<"ctx_mixed_a0">>, fun() -> atomics:get(ValueRef, 1) end),
+  _A1 = instrument_meter:create_observable_gauge(
+    Meter, <<"ctx_mixed_a1">>, fun(Observe) -> Observe(22, #{}) end),
+  _A2 = instrument_meter:create_observable_gauge(
+    Meter, <<"ctx_mixed_a2">>, fun(Observe, Ctx) -> Observe(33, #{}), Ctx end),
+  ok = instrument_meter:collect_observables(),
+  %% collect/0 triggers a second collection cycle internally; harmless here -
+  %% assertions below are name-presence only and the gauges re-set the same values.
+  Metrics = instrument_metrics_exporter:collect(),
+  %% Comprehension pattern (not lists:any with a map-pattern fun head):
+  %% it silently skips any metric entry without a name key.
+  Names = [N || #{name := N} <- Metrics],
+  HasMetric = fun(NamePart) ->
+    lists:any(fun(N) -> binary:match(N, NamePart) =/= nomatch end, Names)
+  end,
+  ?assert(HasMetric(<<"ctx_mixed_a0">>)),
+  ?assert(HasMetric(<<"ctx_mixed_a1">>)),
+  ?assert(HasMetric(<<"ctx_mixed_a2">>)),
   ok.
