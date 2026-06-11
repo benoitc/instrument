@@ -64,15 +64,26 @@ start_prometheus(Name, ScrapePort) ->
         {unix, darwin} -> "";
         _ -> "--add-host=host.docker.internal:host-gateway "
       end,
-      Cmd = io_lib:format(
-        "docker run -d --name ~s -p 9090:9090 "
-        "-v ~s:/etc/prometheus "
+      %% No bind mount: Docker variants whose VM does not share the host /tmp
+      %% (e.g. Rancher Desktop on macOS) silently mount an empty directory and
+      %% the container exits on the missing config. create + docker cp + start
+      %% moves the bytes through the daemon API and works everywhere.
+      Create = io_lib:format(
+        "docker create --name ~s -p 9090:9090 "
         "~s"
         "prom/prometheus:latest "
         "--config.file=/etc/prometheus/prometheus.yml "
-        "--web.listen-address=0.0.0.0:9090 2>&1", [Name, TmpDir, HostFlag]),
-      Result = os:cmd(lists:flatten(Cmd)),
-      parse_docker_result(Result, Name);
+        "--web.listen-address=0.0.0.0:9090 2>&1", [Name, HostFlag]),
+      case parse_docker_result(os:cmd(lists:flatten(Create)), Name) of
+        {ok, _} ->
+          CpCmd = io_lib:format("docker cp ~s ~s:/etc/prometheus/prometheus.yml 2>&1",
+                                [ConfigPath, Name]),
+          _ = os:cmd(lists:flatten(CpCmd)),
+          StartResult = os:cmd(io_lib:format("docker start ~s 2>&1", [Name])),
+          parse_docker_result(StartResult, Name);
+        Error ->
+          Error
+      end;
     {error, Reason} ->
       {error, Reason}
   end.
