@@ -425,8 +425,8 @@ metrics_collector_error_isolation(_Config) ->
     meck:unload(crashing_collector),
     ok.
 
-%% Regression test: OTel tuple names {otel, Name} and {otel_vec, Name} must be
-%% matched correctly when looking up metrics by base name
+%% Regression test: OTel tuple names {otel, Name} must be matched correctly
+%% when looking up metrics by base name (no {otel_vec, _} names exist)
 metrics_otel_tuple_name_matching(_Config) ->
     %% Create OTel meter metrics (which use tuple names internally)
     Meter = instrument_meter:get_meter(<<"test_matching">>),
@@ -437,7 +437,7 @@ metrics_otel_tuple_name_matching(_Config) ->
     %% Add values - without attributes uses {otel, Name}
     ok = instrument_meter:add(Counter, 10),
 
-    %% Add values with attributes - creates {otel_vec, Name_label} metrics
+    %% Add values with attributes - lands in the series store under the real name
     ok = instrument_meter:add(Counter, 5, #{method => <<"GET">>}),
     ok = instrument_meter:add(Counter, 3, #{method => <<"POST">>}),
 
