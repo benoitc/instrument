@@ -102,6 +102,7 @@ init([]) ->
   clear_instrument_persistent_terms(),
   %% Initialize persistent_term index as empty
   persistent_term:put(instrument_metrics, []),
+  ok = instrument_series:init(),
   {ok, #state{metrics_set = sets:new()}}.
 
 
@@ -281,7 +282,10 @@ clear_instrument_persistent_terms() ->
   [persistent_term:erase(K)
    || {K, _} <- persistent_term:get(), is_instrument_key(K)].
 
+%% instrument_row entries are swept from Task 8 on (write path lands the prefix)
 is_instrument_key(otel_instruments) ->
+  true;
+is_instrument_key(instrument_family_seq) ->
   true;
 is_instrument_key(K) when is_tuple(K), tuple_size(K) >= 2 ->
   case element(1, K) of
@@ -289,6 +293,8 @@ is_instrument_key(K) when is_tuple(K), tuple_size(K) >= 2 ->
     instrument_label          -> true;
     instrument_label_overflow -> true;
     otel_instrument           -> true;
+    instrument_family         -> true;
+    instrument_family_idx     -> true;
     _                         -> false
   end;
 is_instrument_key(_) ->
