@@ -16,6 +16,7 @@
 
 -export([
   init/0,
+  reset/0,
   ensure_family/5,
   ensure_custom/2,
   family/1,
@@ -34,12 +35,48 @@ init() ->
   persistent_term:put(instrument_family_seq, FamSeq),
   ok.
 
+%% Reset the series store to a clean-but-initialized state. Called from the
+%% registry's full-reset path (unregister_all / do_delete_all), which sweeps
+%% every instrument-owned persistent_term key — including instrument_family_seq
+%% — so the seq counter must be re-minted here or the next ensure_family/write
+%% would fail on the missing ref. Clears the arbiter rows too so a re-created
+%% same-named family wins its insert_new claim cleanly. The per-family chain pt
+%% keys (instrument_row/instrument_label/instrument_family*) are erased by the
+%% registry's own sweep; this only owns the ETS state and the seq ref.
+-spec reset() -> ok.
+reset() ->
+  case ets:info(?TAB, name) of
+    undefined -> ok;
+    _ -> ets:delete_all_objects(?TAB)
+  end,
+  persistent_term:put(instrument_family_seq, atomics:new(1, [])),
+  ok.
+
+%% Read the live family-sequence atomics ref. During unregister_all the registry
+%% sweeps instrument_family_seq out of persistent_term and reset/0 re-mints a
+%% fresh ref — there is a brief window where the key is absent. Rather than
+%% crashing with badarg, spin with erlang:yield() up to 50 times waiting for
+%% reset/0 to complete, then raise a clear error if it never arrives.
+family_seq() ->
+  family_seq(50).
+
+family_seq(0) ->
+  error(instrument_series_not_initialized);
+family_seq(N) ->
+  case persistent_term:get(instrument_family_seq, undefined) of
+    undefined ->
+      erlang:yield(),
+      family_seq(N - 1);
+    Ref ->
+      Ref
+  end.
+
 %% Create-or-get a family. Duplicate create returns the existing meta without
 %% a kind check (master parity).
 -spec ensure_family(term(), atom(), binary(), [term()] | undefined,
                     [number()] | undefined) -> #family{}.
 ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
-  FamSeq = persistent_term:get(instrument_family_seq),
+  FamSeq = family_seq(),
   Meta = #family{
     kind = Kind,
     help = Help,
@@ -73,7 +110,7 @@ ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
 %% Custom-collector family (instrument_metric:register/1 compat).
 -spec ensure_custom(term(), {module(), atom(), list()}) -> ok.
 ensure_custom(Name, MFA) ->
-  FamSeq = persistent_term:get(instrument_family_seq),
+  FamSeq = family_seq(),
   Meta = {custom, MFA, atomics:add_get(FamSeq, 1, 1)},
   case ets:insert_new(?TAB, {{Name, family}, Meta}) of
     true ->
