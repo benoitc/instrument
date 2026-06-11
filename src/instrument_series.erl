@@ -19,7 +19,8 @@
   ensure_family/5,
   ensure_custom/2,
   family/1,
-  write/4
+  write/4,
+  collect_all/0
 ]).
 
 -define(TAB, instrument_series).
@@ -166,6 +167,10 @@ overflow_canon(Declared) ->
   {Sorted, [?OVERFLOW_VALUE || _ <- Sorted]}.
 
 claim_row(Name, #family{} = Fam, Canon, CacheKey, WriteFun) ->
+  {Names, _Values} = Canon,
+  %% canonical names must arrive sorted: the scrape-time union umerge and the
+  %% ordered chain rendering both depend on it; cheap to assert once per series
+  true = (Names =:= lists:sort(Names)),
   Row = mint_row(Name, Fam, Canon),
   case ets:insert_new(?TAB, {{Name, Canon}, Row}) of
     true ->
@@ -218,3 +223,74 @@ mint_handle(histogram, Bounds0, RowName) ->
 %% a histogram's exemplar reservoir lives in ETS and must be released.
 discard_row(#metric{} = Row) ->
   instrument_histogram:cleanup(Row).
+
+%% Pure literal-area reads: regenerate the key space from the counters, get
+%% each slot from pt. No ETS on this path. Holes (unregistered families,
+%% removed labels, in-flight publications) are skipped.
+%% {custom, MFA} collectors must return formatter-compatible maps by convention.
+-spec collect_all() -> [map()].
+collect_all() ->
+  %% defensive: callers can reach collect before the registry supervisor finishes init (early scrape); a missing seq ref means no families exist yet
+  case persistent_term:get(instrument_family_seq, undefined) of
+    undefined -> [];
+    FamSeq -> collect_all(FamSeq)
+  end.
+
+collect_all(FamSeq) ->
+  N = atomics:get(FamSeq, 1),
+  lists:reverse(lists:foldl(fun(K, Acc) ->
+    case persistent_term:get({instrument_family_idx, K}, undefined) of
+      undefined -> Acc;
+      Name ->
+        case persistent_term:get({instrument_family, Name}, undefined) of
+          undefined -> Acc;
+          {custom, {M, F, A}, _Idx} ->
+            try [erlang:apply(M, F, A) | Acc]
+            catch Class:Reason:Stacktrace ->
+              logger:warning("Metric collector ~p:~p failed: ~p:~p",
+                             [M, F, Class, Reason],
+                             #{mfa => {M, F, length(A)}, stacktrace => Stacktrace}),
+              Acc
+            end;
+          #family{} = Fam ->
+            case collect_family(Name, Fam) of
+              empty -> Acc;
+              Entry -> [Entry | Acc]
+            end
+        end
+    end
+  end, [], lists:seq(1, N))).
+
+collect_family(Name, #family{kind = Kind, help = Help, start_time = T0,
+                             declared_labels = Declared, row_seq = Seq}) ->
+  RowN = atomics:get(Seq, 1),
+  {Data, Union0} = lists:foldl(fun(S, {DataAcc, UnionAcc}) ->
+    case persistent_term:get({instrument_row, Name, S}, undefined) of
+      undefined -> {DataAcc, UnionAcc};
+      {{Names, Values}, _CacheKey, Row} ->
+        Val = read_row(Kind, Row),
+        %% Names is sorted by construction (canonical form); UnionAcc stays
+        %% sorted as the umerge accumulator — umerge/2 requires both sorted.
+        {[{Names, Values, Val} | DataAcc], lists:umerge(UnionAcc, Names)}
+    end
+  end, {[], []}, lists:seq(1, RowN)),
+  case Data of
+    [] -> empty;
+    _ ->
+      Union = case Declared of
+        undefined -> Union0;
+        _ -> lists:sort(Declared)
+      end,
+      #{name => Name, help => Help, type => wire_type(Kind),
+        start_time => T0, labels => Union, data => lists:reverse(Data)}
+  end.
+
+read_row(counter, Row) -> instrument_counter:get_counter(Row);
+read_row(histogram, Row) -> instrument_histogram:get_histogram(Row);
+read_row(_GaugeLike, Row) -> instrument_gauge:get_gauge(Row).
+
+wire_type(observable_counter) -> counter;
+wire_type(up_down_counter) -> gauge;
+wire_type(observable_gauge) -> gauge;
+wire_type(observable_up_down_counter) -> gauge;
+wire_type(K) -> K.

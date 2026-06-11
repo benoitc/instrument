@@ -17,7 +17,10 @@
   overflow_vec_canon/1,
   unlabeled_negative_updown/1,
   degraded_series_still_writable/1,
-  loser_after_winner_undo_returns_not_found/1
+  loser_after_winner_undo_returns_not_found/1,
+  collect_families/1,
+  collect_skips_holes_and_empty/1,
+  collect_union_and_declared/1
 ]).
 
 all() ->
@@ -31,7 +34,10 @@ all() ->
    overflow_vec_canon,
    unlabeled_negative_updown,
    degraded_series_still_writable,
-   loser_after_winner_undo_returns_not_found].
+   loser_after_winner_undo_returns_not_found,
+   collect_families,
+   collect_skips_holes_and_empty,
+   collect_union_and_declared].
 
 init_per_testcase(_TC, Config) ->
   application:stop(instrument),
@@ -187,3 +193,42 @@ loser_after_winner_undo_returns_not_found(_Config) ->
                instrument_series:write(w8, Canon,
                                        fun() -> Canon end,
                                        fun(R) -> instrument_counter:inc_counter(R) end)).
+
+collect_families(_Config) ->
+  _ = instrument_series:ensure_family(c1, counter, <<"c1 help">>, undefined, undefined),
+  Canon = {[m], [<<"GET">>]},
+  ok = instrument_series:write(c1, Canon, fun() -> Canon end,
+                               fun(R) -> instrument_counter:inc_counter(R, 3) end),
+  [Entry] = [E || #{name := c1} = E <- instrument_series:collect_all()],
+  #{type := counter, help := <<"c1 help">>, labels := [m],
+    data := [{[m], [<<"GET">>], 3.0}], start_time := T} = Entry,
+  ?assert(is_integer(T)),
+  ok.
+
+collect_skips_holes_and_empty(_Config) ->
+  _ = instrument_series:ensure_family(c2, gauge, <<>>, undefined, undefined),
+  ?assertEqual([], [E || #{name := c2} = E <- instrument_series:collect_all()]),
+  _ = instrument_series:ensure_family(c3, counter, <<>>, undefined, undefined),
+  CanonA = {[k], [<<"a">>]}, CanonB = {[k], [<<"b">>]},
+  ok = instrument_series:write(c3, CanonA, fun() -> CanonA end,
+                               fun(R) -> instrument_counter:inc_counter(R) end),
+  ok = instrument_series:write(c3, CanonB, fun() -> CanonB end,
+                               fun(R) -> instrument_counter:inc_counter(R) end),
+  persistent_term:erase({instrument_row, c3, 1}),
+  [#{data := Data}] = [E || #{name := c3} = E <- instrument_series:collect_all()],
+  ?assertEqual([{[k], [<<"b">>], 1.0}], Data),
+  ok.
+
+collect_union_and_declared(_Config) ->
+  _ = instrument_series:ensure_family(c4, counter, <<>>, undefined, undefined),
+  C1 = {[method], [<<"GET">>]}, C2 = {[region], [<<"eu">>]},
+  [ok = instrument_series:write(c4, C, fun() -> C end,
+        fun(R) -> instrument_counter:inc_counter(R) end) || C <- [C1, C2]],
+  [#{labels := Union}] = [E || #{name := c4} = E <- instrument_series:collect_all()],
+  ?assertEqual([method, region], Union),
+  _ = instrument_series:ensure_family(c5, counter, <<>>, [b, a], undefined),
+  C3 = {[a, b], [<<"1">>, <<"2">>]},
+  ok = instrument_series:write(c5, [<<"2">>, <<"1">>], fun() -> C3 end,
+        fun(R) -> instrument_counter:inc_counter(R) end),
+  [#{labels := [a, b]}] = [E || #{name := c5} = E <- instrument_series:collect_all()],
+  ok.
