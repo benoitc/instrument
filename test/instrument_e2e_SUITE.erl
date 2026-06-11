@@ -351,13 +351,18 @@ jaeger_receives_nested_spans(_Config) ->
   %% Flush to ensure export
   ok = instrument_exporter:flush(),
 
-  %% Query Jaeger (retries built into query function)
+  %% query_jaeger_traces only retries while the service has NO traces at all;
+  %% earlier cases in this group already stored traces for the same service,
+  %% so the first response races Jaeger's ingestion of THESE two spans.
+  %% Retry the actual predicate (both spans in one trace) instead.
+  true = wait_for_nested_trace(15),
+  ok.
+
+wait_for_nested_trace(0) ->
+  false;
+wait_for_nested_trace(Retries) ->
   {ok, Result} = instrument_e2e_helpers:query_jaeger_traces(?JAEGER_URL, ?SERVICE_NAME),
-  ct:pal("Jaeger nested spans result: ~p", [Result]),
-
-  %% Find trace with both parent and child spans
   #{<<"data">> := Traces} = Result,
-
   Found = lists:any(fun(Trace) ->
     Spans = maps:get(<<"spans">>, Trace, []),
     HasParent = lists:any(fun(Span) ->
@@ -368,8 +373,13 @@ jaeger_receives_nested_spans(_Config) ->
     end, Spans),
     HasParent andalso HasChild
   end, Traces),
-  true = Found,
-  ok.
+  case Found of
+    true -> true;
+    false ->
+      ct:pal("nested trace not ingested yet, retrying (~p left)", [Retries - 1]),
+      timer:sleep(1000),
+      wait_for_nested_trace(Retries - 1)
+  end.
 
 jaeger_receives_span_with_attributes(_Config) ->
   %% Create span with attributes
@@ -385,27 +395,15 @@ jaeger_receives_span_with_attributes(_Config) ->
   %% Flush to ensure export
   ok = instrument_exporter:flush(),
 
-  %% Query Jaeger (retries built into query function)
-  {ok, Result} = instrument_e2e_helpers:query_jaeger_traces(?JAEGER_URL, ?SERVICE_NAME),
-  ct:pal("Jaeger span with attributes result: ~p", [Result]),
-
-  %% Find our span with attributes
-  #{<<"data">> := Traces} = Result,
-
-  Found = lists:any(fun(Trace) ->
-    Spans = maps:get(<<"spans">>, Trace, []),
-    lists:any(fun(Span) ->
-      case maps:get(<<"operationName">>, Span, <<>>) of
-        <<"e2e_span_with_attrs">> ->
-          Tags = maps:get(<<"tags">>, Span, []),
-          %% Check that we have some tags
-          length(Tags) > 0;
-        _ ->
-          false
-      end
-    end, Spans)
-  end, Traces),
-  true = Found,
+  %% Wait until THIS span is ingested: earlier cases already stored traces
+  %% for the service, so a bare query returns immediately with stale data
+  %% and the assertion races Jaeger's ingestion (same class as the
+  %% nested-spans flake above).
+  {ok, Span} = instrument_e2e_helpers:wait_for_jaeger_span(
+    ?JAEGER_URL, ?SERVICE_NAME, <<"e2e_span_with_attrs">>),
+  ct:pal("Jaeger span with attributes: ~p", [Span]),
+  Tags = maps:get(<<"tags">>, Span, []),
+  true = length(Tags) > 0,
   ok.
 
 jaeger_receives_span_with_events(_Config) ->
