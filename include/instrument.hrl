@@ -19,16 +19,6 @@
   help
 }).
 
-
--record(vector, {
-  name,
-  help,
-  metric,
-  buckets = [],
-  labels = [],
-  labels_map = #{}
-}).
-
 %% Series-store family metadata. Stored once in persistent_term
 %% {instrument_family, Name} and (as the recoverable copy) in the
 %% instrument_series arbiter row {{Name, family}, Meta}. Never replaced on any

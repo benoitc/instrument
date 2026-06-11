@@ -21,7 +21,10 @@
   ensure_custom/2,
   family/1,
   write/4,
-  collect_all/0
+  collect_all/0,
+  remove_row/2,
+  clear_family_rows/1,
+  teardown_family/1
 ]).
 
 -define(TAB, instrument_series).
@@ -204,32 +207,48 @@ overflow_canon(Declared) ->
   {Sorted, [?OVERFLOW_VALUE || _ <- Sorted]}.
 
 claim_row(Name, #family{} = Fam, Canon, CacheKey, WriteFun) ->
-  {Names, _Values} = Canon,
-  %% canonical names must arrive sorted: the scrape-time union umerge and the
-  %% ordered chain rendering both depend on it; cheap to assert once per series
-  true = (Names =:= lists:sort(Names)),
-  Row = mint_row(Name, Fam, Canon),
-  case ets:insert_new(?TAB, {{Name, Canon}, Row}) of
-    true ->
-      %% post-claim family re-check (narrows the unregister race): teardown
-      %% deletes the family arbiter row first
-      case ets:member(?TAB, {Name, family}) of
-        false ->
-          ets:delete(?TAB, {Name, Canon}),
-          discard_row(Row),
-          {error, not_found};
+  %% A degenerate sentinel {[], [_|_]} can only arise from a vec-style
+  %% arity-mismatch reaching a schema-free or []-declared family; reject it
+  %% here so it never mints a cell or occupies a chain slot.
+  case Canon of
+    {[], [_|_]} ->
+      {error, invalid_labels};
+    _ ->
+      {Names, _Values} = Canon,
+      %% canonical names must arrive sorted: the scrape-time union umerge and the
+      %% ordered chain rendering both depend on it; cheap to assert once per series
+      true = (Names =:= lists:sort(Names)),
+      Row = mint_row(Name, Fam, Canon),
+      case ets:insert_new(?TAB, {{Name, Canon}, Row}) of
         true ->
-          S = atomics:add_get(Fam#family.row_seq, 1, 1),
-          persistent_term:put({instrument_row, Name, S}, {Canon, CacheKey, Row}),
-          persistent_term:put({instrument_label, Name, CacheKey}, Row),
-          _ = ets:update_counter(?COUNTS, {count, Name}, {2, 1}, {{count, Name}, 0}),
-          WriteFun(Row)
-      end;
-    false ->
-      discard_row(Row),
-      case ets:lookup_element(?TAB, {Name, Canon}, 2, undefined) of
-        undefined -> {error, not_found};   %% winner undid its claim (family torn down)
-        #metric{} = Existing -> WriteFun(Existing)
+          %% post-claim family re-check (narrows the unregister race): teardown
+          %% deletes the family arbiter row first
+          case ets:member(?TAB, {Name, family}) of
+            false ->
+              ets:delete(?TAB, {Name, Canon}),
+              discard_row(Row),
+              {error, not_found};
+            true ->
+              S = atomics:add_get(Fam#family.row_seq, 1, 1),
+              persistent_term:put({instrument_row, Name, S}, {Canon, CacheKey, Row}),
+              persistent_term:put({instrument_label, Name, CacheKey}, Row),
+              %% The overflow row is a real chain slot but is NOT a live label set:
+              %% it is cap-exempt and tracked by {dropped, Name}, so it must not
+              %% bump the live-series count (which feeds label_count/1 and the cap).
+              case overflow_canon_marker(Canon) of
+                not_overflow ->
+                  _ = ets:update_counter(?COUNTS, {count, Name}, {2, 1}, {{count, Name}, 0});
+                _ ->
+                  ok
+              end,
+              WriteFun(Row)
+          end;
+        false ->
+          discard_row(Row),
+          case ets:lookup_element(?TAB, {Name, Canon}, 2, undefined) of
+            undefined -> {error, not_found};   %% winner undid its claim (family torn down)
+            #metric{} = Existing -> WriteFun(Existing)
+          end
       end
   end.
 
@@ -331,3 +350,116 @@ wire_type(up_down_counter) -> gauge;
 wire_type(observable_gauge) -> gauge;
 wire_type(observable_up_down_counter) -> gauge;
 wire_type(K) -> K.
+
+%% ============================================================================
+%% Teardown helpers (admin-time, serialized by the registry gen_server).
+%% Task 8 reuses these for full instrument teardown.
+%% ============================================================================
+
+%% Remove a single label set's row by its values-list cache key: erase the
+%% cache key and the matching chain slot, drop the arbiter row, release the
+%% row's exemplar reservoir, and decrement the live-series count. The chain
+%% slot becomes a hole (scrapes skip it). Returns ok regardless of whether the
+%% row existed.
+-spec remove_row(term(), list()) -> ok.
+remove_row(Name, CacheKey) ->
+  case family(Name) of
+    #family{row_seq = Seq} ->
+      case persistent_term:get({instrument_label, Name, CacheKey}, undefined) of
+        undefined ->
+          ok;
+        Row ->
+          persistent_term:erase({instrument_label, Name, CacheKey}),
+          %% the chain slot carries the Canon, so erasing it also drops the
+          %% matching arbiter row (keyed by Canon)
+          erase_matching_slot(Name, Seq, CacheKey),
+          instrument_histogram:cleanup(Row),
+          _ = ets:update_counter(?COUNTS, {count, Name}, {2, -1, 0, 0}, {{count, Name}, 0}),
+          ok
+      end;
+    _ ->
+      ok
+  end.
+
+%% Walk the chain to find the slot whose CacheKey matches; erase the chain slot
+%% and delete the arbiter row keyed by that slot's Canon.
+erase_matching_slot(Name, Seq, CacheKey) ->
+  N = atomics:get(Seq, 1),
+  lists:foreach(fun(S) ->
+    case persistent_term:get({instrument_row, Name, S}, undefined) of
+      {Canon, CK, _Row} when CK =:= CacheKey ->
+        persistent_term:erase({instrument_row, Name, S}),
+        ets:delete(?TAB, {Name, Canon});
+      _ ->
+        ok
+    end
+  end, lists:seq(1, N)).
+
+%% Clear every live label set of a family: erase all cache keys and chain
+%% slots, drop arbiter rows, release exemplar reservoirs, and delete the
+%% {count, Name} accounting row. The family meta and its row_seq are
+%% intentionally left untouched — re-minting row_seq would allow an in-flight
+%% first-touch writer (which read the old meta before clear) to publish a slot
+%% S on the shared {instrument_row, Name, S} keyspace that the new chain later
+%% also mints, producing a replacing persistent_term:put on a creation path.
+%% The single-writer-per-slot-key invariant must hold unconditionally; compaction
+%% would require generation-keyed chains — rejected as overengineering for an
+%% admin-time operation. New rows continue numbering from the existing high-water
+%% mark; holes in the chain are the documented, accepted churn bound (§10).
+-spec clear_family_rows(term()) -> ok.
+clear_family_rows(Name) ->
+  case persistent_term:get({instrument_family, Name}, undefined) of
+    #family{row_seq = Seq} ->
+      N = atomics:get(Seq, 1),
+      lists:foreach(fun(S) ->
+        case persistent_term:get({instrument_row, Name, S}, undefined) of
+          {Canon, CacheKey, Row} ->
+            persistent_term:erase({instrument_label, Name, CacheKey}),
+            persistent_term:erase({instrument_row, Name, S}),
+            ets:delete(?TAB, {Name, Canon}),
+            instrument_histogram:cleanup(Row);
+          undefined ->
+            ok
+        end
+      end, lists:seq(1, N)),
+      ets:delete(?COUNTS, {count, Name}),
+      ok;
+    _ ->
+      ok
+  end.
+
+%% Full family teardown (§9 unregister ordering): delete the family arbiter row
+%% and erase {instrument_family, Name} first (in-flight first-touches now fail
+%% not_found, and winners' post-claim re-check catches most), then walk the
+%% chain releasing each row, erase the family-idx hole, and delete the
+%% count/dropped accounting. All erases; placement is admin-time.
+-spec teardown_family(term()) -> ok.
+teardown_family(Name) ->
+  case family(Name) of
+    #family{idx = Idx, row_seq = Seq} ->
+      ets:delete(?TAB, {Name, family}),
+      persistent_term:erase({instrument_family, Name}),
+      N = atomics:get(Seq, 1),
+      lists:foreach(fun(S) ->
+        case persistent_term:get({instrument_row, Name, S}, undefined) of
+          {Canon, CacheKey, Row} ->
+            persistent_term:erase({instrument_label, Name, CacheKey}),
+            persistent_term:erase({instrument_row, Name, S}),
+            ets:delete(?TAB, {Name, Canon}),
+            instrument_histogram:cleanup(Row);
+          undefined ->
+            ok
+        end
+      end, lists:seq(1, N)),
+      persistent_term:erase({instrument_family_idx, Idx}),
+      ets:delete(?COUNTS, {count, Name}),
+      ets:delete(?COUNTS, {dropped, Name}),
+      ok;
+    {custom, _, Idx} ->
+      ets:delete(?TAB, {Name, family}),
+      persistent_term:erase({instrument_family, Name}),
+      persistent_term:erase({instrument_family_idx, Idx}),
+      ok;
+    undefined ->
+      ok
+  end.
