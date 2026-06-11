@@ -6,7 +6,7 @@
 -record(metric, {
   name,
   handle :: term(),
-  collect :: tuple(),
+  collect :: tuple() | undefined,
   %% OTel fields (optional)
   description :: binary() | undefined,
   unit :: binary() | undefined,

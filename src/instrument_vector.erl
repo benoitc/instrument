@@ -166,18 +166,11 @@ declared(Name) ->
     _ -> undefined
   end.
 
-%% Canonicalize a values list against declared names (sort by name, reorder
-%% values). On arity mismatch return a sentinel {[], Values} so the series
-%% store's valid_arity/2 rejects it as {error, invalid_labels} (no crash).
+%% Canonicalize a values list against declared names. Delegates to the shared
+%% instrument_series:vec_canon/2 (sort/reorder/stringify, {[], Values} reject
+%% sentinel on arity mismatch / undefined declared labels).
 canon(Name, LabelValues) ->
-  case declared(Name) of
-    Declared when is_list(Declared), length(Declared) =:= length(LabelValues) ->
-      Pairs = lists:zip(Declared, LabelValues),
-      Sorted = lists:keysort(1, Pairs),
-      {[K || {K, _} <- Sorted], [to_label_value(V) || {_, V} <- Sorted]};
-    _ ->
-      {[], LabelValues}
-  end.
+  instrument_series:vec_canon(declared(Name), LabelValues).
 
 %% Resolve a written row by its values-list cache key, with the arbiter-row
 %% fallback for the brief publication race.
@@ -198,9 +191,3 @@ to_help(Help) when is_list(Help) ->
   end;
 to_help(Help) ->
   iolist_to_binary(io_lib:format("~p", [Help])).
-
-to_label_value(V) when is_binary(V)  -> V;
-to_label_value(V) when is_list(V)    -> list_to_binary(V);
-to_label_value(V) when is_atom(V)    -> atom_to_binary(V, utf8);
-to_label_value(V) when is_integer(V) -> integer_to_binary(V);
-to_label_value(V) when is_float(V)   -> float_to_binary(V, [{decimals, 6}, compact]).
