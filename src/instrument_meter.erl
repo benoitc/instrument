@@ -304,12 +304,8 @@ set_fun(Value) ->
   fun(R) -> instrument_gauge:set_gauge(R, float(Value)) end.
 
 %% @doc Unregisters an instrument by name.
-%% Erases the meter descriptor and asks the registry to tear down the
-%% (legacy) registered structures. Series-store family teardown — the chain
-%% rows, cache keys, and counters — arrives in Task 8; for now the registry's
-%% do_unreg_metric only cleans legacy state, so this leaves the series-store
-%% family entries in place. get_instrument/1 returns undefined and the
-%% descriptor pt key is gone, which is what callers observe.
+%% Registry unregister runs the full series-store family teardown (chain walk,
+%% cache keys, reservoirs, counters); we additionally erase the meter descriptor.
 -spec unregister_instrument(binary() | atom()) -> ok | {error, not_found}.
 unregister_instrument(Name) when is_atom(Name) ->
   unregister_instrument(atom_to_binary(Name, utf8));

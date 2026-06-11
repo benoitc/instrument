@@ -22,7 +22,9 @@
 %% Series-store family metadata. Stored once in persistent_term
 %% {instrument_family, Name} and (as the recoverable copy) in the
 %% instrument_series arbiter row {{Name, family}, Meta}. Never replaced on any
-%% designed path; clear_labels replaces it (admin-time) to re-mint the chain.
+%% designed path; clear_labels erases rows but deliberately keeps the meta and
+%% its row_seq (re-minting would collide with in-flight writers on the shared
+%% chain keyspace).
 -record(family, {
   kind            :: counter | up_down_counter | gauge | histogram
                    | observable_counter | observable_gauge

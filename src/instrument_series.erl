@@ -26,7 +26,9 @@
   clear_family_rows/1,
   teardown_family/1,
   to_label_value/1,
-  vec_canon/2
+  vec_canon/2,
+  %% exported for the registry's overflow_sentinel resolution
+  overflow_canon/1
 ]).
 
 -define(TAB, instrument_series).
