@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- The metric cardinality cap is now enforced **per family** (per logical
+  metric name) instead of per label-name set. A vec metric's overflow series
+  is one ordinary row carrying the declared label names with every value set
+  to `<<"otel.metric.overflow">>`; dropped writes accumulate into it and feed
+  `instrument_registry:cardinality_dropped/1`. `instrument_registry:overflow_sentinel/1`
+  now returns that row's metric handle (resolved from the series store) so its
+  value is readable.
+- The vec API (`new_counter_vec`/`inc_counter_vec`/`labels/2`/…) and the
+  legacy `instrument_vector` labeled-metric API now share the series store
+  with the meter and simple APIs. The fixed-schema container record and its
+  per-key-set storage are gone; a label set is resolved by its raw values list
+  (the hot-path cache key) with the canonical identity computed only on first
+  touch.
+
+### Fixed
+- `instrument_vector:with_label/4` (and `instrument_metric:with_label/4`) no
+  longer drops its value argument on the **first** write of a label set. It
+  previously recursed into the 3-arity form on first touch, defaulting the
+  increment to 1; the closure now carries the value through, so a fresh label
+  set incremented by N reads back as N.
+
 ## [1.1.3] - 2026-05-28
 
 ### Fixed

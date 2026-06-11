@@ -23,11 +23,14 @@
   starts_with_no_labels/1,
   maintain_state_for_a_single_label/1,
   maintain_state_for_multiple_labels/1,
+  with_label_value_carried_on_first_touch/1,
+  with_label_map_resolves_by_declared_names/1,
   gauge_vec_operations/1,
   histogram_vec_operations/1,
   concurrent_vec_operations/1,
   remove_label_test/1,
-  clear_labels_test/1
+  clear_labels_test/1,
+  get_or_create_label_roundtrip/1
 ]).
 
 
@@ -36,11 +39,14 @@ all() ->
     starts_with_no_labels,
     maintain_state_for_a_single_label,
     maintain_state_for_multiple_labels,
+    with_label_value_carried_on_first_touch,
+    with_label_map_resolves_by_declared_names,
     gauge_vec_operations,
     histogram_vec_operations,
     concurrent_vec_operations,
     remove_label_test,
-    clear_labels_test
+    clear_labels_test,
+    get_or_create_label_roundtrip
   ].
 
 
@@ -78,6 +84,30 @@ maintain_state_for_multiple_labels(_Config) ->
   ok = instrument_metric:with_label(M, ["foo"], inc_counter),
   ok = instrument_metric:with_label(M, ["bar"], inc_counter),
   [{["foo"], 1.0}, {["bar"], 1.0}] = instrument_metric:get_vector_with(M, get_counter).
+
+%% Regression: on master, with_label/4 lost its value on the FIRST touch of a
+%% label set (it recursed into the 3-arity form, defaulting to 1.0). The closure
+%% must carry the value through first touch, so a fresh label set incremented by
+%% 5 reads back as 5.0, not 1.0.
+with_label_value_carried_on_first_touch(_Config) ->
+  M = instrument_metric:new_vector(["method"], counter, "wlv_name", "help"),
+  ok = instrument_metric:with_label(M, ["GET"], inc_counter, 5),
+  [{["GET"], 5.0}] = instrument_metric:get_vector_with(M, get_counter),
+  %% a second labeled write through the same path keeps accumulating
+  ok = instrument_metric:with_label(M, ["GET"], inc_counter, 2),
+  [{["GET"], 7.0}] = instrument_metric:get_vector_with(M, get_counter),
+  ok.
+
+%% A label MAP is resolved by picking declared-label keys; the values feed the
+%% same row a positional list would. (Master used maps:with + maps:values, which
+%% returns values in KEY-sorted order; here declared names are already the
+%% lookup keys, so the row is keyed by declared-order values consistently.)
+with_label_map_resolves_by_declared_names(_Config) ->
+  M = instrument_metric:new_vector([method, status], counter, wlm_name, "help"),
+  ok = instrument_metric:with_label(M, #{method => <<"GET">>, status => <<"200">>}, inc_counter, 3),
+  %% the positional list with the same values resolves the same row
+  3.0 = instrument_metric:get_counter_vec(wlm_name, [<<"GET">>, <<"200">>]),
+  ok.
 
 
 %% ==============
@@ -159,4 +189,16 @@ clear_labels_test(_Config) ->
   Post = instrument_metric:get_counter_vec(cl_requests, [<<"POST">>]),
   ?assert(Get == 0.0 orelse Get == undefined),
   ?assert(Post == 0.0 orelse Post == undefined),
+  ok.
+
+%% get_or_create_label/2 is retained for API compatibility. Verify that it
+%% resolves (or creates) a row, that the row is writable via
+%% instrument_counter:inc_counter/1, and that the write is visible through the
+%% standard get_counter_vec path.
+get_or_create_label_roundtrip(_Config) ->
+  Name = gocl_counter,
+  ok = instrument_metric:new_counter_vec(Name, "get_or_create roundtrip", [label]),
+  {ok, Row} = instrument_vector:get_or_create_label(Name, [<<"x">>]),
+  ok = instrument_counter:inc_counter(Row),
+  ?assertEqual(1.0, instrument_metric:get_counter_vec(Name, [<<"x">>])),
   ok.
