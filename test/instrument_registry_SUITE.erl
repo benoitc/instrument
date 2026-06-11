@@ -23,6 +23,7 @@
   register_duplicate_test/1,
   unregister_all_test/1,
   lookup_test/1,
+  lookup_simple_metric_returns_family/1,
   collect_all_test/1,
   concurrent_registration_test/1,
   concurrent_registration_stress_test/1
@@ -34,6 +35,7 @@ all() ->
     register_duplicate_test,
     unregister_all_test,
     lookup_test,
+    lookup_simple_metric_returns_family,
     collect_all_test,
     concurrent_registration_test,
     concurrent_registration_stress_test
@@ -138,6 +140,12 @@ lookup_test(_Config) ->
   ok = instrument_registry:register(Metric),
 
   ?assertEqual(Metric, instrument_registry:lookup(lookup_test_metric)),
+  ok.
+
+lookup_simple_metric_returns_family(_Config) ->
+  _ = instrument_metric:new_counter(lookup_fam_counter, <<"family lookup">>),
+  Fam = instrument_registry:lookup(lookup_fam_counter),
+  ?assertMatch(#family{kind = counter, help = <<"family lookup">>}, Fam),
   ok.
 
 collect_all_test(_Config) ->

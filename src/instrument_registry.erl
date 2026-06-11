@@ -55,6 +55,15 @@
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+%% Route by shape:
+%%   - #vector{} handle        → legacy gen_server (vec API, Task 7)
+%%   - collect = {M,F,A}       → series-store custom collector
+%%   - anything else (e.g. handle=undefined, collect=undefined) → legacy gen_server
+register(#metric{handle = #vector{}} = Metric) ->
+  gen_server:call(?MODULE, {reg, Metric});
+register(#metric{name = N, collect = {M, F, A}}) ->
+  instrument_series:ensure_custom(N, {M, F, A}),
+  ok;
 register(Metric) ->
   gen_server:call(?MODULE, {reg, Metric}).
 
@@ -65,17 +74,22 @@ unregister_all() ->
   gen_server:call(?MODULE, unregister_all).
 
 
-with(Metric, Fun) -> with_1(Metric, Fun, []).
-
-
-with_1(#metric{name=Name, handle=#vector{}}, Fun, Args) ->
-  with_1(Name, Fun, Args);
-with_1(#metric{}=M, Fun, Args) ->
-  erlang:apply(Fun, [M |Args]);
-with_1(Metric, Fun, Args) ->
-  case ets:lookup(instrument_lib:table(), Metric) of
-    [#metric{}=M] -> erlang:apply(Fun, [M |Args]);
-    [] -> {error, not_found}
+%% Vec metrics are looked up by name so the caller always sees the freshest
+%% labels_map from ETS — the caller-held record may be stale. Task 7 removes
+%% this clause when the vec API is cut over to the series store.
+with(#metric{name = Name, handle = #vector{}}, Fun) ->
+  with(Name, Fun);
+with(#metric{} = M, Fun) ->
+  Fun(M);
+with(Name, Fun) ->
+  case persistent_term:get({instrument_label, Name, {[], []}}, undefined) of
+    #metric{} = Row -> Fun(Row#metric{name = Name});
+    undefined ->
+      %% legacy fallback: vec families until Task 7
+      case ets:lookup(instrument_lib:table(), Name) of
+        [#metric{} = M] -> Fun(M);
+        [] -> {error, not_found}
+      end
   end.
 
 
@@ -205,6 +219,10 @@ do_reg_metric(Metric) ->
 %% @private Unregister a metric from ETS and persistent_term.
 %% Does NOT update the metrics index - that's handled by the gen_server state.
 do_unreg_metric(Name) ->
+  %% Release series-store rows (exemplar reservoirs) for names backed by
+  %% the series store. Full teardown of pt keys is Task 8; the minimum
+  %% needed here is freeing exemplar resources to avoid leaks.
+  release_series_store_rows(Name),
   %% Read the metric first so we can drive cleanup from its #vector.labels_map
   %% and release any histogram exemplar reservoirs it owns.
   Metric = case ets:lookup(instrument_lib:table(), Name) of
@@ -221,6 +239,50 @@ do_unreg_metric(Name) ->
   _ = release_exemplar_reservoirs(Metric),
   _ = reset_label_accounting(Name),
   ok.
+
+%% @private Release exemplar reservoirs owned by series-store rows for `Name'.
+%% Walks the row chain and calls histogram cleanup on each row.
+release_series_store_rows(Name) ->
+  case instrument_series:family(Name) of
+    #family{row_seq = Seq} ->
+      N = atomics:get(Seq, 1),
+      lists:foreach(fun(S) ->
+        case persistent_term:get({instrument_row, Name, S}, undefined) of
+          undefined -> ok;
+          {_Canon, _CacheKey, Row} ->
+            instrument_histogram:cleanup(Row)
+        end
+      end, lists:seq(1, N));
+    _ ->
+      ok
+  end.
+
+%% @private Release all exemplar reservoirs from all series-store families.
+%% Must be called before clear_instrument_persistent_terms/0 wipes the row keys.
+release_series_store_all_reservoirs() ->
+  case persistent_term:get(instrument_family_seq, undefined) of
+    undefined -> ok;
+    FamSeq ->
+      N = atomics:get(FamSeq, 1),
+      lists:foreach(fun(K) ->
+        case persistent_term:get({instrument_family_idx, K}, undefined) of
+          undefined -> ok;
+          Name ->
+            case persistent_term:get({instrument_family, Name}, undefined) of
+              #family{row_seq = Seq} ->
+                RowN = atomics:get(Seq, 1),
+                lists:foreach(fun(S) ->
+                  case persistent_term:get({instrument_row, Name, S}, undefined) of
+                    undefined -> ok;
+                    {_Canon, _CacheKey, Row} ->
+                      instrument_histogram:cleanup(Row)
+                  end
+                end, lists:seq(1, RowN));
+              _ -> ok
+            end
+        end
+      end, lists:seq(1, N))
+  end.
 
 %% @private Sync the metrics index from gen_server state to persistent_term.
 %% This is the only place the instrument_metrics list is written.
@@ -257,6 +319,9 @@ release_exemplar_reservoirs(#metric{} = Metric) ->
   instrument_histogram:cleanup(Metric).
 
 do_delete_all() ->
+  %% Release histogram exemplar reservoirs from series-store families before
+  %% clearing persistent_term (the pt keys are needed to walk the row chains).
+  release_series_store_all_reservoirs(),
   %% Release histogram exemplar reservoirs for every registered metric
   %% before we wipe the tables.
   AllMetrics = case instrument_lib:tables() of
@@ -311,9 +376,17 @@ tables() -> instrument_lib:tables().
 
 %% persistent_term based lookup API
 
--spec lookup(term()) -> #metric{} | undefined.
+%% Returns #family{} for series-store families; falls back to the legacy
+%% {instrument_metric, Name} pt entry for vec families until Task 7.
+-spec lookup(term()) -> #family{} | #metric{} | undefined.
 lookup(Name) ->
-  persistent_term:get({instrument_metric, Name}, undefined).
+  case instrument_series:family(Name) of
+    undefined ->
+      %% legacy fallback: vec entries until Task 7
+      persistent_term:get({instrument_metric, Name}, undefined);
+    Meta ->
+      Meta
+  end.
 
 -spec lookup_label(term(), list()) -> #metric{} | undefined.
 lookup_label(Name, LabelValues) ->
