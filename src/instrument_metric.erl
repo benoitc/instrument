@@ -114,9 +114,11 @@
 
 -spec new_counter(Name :: metric_name(), Help :: help()) -> Counter :: metric().
 new_counter(Name, Help) ->
-  Metric = instrument_counter:new_counter(Name, Help),
-  ok = register(Metric),
-  Metric.
+  _ = instrument_series:ensure_family(Name, counter, to_help(Help), undefined, undefined),
+  Canon = {[], []},
+  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
+  Row = unlabeled_row(Name, Canon),
+  Row#metric{name = Name}.
 
 -spec inc_counter(Counter :: metric()) -> Result :: ok | {error, not_found}.
 inc_counter(Counter) ->
@@ -136,9 +138,11 @@ get_counter(Counter) ->
 
 -spec new_gauge(Name :: metric_name(), Help :: help()) -> Gauge :: metric().
 new_gauge(Name, Help) ->
-  Metric = instrument_gauge:new_gauge(Name, Help),
-  ok = register(Metric),
-  Metric.
+  _ = instrument_series:ensure_family(Name, gauge, to_help(Help), undefined, undefined),
+  Canon = {[], []},
+  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
+  Row = unlabeled_row(Name, Canon),
+  Row#metric{name = Name}.
 
 -spec inc_gauge(Gauge :: metric()) -> Result :: ok | {error, not_found}.
 inc_gauge(Gauge) ->
@@ -175,15 +179,18 @@ get_gauge(Gauge) ->
 
 -spec new_histogram(Name :: metric_name(), Help :: help()) -> Hist::metric().
 new_histogram(Name, Help) ->
-  Metric = instrument_histogram:new_histogram(Name, Help),
-  ok = register(Metric),
-  Metric.
+  new_histogram(Name, Help, instrument_histogram:default_buckets()).
 
 -spec new_histogram(Name :: metric_name(), Help :: help(), Buckets::list()) -> Hist::metric().
 new_histogram(Name, Help, Buckets) ->
-  Metric = instrument_histogram:new_histogram(Name, Help, Buckets),
-  ok = register(Metric),
-  Metric.
+  %% validate_buckets raises before family registration on bad input, preserving
+  %% master's error behavior
+  ok = instrument_histogram:validate_buckets(Buckets),
+  _ = instrument_series:ensure_family(Name, histogram, to_help(Help), undefined, Buckets),
+  Canon = {[], []},
+  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
+  Row = unlabeled_row(Name, Canon),
+  Row#metric{name = Name}.
 
 -spec observe_histogram(Hist::metric(), Value::number()) -> ok | {error, not_found}.
 observe_histogram(Hist, Value) ->
@@ -234,6 +241,31 @@ clear_labels(Vector) ->
 
 register(Metric) ->
   instrument_registry:register(Metric).
+
+%% Resolve the unlabeled row for a simple (no-label) metric after a write/4
+%% call.  The winner publishes to persistent_term itself; a claim loser racing
+%% that publication falls back to the arbiter row in the ETS series table, which
+%% exists from the instant the claim succeeded and carries the row payload.
+-spec unlabeled_row(metric_name(), {[], []}) -> #metric{}.
+unlabeled_row(Name, Canon) ->
+  case persistent_term:get({instrument_label, Name, Canon}, undefined) of
+    #metric{} = R -> R;
+    undefined ->
+      %% claim loser racing the winner's pt publication: the arbiter row is
+      %% authoritative from the moment the claim landed
+      ets:lookup_element(instrument_series, {Name, Canon}, 2)
+  end.
+
+to_help(Help) when is_binary(Help) -> Help;
+to_help(Help) when is_list(Help) ->
+  %% Accept flat string() or binary iolist; for other list terms (e.g. proplists
+  %% passed by tests), fall back to a term-formatted binary.
+  try iolist_to_binary(Help)
+  catch error:badarg ->
+    iolist_to_binary(io_lib:format("~p", [Help]))
+  end;
+to_help(Help) ->
+  iolist_to_binary(io_lib:format("~p", [Help])).
 
 unregister(Name) ->
   instrument_registry:unregister(Name).
