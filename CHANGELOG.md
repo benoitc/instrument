@@ -78,6 +78,7 @@ All notable changes to this project will be documented in this file.
 - Per-scheduler registry replica ETS tables (`instrument_registry_1..N`) and
   the `instrument_lib:table/0,1` clause ladder. Read traffic moved to
   `persistent_term`.
+- `instrument_vector:collect/1` (exported; collection is chain-driven, the per-vec collect MFA no longer exists).
 - `instrument_metrics` `persistent_term` index list and the
   `{instrument_metric, Name}` per-name shape. Replaced by the series store's
   computable key space.

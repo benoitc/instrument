@@ -52,7 +52,6 @@
 -include("instrument.hrl").
 
 -define(LABEL_COUNTS_TABLE, instrument_label_counts).
--define(OVERFLOW_VALUE, <<"otel.metric.overflow">>).
 
 %% API
 
@@ -279,17 +278,11 @@ cardinality_dropped(Name) ->
 overflow_sentinel(Name) ->
   case instrument_series:family(Name) of
     #family{declared_labels = Declared} ->
-      OverflowCanon = overflow_canon(Declared),
+      OverflowCanon = instrument_series:overflow_canon(Declared),
       persistent_term:get({instrument_label, Name, OverflowCanon}, undefined);
     _ ->
       undefined
   end.
-
-overflow_canon(undefined) ->
-  {[?OVERFLOW_VALUE], [<<"true">>]};
-overflow_canon(Declared) ->
-  Sorted = lists:sort(Declared),
-  {Sorted, [?OVERFLOW_VALUE || _ <- Sorted]}.
 
 -spec collect_all() -> [map()].
 collect_all() ->
