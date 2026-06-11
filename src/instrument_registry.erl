@@ -282,7 +282,8 @@ clear_instrument_persistent_terms() ->
   [persistent_term:erase(K)
    || {K, _} <- persistent_term:get(), is_instrument_key(K)].
 
-%% instrument_row entries are swept from Task 8 on (write path lands the prefix)
+%% instrument_row entries are published by the write path (claim_row/5) and must
+%% be swept here so a registry restart produces a clean slate.
 is_instrument_key(otel_instruments) ->
   true;
 is_instrument_key(instrument_family_seq) ->
@@ -295,6 +296,7 @@ is_instrument_key(K) when is_tuple(K), tuple_size(K) >= 2 ->
     otel_instrument           -> true;
     instrument_family         -> true;
     instrument_family_idx     -> true;
+    instrument_row            -> true;
     _                         -> false
   end;
 is_instrument_key(_) ->
@@ -372,6 +374,11 @@ get_or_create_overflow(Name) ->
 
 -spec collect_all() -> [map()].
 collect_all() ->
+  %% transitional: series-store families first, then the legacy index (the
+  %% legacy half is deleted when the last producer is cut over)
+  instrument_series:collect_all() ++ legacy_collect_all().
+
+legacy_collect_all() ->
   Names = persistent_term:get(instrument_metrics, []),
   lists:filtermap(fun(Name) ->
     case lookup(Name) of
