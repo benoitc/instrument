@@ -6,6 +6,7 @@
 -author("benoitc").
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 %% API
 -export([
@@ -270,6 +271,11 @@ format_name_tuple_test(_Config) ->
 
   %% Should contain the metric name (not the malformed tuple string)
   true = binary:match(Output, <<"fmt_test_counter">>) =/= nomatch,
+
+  %% Single-family, labeled-row rendering: the {otel, <<"fmt_test_counter">>}
+  %% family is a counter, so prometheus appends _total; the labeled add/3 row
+  %% must appear under that same family name with its label set rendered.
+  ?assertNotEqual(nomatch, binary:match(Output, <<"fmt_test_counter_total{method=\"GET\"} 5.0">>)),
 
   %% Should NOT contain malformed tuple format
   nomatch = binary:match(Output, <<"{otel">>),

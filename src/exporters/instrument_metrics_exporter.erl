@@ -284,17 +284,17 @@ convert_metric(#{type := counter, name := Name, help := Help, val := Val} = Metr
     }]
   };
 
-convert_metric(#{type := counter, name := Name, help := Help, labels := Labels, data := Data}, Timestamp) ->
+convert_metric(#{type := counter, name := Name, help := Help, labels := Union, data := Data}, Timestamp) ->
   #{
     name => to_binary(Name),
     description => extract_help(Help),
     unit => get_instrument_unit(Name),
     type => counter,
     data_points => [#{
-      attributes => make_attributes(Labels, LabelVals),
+      attributes => row_attributes(Union, RowNames, RowVals),
       value => Val,
       timestamp => Timestamp
-    } || {_, LabelVals, Val} <- Data]
+    } || {RowNames, RowVals, Val} <- Data]
   };
 
 convert_metric(#{type := gauge, name := Name, help := Help, val := Val}, Timestamp) ->
@@ -310,17 +310,17 @@ convert_metric(#{type := gauge, name := Name, help := Help, val := Val}, Timesta
     }]
   };
 
-convert_metric(#{type := gauge, name := Name, help := Help, labels := Labels, data := Data}, Timestamp) ->
+convert_metric(#{type := gauge, name := Name, help := Help, labels := Union, data := Data}, Timestamp) ->
   #{
     name => to_binary(Name),
     description => extract_help(Help),
     unit => get_instrument_unit(Name),
     type => gauge,
     data_points => [#{
-      attributes => make_attributes(Labels, LabelVals),
+      attributes => row_attributes(Union, RowNames, RowVals),
       value => Val,
       timestamp => Timestamp
-    } || {_, LabelVals, Val} <- Data]
+    } || {RowNames, RowVals, Val} <- Data]
   };
 
 convert_metric(#{type := histogram, name := Name, help := Help, count := Count, sum := Sum, buckets := Buckets} = Metric, Timestamp) ->
@@ -342,14 +342,14 @@ convert_metric(#{type := histogram, name := Name, help := Help, count := Count, 
     }]
   };
 
-convert_metric(#{type := histogram, name := Name, help := Help, labels := Labels, data := Data}, Timestamp) ->
+convert_metric(#{type := histogram, name := Name, help := Help, labels := Union, data := Data}, Timestamp) ->
   #{
     name => to_binary(Name),
     description => extract_help(Help),
     unit => get_instrument_unit(Name),
     type => histogram,
     data_points => [#{
-      attributes => make_attributes(Labels, LabelVals),
+      attributes => row_attributes(Union, RowNames, RowVals),
       value => #{
         count => maps:get(count, Val),
         sum => maps:get(sum, Val),
@@ -357,7 +357,7 @@ convert_metric(#{type := histogram, name := Name, help := Help, labels := Labels
                     || B <- maps:get(buckets, Val)]
       },
       timestamp => Timestamp
-    } || {_, LabelVals, Val} <- Data]
+    } || {RowNames, RowVals, Val} <- Data]
   };
 
 convert_metric(_, _) ->
@@ -376,6 +376,15 @@ make_attributes(Labels, LabelVals) ->
   lists:foldl(fun({Label, Val}, Acc) ->
     maps:put(to_binary(Label), to_binary(Val), Acc)
   end, #{}, lists:zip(Labels, LabelVals)).
+
+%% Build a data point's attributes from the row's OWN label names/values. OTLP
+%% data points carry only the attributes they actually have — the family union
+%% (a Prometheus-text label-column requirement) does not apply here, so absent
+%% union keys are simply not present rather than empty-string padded. RowNames
+%% and RowVals are canonically paired, so the zip never length-mismatches even
+%% for heterogeneous meter families.
+row_attributes(_Union, RowNames, RowVals) ->
+  make_attributes(RowNames, RowVals).
 
 %% Get unit from otel_instrument if available, otherwise default to "1"
 get_instrument_unit({otel, Name}) when is_binary(Name) ->

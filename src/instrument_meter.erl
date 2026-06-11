@@ -6,7 +6,9 @@
 %% @doc OpenTelemetry-compatible MeterProvider and Meter API.
 %%
 %% This module provides an OTel-style API for creating and using metrics,
-%% backed by the existing NIF infrastructure.
+%% backed by the series store (instrument_series): one family per logical
+%% metric name, attributes as label dimensions (never name material), no
+%% phantom-zero series. A meter series exists iff it has been written.
 %%
 %% == Example Usage ==
 %% ```
@@ -190,11 +192,16 @@ add(Instrument, Value) ->
   add(Instrument, Value, #{}).
 
 %% @doc Adds a value to a Counter or UpDownCounter with attributes.
--spec add(instrument(), number(), map()) -> ok.
-add(#otel_instrument{kind = counter, handle = Handle}, Value, Attrs) when Value >= 0 ->
-  do_add(Handle, counter, Value, Attrs);
-add(#otel_instrument{kind = up_down_counter, handle = Handle}, Value, Attrs) ->
-  do_add(Handle, up_down_counter, Value, Attrs);
+-spec add(instrument(), number(), map()) -> any().
+add(#otel_instrument{kind = counter, handle = RegName}, Value, Attrs)
+    when is_number(Value), Value >= 0 ->
+  do_write(RegName, Attrs, fun(R) -> instrument_counter:inc_counter(R, Value) end);
+add(#otel_instrument{kind = up_down_counter, handle = RegName}, Value, Attrs)
+    when is_number(Value), Value >= 0 ->
+  do_write(RegName, Attrs, fun(R) -> instrument_gauge:inc_gauge(R, Value) end);
+add(#otel_instrument{kind = up_down_counter, handle = RegName}, Value, Attrs)
+    when is_number(Value), Value < 0 ->
+  do_write(RegName, Attrs, fun(R) -> instrument_gauge:dec_gauge(R, -Value) end);
 add(_, _, _) ->
   {error, invalid_operation}.
 
@@ -204,9 +211,10 @@ record(Instrument, Value) ->
   record(Instrument, Value, #{}).
 
 %% @doc Records a value in a Histogram with attributes.
--spec record(instrument(), number(), map()) -> ok.
-record(#otel_instrument{kind = histogram, handle = Handle}, Value, Attrs) ->
-  do_record(Handle, histogram, Value, Attrs);
+-spec record(instrument(), number(), map()) -> any().
+record(#otel_instrument{kind = histogram, handle = RegName}, Value, Attrs)
+    when is_number(Value) ->
+  do_write(RegName, Attrs, fun(R) -> instrument_histogram:observe_histogram(R, Value) end);
 record(_, _, _) ->
   {error, invalid_operation}.
 
@@ -216,9 +224,10 @@ set(Instrument, Value) ->
   set(Instrument, Value, #{}).
 
 %% @doc Sets a value on a Gauge with attributes.
--spec set(instrument(), number(), map()) -> ok.
-set(#otel_instrument{kind = gauge, handle = Handle}, Value, Attrs) ->
-  do_set(Handle, gauge, Value, Attrs);
+-spec set(instrument(), number(), map()) -> any().
+set(#otel_instrument{kind = gauge, handle = RegName}, Value, Attrs)
+    when is_number(Value) ->
+  do_write(RegName, Attrs, fun(R) -> instrument_gauge:set_gauge(R, Value) end);
 set(_, _, _) ->
   {error, invalid_operation}.
 
@@ -235,42 +244,53 @@ get_instrument(Name) when is_binary(Name) ->
   persistent_term:get(Key, undefined).
 
 %% @doc Lists all registered instruments.
+%% Walks the series-store family chain and resolves the meter descriptor for
+%% every {otel, _} family name. The chain is the single source of truth — the
+%% old per-create `otel_instruments` pt list (and its sweep) is gone.
 -spec list_instruments() -> [instrument()].
 list_instruments() ->
-  Names = persistent_term:get(otel_instruments, []),
-  lists:filtermap(fun(Name) ->
-    case get_instrument(Name) of
-      undefined -> false;
-      Inst -> {true, Inst}
-    end
-  end, Names).
+  case persistent_term:get(instrument_family_seq, undefined) of
+    undefined -> [];
+    FamSeq ->
+      N = atomics:get(FamSeq, 1),
+      lists:filtermap(fun(K) ->
+        case persistent_term:get({instrument_family_idx, K}, undefined) of
+          {otel, Name} -> resolve_instrument(Name);
+          _ -> false
+        end
+      end, lists:seq(1, N))
+  end.
+
+resolve_instrument(Name) ->
+  case get_instrument(Name) of
+    undefined -> false;
+    Inst -> {true, Inst}
+  end.
 
 %% @doc Invokes all observable instrument callbacks.
 %% This should be called before metrics collection to update observable values.
 -spec collect_observables() -> ok.
 collect_observables() ->
-  Instruments = list_instruments(),
-  lists:foreach(fun collect_observable/1, Instruments),
+  lists:foreach(fun collect_observable/1, list_instruments()),
   ok.
 
-collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observable, Handle, Callback}})
+collect_observable(#otel_instrument{kind = Kind,
+                                    handle = {observable, RegName, Callback}})
     when Kind =:= observable_counter;
          Kind =:= observable_gauge;
          Kind =:= observable_up_down_counter ->
   try
-    %% Check callback arity
     case erlang:fun_info(Callback, arity) of
       {arity, 0} ->
-        %% Legacy 0-arity callback - returns single value
+        %% Legacy 0-arity callback — returns a single absolute value.
         Value = Callback(),
-        do_set(Handle, Kind, Value, #{});
+        do_write(RegName, #{}, set_fun(Value));
       {arity, 1} ->
-        %% Observer pattern callback - can observe multiple values with attributes
-        %% Create an observer function that the callback can call
-        Observer = fun(Value, Attrs) ->
-          store_observable_observation(Name, Kind, Value, Attrs, Handle)
-        end,
-        Callback(Observer)
+        %% Observer-pattern callback — observes (Value, Attrs) tuples; each is
+        %% an ordinary labeled write under the real instrument name.
+        Callback(fun(Value, ObsAttrs) ->
+          do_write(RegName, ObsAttrs, set_fun(Value))
+        end)
     end
   catch
     _:_ -> ok
@@ -278,26 +298,18 @@ collect_observable(#otel_instrument{name = Name, kind = Kind, handle = {observab
 collect_observable(_) ->
   ok.
 
-%% Store an observable observation. The Kind argument is consulted via
-%% storage_type/1 to pick the right vec storage tag (observable_counter
-%% gets its own tag; observable_gauge / observable_up_down_counter both
-%% collapse to gauge).
-store_observable_observation(_Name, _Kind, Value, Attrs, Handle)
-    when map_size(Attrs) =:= 0 ->
-  do_set(Handle, undefined, Value, #{});
-store_observable_observation(_Name, Kind, Value, Attrs, Handle) ->
-  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecKind = storage_type(Kind),
-  VecName = ensure_vec_metric(get_internal_metric_name(Handle),
-                              VecKind, LabelNames, Handle),
-  %% All three observable kinds use set-semantics on gauge-shaped vec
-  %% storage (callbacks return absolute values). Wire-type rendering for
-  %% observable_counter is driven by instrument_vector:wire_type/1.
-  instrument_metric:set_gauge_vec(VecName, LabelValues, Value).
+%% Observable callbacks report absolute values (set-semantics) into gauge-shaped
+%% rows; observable_counter wire-type rendering is driven by the family kind.
+set_fun(Value) ->
+  fun(R) -> instrument_gauge:set_gauge(R, float(Value)) end.
 
 %% @doc Unregisters an instrument by name.
-%% This removes the instrument from persistent_term, unregisters the underlying metric,
-%% and cleans up any associated vec metrics created for attributed operations.
+%% Erases the meter descriptor and asks the registry to tear down the
+%% (legacy) registered structures. Series-store family teardown — the chain
+%% rows, cache keys, and counters — arrives in Task 8; for now the registry's
+%% do_unreg_metric only cleans legacy state, so this leaves the series-store
+%% family entries in place. get_instrument/1 returns undefined and the
+%% descriptor pt key is gone, which is what callers observe.
 -spec unregister_instrument(binary() | atom()) -> ok | {error, not_found}.
 unregister_instrument(Name) when is_atom(Name) ->
   unregister_instrument(atom_to_binary(Name, utf8));
@@ -306,52 +318,19 @@ unregister_instrument(Name) when is_binary(Name) ->
   case persistent_term:get(Key, undefined) of
     undefined ->
       {error, not_found};
-    #otel_instrument{handle = Handle} ->
-      %% Get the internal metric name for cleanup of associated vec metrics
-      InternalName = get_internal_metric_name(Handle),
-      %% Unregister underlying metric
-      _ = unregister_underlying_metric(Handle),
-      %% Clean up associated vec metrics created for attributes
-      _ = unregister_associated_vec_metrics(InternalName),
-      %% Remove from persistent_term
+    #otel_instrument{} ->
+      %% Harmless legacy cleanup (the {otel, Name} legacy structures, if any).
+      _ = instrument_registry:unregister({otel, Name}),
       _ = persistent_term:erase(Key),
-      %% Remove from names list
-      Names = persistent_term:get(otel_instruments, []),
-      NewNames = lists:delete(Name, Names),
-      persistent_term:put(otel_instruments, NewNames),
       ok
   end.
-
-%% Get the internal metric name from a handle
-get_internal_metric_name(#metric{name = MetricName}) -> MetricName;
-get_internal_metric_name({observable, #metric{name = MetricName}, _}) -> MetricName;
-get_internal_metric_name(_) -> undefined.
-
-%% Unregister all vec metrics associated with an OTel instrument
-unregister_associated_vec_metrics(undefined) -> ok;
-unregister_associated_vec_metrics(BaseName) ->
-  Key = {otel_instrument_vecs, BaseName},
-  VecNames = persistent_term:get(Key, []),
-  lists:foreach(fun(VecName) ->
-    _ = instrument_metric:unregister(VecName)
-  end, VecNames),
-  _ = persistent_term:erase(Key),
-  ok.
 
 %% @doc Unregisters all OTel instruments.
 -spec unregister_all_instruments() -> ok.
 unregister_all_instruments() ->
-  Names = persistent_term:get(otel_instruments, []),
-  lists:foreach(fun(Name) ->
+  lists:foreach(fun(#otel_instrument{name = Name}) ->
     _ = unregister_instrument(Name)
-  end, Names),
-  ok.
-
-unregister_underlying_metric(#metric{name = MetricName}) ->
-  instrument_metric:unregister(MetricName);
-unregister_underlying_metric({observable, #metric{name = MetricName}, _Callback}) ->
-  instrument_metric:unregister(MetricName);
-unregister_underlying_metric(_) ->
+  end, list_instruments()),
   ok.
 
 %% ============================================================================
@@ -365,22 +344,21 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_m
   Unit = maps:get(unit, Opts, undefined),
   Temporality = maps:get(temporality, Opts, cumulative),
 
-  %% Check if already exists
+  %% Check if already exists (idempotent create, master parity).
   case get_instrument(Name) of
     undefined ->
-      %% Create the underlying metric
-      Handle = create_underlying_metric(Name, Kind, Opts),
+      RegName = {otel, Name},
+      register_family(RegName, Kind, Description, Opts),
       Instrument = #otel_instrument{
         name = Name,
         kind = Kind,
         description = Description,
         unit = Unit,
         meter = Meter,
-        handle = Handle,
+        handle = RegName,
         temporality = Temporality
       },
-      %% Register the instrument
-      register_instrument(Name, Instrument),
+      persistent_term:put({otel_instrument, Name}, Instrument),
       Instrument;
     Existing ->
       Existing
@@ -398,163 +376,48 @@ create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_bin
   end,
   case get_instrument(Name) of
     undefined ->
-      Handle = create_observable_underlying(Name, Kind),
+      RegName = {otel, Name},
+      register_family(RegName, Kind, undefined, #{}),
       Instrument = #otel_instrument{
         name = Name,
         kind = Kind,
         description = undefined,
         unit = undefined,
         meter = Meter,
-        handle = {observable, Handle, Callback}
+        handle = {observable, RegName, Callback}
       },
-      register_instrument(Name, Instrument),
+      persistent_term:put({otel_instrument, Name}, Instrument),
       Instrument;
     Existing ->
       Existing
   end.
 
-create_underlying_metric(Name, counter, Opts) ->
-  %% Use gauge NIF for counter (monotonic increments only)
-  {ok, Ref} = instrument_nif:new_gauge(),
-  StartTime = erlang:system_time(nanosecond),
-  Description = maps:get(description, Opts, <<>>),
-  Info = instrument_lib:mk_info(Name, Description),
-  Metric = #metric{
-    name = {otel, Name},
-    handle = {Ref, StartTime},
-    collect = {instrument_counter, collect, [Info, {Ref, StartTime}]}
-  },
-  ok = instrument_metric:register(Metric),
-  Metric;
+%% Register the series-store family for an instrument. Boundaries are resolved
+%% for histograms only (view → opts → OTel defaults); other kinds pass
+%% undefined. Meter families are schema-free (declared_labels = undefined).
+register_family(RegName, Kind, Description, Opts) ->
+  Help = case Description of
+    undefined -> <<>>;
+    _ -> Description
+  end,
+  Boundaries = family_boundaries(RegName, Kind, Opts),
+  _ = instrument_series:ensure_family(RegName, Kind, Help, undefined, Boundaries),
+  ok.
 
-create_underlying_metric(Name, up_down_counter, Opts) ->
-  %% Use gauge NIF for up_down_counter
-  {ok, Ref} = instrument_nif:new_gauge(),
-  Description = maps:get(description, Opts, <<>>),
-  Info = instrument_lib:mk_info(Name, Description),
-  Metric = #metric{
-    name = {otel, Name},
-    handle = Ref,
-    collect = {instrument_gauge, collect, [Info, Ref]}
-  },
-  ok = instrument_metric:register(Metric),
-  Metric;
-
-create_underlying_metric(Name, histogram, Opts) ->
-  %% Use histogram NIF
-  %% Check registered views for boundaries first, then Opts, then defaults
-  ViewBoundaries = find_view_boundaries(Name),
-  Boundaries = case ViewBoundaries of
+family_boundaries({otel, Name}, histogram, Opts) ->
+  case find_view_boundaries(Name) of
     undefined -> maps:get(boundaries, Opts, default_boundaries());
     B -> B
-  end,
-  Description = maps:get(description, Opts, <<>>),
-  Metric = instrument_histogram:new_histogram(Name, Description, Boundaries),
-  ok = instrument_metric:register(Metric),
-  Metric;
+  end;
+family_boundaries(_RegName, _Kind, _Opts) ->
+  undefined.
 
-create_underlying_metric(Name, gauge, Opts) ->
-  %% Use gauge NIF
-  {ok, Ref} = instrument_nif:new_gauge(),
-  Description = maps:get(description, Opts, <<>>),
-  Info = instrument_lib:mk_info(Name, Description),
-  Metric = #metric{
-    name = {otel, Name},
-    handle = Ref,
-    collect = {instrument_gauge, collect, [Info, Ref]}
-  },
-  ok = instrument_metric:register(Metric),
-  Metric.
-
-%% Map observable kind → underlying storage by delegating to the synchronous
-%% create_underlying_metric/3. The underlying storage shape and the
-%% collect MFA both follow the synchronous counter / gauge / up_down_counter
-%% behaviour. instrument_counter:collect/2 and instrument_gauge:collect/2
-%% are already exported (called via erlang:apply/3 from instrument_registry).
-create_observable_underlying(Name, observable_counter) ->
-  create_underlying_metric(Name, counter, #{});
-create_observable_underlying(Name, observable_up_down_counter) ->
-  create_underlying_metric(Name, up_down_counter, #{});
-create_observable_underlying(Name, observable_gauge) ->
-  create_underlying_metric(Name, gauge, #{}).
-
-%% Map OTel observable kind → vec storage type tag used when registering
-%% labeled vec metrics. observable_counter gets its own tag (so the formatter
-%% can render it as counter via wire_type/1); the other observable kinds
-%% collapse to gauge because OTel→Prometheus maps both to gauge.
-storage_type(observable_counter)         -> observable_counter;
-storage_type(observable_up_down_counter) -> gauge;
-storage_type(observable_gauge)           -> gauge.
-
-register_instrument(Name, Instrument) ->
-  Key = {otel_instrument, Name},
-  persistent_term:put(Key, Instrument),
-  Names = persistent_term:get(otel_instruments, []),
-  case lists:member(Name, Names) of
-    true -> ok;
-    false -> persistent_term:put(otel_instruments, [Name | Names])
-  end.
-
-%% Unlabeled — kind-agnostic; gauge NIF is sign-permissive.
-do_add(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% counter-shaped handle (start_time tracked for cumulative temporality)
-  instrument_nif:inc_gauge(Ref, float(Value));
-do_add(#metric{handle = Ref}, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
-  %% gauge-shaped handle (plain ref)
-  instrument_nif:inc_gauge(Ref, float(Value));
-
-%% Labeled counter — unchanged behaviour (monotonic vec storage).
-do_add(#metric{name = Name} = Metric, counter, Value, Attrs)
-        when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
-  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecName = ensure_vec_metric(Name, counter, LabelNames, Metric),
-  instrument_metric:inc_counter_vec(VecName, LabelValues, Value);
-
-%% Labeled up_down_counter — gauge-shaped vec storage, split on sign so the
-%% existing inc_gauge_vec / dec_gauge_vec primitives apply (both have a >= 0
-%% guard at the gauge layer).
-do_add(#metric{name = Name} = Metric, up_down_counter, Value, Attrs)
-        when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
-  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
-  instrument_metric:inc_gauge_vec(VecName, LabelValues, Value);
-do_add(#metric{name = Name} = Metric, up_down_counter, Value, Attrs)
-        when is_number(Value), Value < 0, map_size(Attrs) > 0 ->
-  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
-  instrument_metric:dec_gauge_vec(VecName, LabelValues, -Value);
-
-do_add(_, _, _, _) ->
-  {error, invalid_handle}.
-
-do_record(#metric{} = Metric, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) =:= 0 ->
-  instrument_histogram:observe_histogram(Metric, Value);
-do_record(#metric{name = Name} = Metric, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) > 0 ->
-  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecName = ensure_vec_metric(Name, histogram, LabelNames, Metric),
-  instrument_metric:observe_histogram_vec(VecName, LabelValues, Value);
-do_record(_, _, _, _) ->
-  {error, invalid_handle}.
-
-do_set(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% counter-shaped handle (observable_counter unlabeled write)
-  instrument_nif:set_gauge(Ref, float(Value));
-do_set(#metric{handle = Ref}, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
-  %% gauge-shaped handle (gauge / up_down_counter / observable_gauge / observable_up_down_counter)
-  instrument_nif:set_gauge(Ref, float(Value));
-do_set(#metric{name = Name} = Metric, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) > 0 ->
-  {LabelNames, LabelValues} = attrs_to_labels(Attrs),
-  VecName = ensure_vec_metric(Name, gauge, LabelNames, Metric),
-  instrument_metric:set_gauge_vec(VecName, LabelValues, Value);
-do_set(_, _, _, _) ->
-  {error, invalid_handle}.
+%% The unified write path: all add/record/set funnel here. Attrs canonicalize
+%% to {SortedNames, Values}; that canon is also the cache key (the meter sorts
+%% attrs anyway, so the hot path does zero extra work). {} -> {[], []}.
+do_write(RegName, Attrs, WriteFun) ->
+  Canon = attrs_to_labels(Attrs),
+  instrument_series:write(RegName, Canon, fun() -> Canon end, WriteFun).
 
 default_boundaries() ->
   %% Default histogram boundaries per OTel spec
@@ -571,104 +434,6 @@ to_label_value(V) when is_list(V) -> list_to_binary(V);
 to_label_value(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_label_value(V) when is_integer(V) -> integer_to_binary(V);
 to_label_value(V) when is_float(V) -> float_to_binary(V, [{decimals, 6}, compact]).
-
-%% @doc Lazily create a vec metric if not exists.
-%% The vec name includes the label names to support different attribute schemas.
-%% This function is concurrency-safe - handles race conditions gracefully.
-%% Histogram needs special handling to preserve custom bucket boundaries.
-ensure_vec_metric(BaseName, histogram, LabelNames, BaseMetric) ->
-  VecName = make_vec_name(BaseName, LabelNames),
-  case instrument_registry:lookup(VecName) of
-    undefined ->
-      try
-        Boundaries = instrument_histogram:get_bucket_boundaries(BaseMetric),
-        instrument_metric:new_histogram_vec(VecName, <<>>, LabelNames, Boundaries),
-        track_vec_metric(BaseName, VecName),
-        VecName
-      catch
-        error:{badmatch, {error, already_exists}} ->
-          track_vec_metric(BaseName, VecName),
-          VecName;
-        _:_ ->
-          case instrument_registry:lookup(VecName) of
-            undefined -> error({failed_to_create_vec_metric, VecName});
-            _ ->
-              track_vec_metric(BaseName, VecName),
-              VecName
-          end
-      end;
-    _ ->
-      VecName
-  end;
-%% Counter, gauge, and observable_counter all use the same lazy-creation
-%% pattern. observable_counter bypasses the public new_*_vec helpers and
-%% calls instrument_vector:new/4 directly because the call site is
-%% internal-only — there is no public observable_counter vec entry point.
-ensure_vec_metric(BaseName, Type, LabelNames, _BaseMetric)
-        when Type =:= counter;
-             Type =:= gauge;
-             Type =:= observable_counter ->
-  VecName = make_vec_name(BaseName, LabelNames),
-  case instrument_registry:lookup(VecName) of
-    undefined ->
-      try
-        case Type of
-          counter ->
-            instrument_metric:new_counter_vec(VecName, <<>>, LabelNames);
-          gauge ->
-            instrument_metric:new_gauge_vec(VecName, <<>>, LabelNames);
-          observable_counter ->
-            _ = instrument_vector:new(LabelNames, observable_counter,
-                                      VecName, <<>>)
-        end,
-        track_vec_metric(BaseName, VecName),
-        VecName
-      catch
-        error:{badmatch, {error, already_exists}} ->
-          track_vec_metric(BaseName, VecName),
-          VecName;
-        _:_ ->
-          case instrument_registry:lookup(VecName) of
-            undefined -> error({failed_to_create_vec_metric, VecName});
-            _ ->
-              track_vec_metric(BaseName, VecName),
-              VecName
-          end
-      end;
-    _ ->
-      VecName
-  end.
-
-%% Track a vec metric associated with a base OTel instrument for cleanup
-track_vec_metric(BaseName, VecName) ->
-  Key = {otel_instrument_vecs, BaseName},
-  Current = persistent_term:get(Key, []),
-  case lists:member(VecName, Current) of
-    true -> ok;
-    false -> persistent_term:put(Key, [VecName | Current])
-  end.
-
-%% Include label names in the vec metric name to distinguish different attribute schemas
-make_vec_name({otel, Name}, LabelNames) when is_binary(Name) ->
-  LabelSuffix = label_suffix(LabelNames),
-  {otel_vec, <<Name/binary, LabelSuffix/binary>>};
-make_vec_name(Name, LabelNames) when is_atom(Name) ->
-  LabelSuffix = label_suffix(LabelNames),
-  list_to_atom(atom_to_list(Name) ++ "_vec" ++ binary_to_list(LabelSuffix));
-make_vec_name(Name, LabelNames) when is_binary(Name) ->
-  LabelSuffix = label_suffix(LabelNames),
-  <<Name/binary, "_vec", LabelSuffix/binary>>.
-
-%% Create a deterministic suffix from label names
-label_suffix([]) -> <<>>;
-label_suffix(LabelNames) ->
-  %% Sort for determinism, then hash
-  Sorted = lists:sort(LabelNames),
-  Joined = lists:foldl(fun(L, Acc) ->
-    LBin = if is_atom(L) -> atom_to_binary(L, utf8); true -> L end,
-    <<Acc/binary, "_", LBin/binary>>
-  end, <<>>, Sorted),
-  Joined.
 
 %% Find histogram boundaries from registered views
 find_view_boundaries(Name) ->

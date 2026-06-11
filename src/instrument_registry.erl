@@ -265,8 +265,12 @@ do_delete_all() ->
                end,
   lists:foreach(fun release_exemplar_reservoirs/1, AllMetrics),
   [ets:delete_all_objects(T) || T <- instrument_lib:tables()],
-  %% Clear all instrument-owned persistent_term entries
+  %% Clear all instrument-owned persistent_term entries (this also sweeps
+  %% instrument_family_seq, so the series store must be re-initialized below).
   clear_instrument_persistent_terms(),
+  %% Re-establish a clean series store: re-mint the family-seq ref the sweep
+  %% just erased and drop the arbiter rows of the families we deleted.
+  ok = instrument_series:reset(),
   %% Clear label accounting
   case ets:info(?LABEL_COUNTS_TABLE, name) of
     undefined -> ok;
