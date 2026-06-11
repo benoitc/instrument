@@ -24,7 +24,9 @@
   collect_all/0,
   remove_row/2,
   clear_family_rows/1,
-  teardown_family/1
+  teardown_family/1,
+  to_label_value/1,
+  vec_canon/2
 ]).
 
 -define(TAB, instrument_series).
@@ -110,18 +112,24 @@ ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
       end
   end.
 
-%% Custom-collector family (instrument_metric:register/1 compat).
--spec ensure_custom(term(), {module(), atom(), list()}) -> ok.
-ensure_custom(Name, MFA) ->
+%% Custom family (instrument_metric:register/1 compat). The payload is either a
+%% collect MFA {M,F,A} (scraped by collect_all) or {raw, #metric{}} — a record
+%% registered with no collector, stored verbatim so lookup/1 round-trips it and
+%% collect_all skips it (master case_clause-crashed on collectorless records; a
+%% silent skip is strictly better). Returns {error, already_exists} when the
+%% name is taken, so register/1 reports duplicate registrations.
+-spec ensure_custom(term(), {module(), atom(), list()} | {raw, #metric{}}) ->
+        ok | {error, already_exists}.
+ensure_custom(Name, Payload) ->
   FamSeq = family_seq(),
-  Meta = {custom, MFA, atomics:add_get(FamSeq, 1, 1)},
+  Meta = {custom, Payload, atomics:add_get(FamSeq, 1, 1)},
   case ets:insert_new(?TAB, {{Name, family}, Meta}) of
     true ->
       publish_family(Name, Meta),
       ok;
     false ->
       %% no dead-creator repair: custom families are registered at startup by a single caller; first_write never reads them
-      ok
+      {error, already_exists}
   end.
 
 publish_family(Name, #family{idx = Idx} = Meta) ->
@@ -133,9 +141,11 @@ publish_family(Name, {custom, _, Idx} = Meta) ->
   persistent_term:put({instrument_family, Name}, Meta),
   ok.
 
+-type custom_payload() :: {module(), atom(), list()} | {raw, #metric{}}.
+
 %% Family lookup: pt fast path, arbiter-row fallback (degraded mode after a
 %% creator died mid-publication).
--spec family(term()) -> #family{} | {custom, {module(), atom(), list()}, pos_integer()} | undefined.
+-spec family(term()) -> #family{} | {custom, custom_payload(), pos_integer()} | undefined.
 family(Name) ->
   case persistent_term:get({instrument_family, Name}, undefined) of
     undefined ->
@@ -300,6 +310,9 @@ collect_all(FamSeq) ->
       Name ->
         case persistent_term:get({instrument_family, Name}, undefined) of
           undefined -> Acc;
+          {custom, {raw, _Metric}, _Idx} ->
+            %% a raw record carries no collector — nothing to emit
+            Acc;
           {custom, {M, F, A}, _Idx} ->
             try [erlang:apply(M, F, A) | Acc]
             catch Class:Reason:Stacktrace ->
@@ -463,3 +476,31 @@ teardown_family(Name) ->
     undefined ->
       ok
   end.
+
+%% ============================================================================
+%% Label canonicalization (shared by the meter, simple-metric, and vec APIs).
+%% ============================================================================
+
+%% Stringify a label value for the wire. One definition for all three APIs.
+-spec to_label_value(term()) -> binary().
+to_label_value(V) when is_binary(V)  -> V;
+to_label_value(V) when is_list(V)    -> list_to_binary(V);
+to_label_value(V) when is_atom(V)    -> atom_to_binary(V, utf8);
+to_label_value(V) when is_integer(V) -> integer_to_binary(V);
+to_label_value(V) when is_float(V)   -> float_to_binary(V, [{decimals, 6}, compact]).
+
+%% Canonicalize a positional vec values list against the family's declared
+%% names: sort by name, reorder values to match, stringify. On an arity
+%% mismatch (or undefined declared labels) return the sentinel canon
+%% {[], Values}; its empty names length cannot equal a non-empty declared list,
+%% so valid_arity/2 rejects it as {error, invalid_labels} without a crash
+%% (first_write/4 calls the CanonFun before its own arity check). A wrong-arity
+%% values-list cache key never pre-exists, so this only runs on first touch.
+-spec vec_canon([term()] | undefined, list()) -> {list(), list()}.
+vec_canon(Declared, LabelValues)
+    when is_list(Declared), length(Declared) =:= length(LabelValues) ->
+  Pairs = lists:zip(Declared, LabelValues),
+  Sorted = lists:keysort(1, Pairs),
+  {[K || {K, _} <- Sorted], [to_label_value(V) || {_, V} <- Sorted]};
+vec_canon(_Declared, LabelValues) ->
+  {[], LabelValues}.

@@ -427,13 +427,8 @@ default_boundaries() ->
 %% #{method =&gt; &lt;&lt;"GET"&gt;&gt;, status =&gt; 200} -&gt; {[method, status], [&lt;&lt;"GET"&gt;&gt;, &lt;&lt;"200"&gt;&gt;]}
 attrs_to_labels(Attrs) ->
   Sorted = lists:sort(maps:to_list(Attrs)),
-  {[K || {K, _} <- Sorted], [to_label_value(V) || {_, V} <- Sorted]}.
-
-to_label_value(V) when is_binary(V) -> V;
-to_label_value(V) when is_list(V) -> list_to_binary(V);
-to_label_value(V) when is_atom(V) -> atom_to_binary(V, utf8);
-to_label_value(V) when is_integer(V) -> integer_to_binary(V);
-to_label_value(V) when is_float(V) -> float_to_binary(V, [{decimals, 6}, compact]).
+  {[K || {K, _} <- Sorted],
+   [instrument_series:to_label_value(V) || {_, V} <- Sorted]}.
 
 %% Find histogram boundaries from registered views
 find_view_boundaries(Name) ->

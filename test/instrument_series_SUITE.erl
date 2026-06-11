@@ -20,7 +20,8 @@
   loser_after_winner_undo_returns_not_found/1,
   collect_families/1,
   collect_skips_holes_and_empty/1,
-  collect_union_and_declared/1
+  collect_union_and_declared/1,
+  teardown_returns_pt_to_baseline/1
 ]).
 
 all() ->
@@ -37,7 +38,8 @@ all() ->
    loser_after_winner_undo_returns_not_found,
    collect_families,
    collect_skips_holes_and_empty,
-   collect_union_and_declared].
+   collect_union_and_declared,
+   teardown_returns_pt_to_baseline].
 
 init_per_testcase(_TC, Config) ->
   application:stop(instrument),
@@ -232,3 +234,40 @@ collect_union_and_declared(_Config) ->
         fun(R) -> instrument_counter:inc_counter(R) end),
   [#{labels := [a, b]}] = [E || #{name := c5} = E <- instrument_series:collect_all()],
   ok.
+
+%% A family's full teardown must return both the instrument-owned persistent_term
+%% footprint and the exemplar reservoir ETS table to exactly the pre-create
+%% baseline — no chain slots, cache keys, family meta, or reservoirs leak. Uses a
+%% histogram family so each row allocates an exemplar reservoir row in the
+%% instrument_exemplar_reservoirs table.
+teardown_returns_pt_to_baseline(_Config) ->
+  PtBefore  = instrument_pt_key_count(),
+  ResBefore = exemplar_row_count(),
+
+  Name = td_hist,
+  ok = instrument_metric:new_histogram_vec(Name, <<"teardown hist">>, [path]),
+  [ok = instrument_metric:observe_histogram_vec(Name, [P], 0.5)
+   || P <- [<<"/a">>, <<"/b">>, <<"/c">>]],
+
+  %% creation grew the pt footprint and allocated three reservoirs
+  ?assert(instrument_pt_key_count() > PtBefore),
+  ?assertEqual(ResBefore + 3, exemplar_row_count()),
+
+  %% unregister routes through the registry janitor → teardown_family/1
+  ok = instrument_registry:unregister(Name),
+
+  ?assertEqual(PtBefore, instrument_pt_key_count()),
+  ?assertEqual(ResBefore, exemplar_row_count()),
+  ?assertEqual(undefined, instrument_series:family(Name)),
+  ok.
+
+%% Count instrument-owned persistent_term keys via the registry's sweep predicate.
+instrument_pt_key_count() ->
+  length([K || {K, _} <- persistent_term:get(),
+               instrument_registry:is_instrument_key(K)]).
+
+exemplar_row_count() ->
+  case ets:info(instrument_exemplar_reservoirs, size) of
+    undefined -> 0;
+    N -> N
+  end.

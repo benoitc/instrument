@@ -374,26 +374,18 @@ vec_write(Name, LabelValues, WriteFun) ->
   instrument_series:write(Name, LabelValues,
                           fun() -> vec_canon(Name, LabelValues) end, WriteFun).
 
-%% Canonicalize a vec label-values list against the family's declared names:
-%% sort by name, reorder values to match. On an arity mismatch we do NOT crash
-%% (instrument_series:first_write/4 calls CanonFun before its arity check, and a
-%% wrong-arity values-list cache key never pre-exists). Instead we return a
-%% sentinel canon {[], Values} whose names length ([]) cannot equal a non-empty
-%% declared list, so instrument_series:valid_arity/2 fails it → {error,
-%% invalid_labels}, matching master's tuple contract without a crash.
+%% Canonicalize a vec label-values list against the family's declared names.
+%% Resolves the family once, then delegates to the shared
+%% instrument_series:vec_canon/2 (which sorts, reorders, stringifies, and
+%% returns the {[], Values} reject sentinel on an arity mismatch / undefined
+%% declared labels).
 -spec vec_canon(metric_name(), list()) -> {list(), list()}.
 vec_canon(Name, LabelValues) ->
-  case instrument_series:family(Name) of
-    #family{declared_labels = Declared}
-        when Declared =/= undefined,
-             length(Declared) =:= length(LabelValues) ->
-      Pairs = lists:zip(Declared, LabelValues),
-      Sorted = lists:keysort(1, Pairs),
-      {[K || {K, _} <- Sorted], [to_label_value(V) || {_, V} <- Sorted]};
-    _ ->
-      %% arity mismatch (or family vanished): force valid_arity/2 to reject
-      {[], LabelValues}
-  end.
+  Declared = case instrument_series:family(Name) of
+               #family{declared_labels = D} -> D;
+               _ -> undefined
+             end,
+  instrument_series:vec_canon(Declared, LabelValues).
 
 %% Resolve the row #metric{} for an already-written vec label set (cache-key
 %% fast path, arbiter-row fallback for the publication race — generalized from
@@ -404,11 +396,3 @@ vec_row(Name, LabelValues) ->
     #metric{} = R -> R;
     undefined -> arbiter_row(Name, vec_canon(Name, LabelValues))
   end.
-
-%% Stringify a vec label value the same way the meter does (private copy to
-%% avoid cross-module coupling with instrument_meter:to_label_value/1).
-to_label_value(V) when is_binary(V)  -> V;
-to_label_value(V) when is_list(V)    -> list_to_binary(V);
-to_label_value(V) when is_atom(V)    -> atom_to_binary(V, utf8);
-to_label_value(V) when is_integer(V) -> integer_to_binary(V);
-to_label_value(V) when is_float(V)   -> float_to_binary(V, [{decimals, 6}, compact]).
