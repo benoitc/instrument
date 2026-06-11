@@ -50,7 +50,7 @@ All notable changes to this project will be documented in this file.
   (unregister, remove_label, clear_labels, unregister_all).
 - **Accepted regression:** the meter's unlabeled write (e.g. `add(Counter, N)`
   with no attributes) now costs one `persistent_term:get/1` it did not pay
-  before (~+10 ns on a ~15 ns baseline). This is the price of the phantom kill
+  before (measured ~+80 ns on a ~25 ns baseline). This is the price of the phantom kill
   (no storage in descriptors means nothing exists before the first write) and
   of stale-proof descriptors that carry identity rather than a live cell
   reference. Compensations: the labeled path — the common case in OTel usage —
