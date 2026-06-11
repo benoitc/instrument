@@ -270,6 +270,9 @@ collect_metrics() ->
     end
   end, RawMetrics).
 
+convert_metric(#{data := []}, _Timestamp) ->
+  undefined;
+
 convert_metric(#{type := counter, name := Name, help := Help, val := Val} = Metric, Timestamp) ->
   StartTime = maps:get(start_time, Metric, undefined),
   #{
@@ -285,7 +288,8 @@ convert_metric(#{type := counter, name := Name, help := Help, val := Val} = Metr
     }]
   };
 
-convert_metric(#{type := counter, name := Name, help := Help, labels := Union, data := Data}, Timestamp) ->
+convert_metric(#{type := counter, name := Name, help := Help, labels := Union, data := Data} = Metric, Timestamp) ->
+  StartTime = maps:get(start_time, Metric, undefined),
   #{
     name => to_binary(Name),
     description => extract_help(Help),
@@ -294,7 +298,8 @@ convert_metric(#{type := counter, name := Name, help := Help, labels := Union, d
     data_points => [#{
       attributes => row_attributes(Union, RowNames, RowVals),
       value => Val,
-      timestamp => Timestamp
+      timestamp => Timestamp,
+      start_time => StartTime
     } || {RowNames, RowVals, Val} <- Data]
   };
 
@@ -343,7 +348,8 @@ convert_metric(#{type := histogram, name := Name, help := Help, count := Count, 
     }]
   };
 
-convert_metric(#{type := histogram, name := Name, help := Help, labels := Union, data := Data}, Timestamp) ->
+convert_metric(#{type := histogram, name := Name, help := Help, labels := Union, data := Data} = Metric, Timestamp) ->
+  StartTime = maps:get(start_time, Metric, undefined),
   #{
     name => to_binary(Name),
     description => extract_help(Help),
@@ -357,7 +363,8 @@ convert_metric(#{type := histogram, name := Name, help := Help, labels := Union,
         buckets => [#{bound => maps:get(upper_bound, B), count => maps:get(cumulative_count, B)}
                     || B <- maps:get(buckets, Val)]
       },
-      timestamp => Timestamp
+      timestamp => Timestamp,
+      start_time => StartTime
     } || {RowNames, RowVals, Val} <- Data]
   };
 
@@ -404,9 +411,6 @@ row_attributes(_Union, RowNames, RowVals) ->
 %% Get unit from otel_instrument if available, otherwise default to "1"
 get_instrument_unit({otel, Name}) when is_binary(Name) ->
   get_instrument_unit(Name);
-get_instrument_unit({otel_vec, Name}) when is_binary(Name) ->
-  %% For vec metrics, strip the label suffix to get base name
-  get_instrument_unit(Name);
 get_instrument_unit(Name) when is_binary(Name) ->
   case instrument_meter:get_instrument(Name) of
     #otel_instrument{unit = Unit} when Unit =/= undefined -> Unit;
@@ -416,7 +420,6 @@ get_instrument_unit(_) ->
   <<"1">>.
 
 to_binary({otel, Name}) when is_binary(Name) -> Name;
-to_binary({otel_vec, Name}) when is_binary(Name) -> Name;
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_binary(V) when is_list(V) -> list_to_binary(V);

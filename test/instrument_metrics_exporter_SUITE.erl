@@ -43,7 +43,11 @@
   %% OTLP temporality test (OTel spec compliance)
   otlp_temporality_export_test/1,
   %% Console exporter file output (regression for io_device unwrap bug)
-  console_exporter_file_output_test/1
+  console_exporter_file_output_test/1,
+  %% Task 5: labeled start_time, empty data skip, otel_vec unit
+  labeled_counter_start_time_test/1,
+  labeled_histogram_start_time_test/1,
+  never_written_meter_emits_nothing_test/1
 ]).
 
 -include_lib("stdlib/include/assert.hrl").
@@ -79,7 +83,11 @@ all() ->
     %% OTLP temporality test (OTel spec compliance)
     otlp_temporality_export_test,
     %% Console exporter file output (regression for io_device unwrap bug)
-    console_exporter_file_output_test
+    console_exporter_file_output_test,
+    %% Task 5: labeled start_time, empty data skip, otel_vec unit
+    labeled_counter_start_time_test,
+    labeled_histogram_start_time_test,
+    never_written_meter_emits_nothing_test
   ].
 
 init_per_suite(Config) ->
@@ -655,3 +663,106 @@ console_exporter_file_output_test(_Config) ->
   ?assertNotEqual(nomatch, binary:match(Bin, <<"my_counter">>)),
   _ = file:delete(Path),
   ok.
+
+%% ============================================================================
+%% Task 5 tests: labeled start_time, empty-data skip, otel_vec name/unit removal
+%% ============================================================================
+
+%% Labeled counter data points must carry start_time (stream start),
+%% matching the behaviour of the scalar counter clause.
+labeled_counter_start_time_test(_Config) ->
+  BeforeCreate = erlang:system_time(nanosecond),
+
+  Meter = instrument_meter:get_meter(<<"labeled_st_svc">>),
+  Counter = instrument_meter:create_counter(Meter, <<"labeled_st_counter">>, #{
+    description => <<"labeled counter for start_time test">>
+  }),
+
+  AfterCreate = erlang:system_time(nanosecond),
+
+  ok = instrument_meter:add(Counter, 1, #{region => <<"us-east">>}),
+  ok = instrument_meter:add(Counter, 2, #{region => <<"eu-west">>}),
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  Matching = [M || #{name := N} = M <- Metrics,
+                   binary:match(N, <<"labeled_st_counter">>) =/= nomatch],
+  ?assert(length(Matching) >= 1),
+
+  AllDPs = lists:flatmap(fun(#{data_points := DPs}) -> DPs end, Matching),
+  ?assert(length(AllDPs) >= 1),
+
+  %% Every attributed data point must carry start_time from the family creation.
+  lists:foreach(fun(DP) ->
+    Attrs = maps:get(attributes, DP),
+    case map_size(Attrs) > 0 of
+      true ->
+        ST = maps:get(start_time, DP, missing),
+        ?assertNotEqual(missing, ST,
+          "attributed counter data point missing start_time"),
+        ?assert(ST >= BeforeCreate,
+          "start_time before instrument creation"),
+        ?assert(ST =< AfterCreate,
+          "start_time after AfterCreate timestamp")
+      ;
+      false -> ok
+    end
+  end, AllDPs),
+  ok = instrument_meter:unregister_instrument(<<"labeled_st_counter">>).
+
+%% Labeled histogram data points must carry start_time, matching scalar histograms.
+labeled_histogram_start_time_test(_Config) ->
+  BeforeCreate = erlang:system_time(nanosecond),
+
+  Meter = instrument_meter:get_meter(<<"labeled_hist_st_svc">>),
+  Histogram = instrument_meter:create_histogram(Meter, <<"labeled_st_hist">>, #{
+    description => <<"labeled histogram for start_time test">>,
+    boundaries => [0.1, 0.5, 1.0]
+  }),
+
+  AfterCreate = erlang:system_time(nanosecond),
+
+  ok = instrument_meter:record(Histogram, 0.25, #{service => <<"auth">>}),
+  ok = instrument_meter:record(Histogram, 0.75, #{service => <<"api">>}),
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  Matching = [M || #{name := N} = M <- Metrics,
+                   binary:match(N, <<"labeled_st_hist">>) =/= nomatch],
+  ?assert(length(Matching) >= 1),
+
+  AllDPs = lists:flatmap(fun(#{data_points := DPs}) -> DPs end, Matching),
+  ?assert(length(AllDPs) >= 1),
+
+  lists:foreach(fun(DP) ->
+    Attrs = maps:get(attributes, DP),
+    case map_size(Attrs) > 0 of
+      true ->
+        ST = maps:get(start_time, DP, missing),
+        ?assertNotEqual(missing, ST,
+          "attributed histogram data point missing start_time"),
+        ?assert(ST >= BeforeCreate,
+          "start_time before instrument creation"),
+        ?assert(ST =< AfterCreate,
+          "start_time after AfterCreate timestamp")
+      ;
+      false -> ok
+    end
+  end, AllDPs),
+  ok = instrument_meter:unregister_instrument(<<"labeled_st_hist">>).
+
+%% A meter instrument created but never written must produce no metric entry.
+never_written_meter_emits_nothing_test(_Config) ->
+  Meter = instrument_meter:get_meter(<<"phantom_svc">>),
+  _Counter = instrument_meter:create_counter(Meter, <<"never_written_phantom">>, #{
+    description => <<"should not appear in exports">>
+  }),
+  %% Intentionally no add/record calls.
+
+  Metrics = instrument_metrics_exporter:collect(),
+
+  Phantom = [M || #{name := N} = M <- Metrics,
+                  binary:match(N, <<"never_written_phantom">>) =/= nomatch],
+  ?assertEqual([], Phantom,
+    "created-but-never-written instrument must not appear in exported metrics"),
+  ok = instrument_meter:unregister_instrument(<<"never_written_phantom">>).
