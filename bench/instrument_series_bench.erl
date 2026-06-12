@@ -4,9 +4,9 @@
 %% See the NOTICE for more information.
 
 %% @doc Master-vs-branch performance benchmark for the series store
-%% (Task 11 of the series-store plan). Verifies the §10 performance
-%% contract of docs/superpowers/specs/2026-06-11-series-store-design.md
-%% empirically.
+%% Verifies the storage performance contract empirically: hot paths must
+%% not regress (except the documented unlabeled-meter trade-off) and
+%% first-touch creation must stay lock-free and literal-GC-sweep-free.
 %%
 %% Self-contained and build-agnostic: scenarios 1-5 and 7 call only public
 %% API that exists byte-identically on both `be7e75e` (master) and the
