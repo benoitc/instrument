@@ -1,4 +1,4 @@
-%% Copyright (c) 2017-2026, Benoit Chesneau <bchesneau@gmail.com>.
+%% Copyright (c) 2026, Grigory Starinkin <starinkin@gmail.com>.
 %%
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
