@@ -3,6 +3,12 @@
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
 
+%% @doc Thin wrapper for the legacy labeled-metric API over the series store.
+%%
+%% Vec families live in instrument_series keyed by their declared label names;
+%% the old fixed-schema container record is gone. Operations resolve a row by
+%% the raw label-values list (the cache key) and apply a per-kind function to
+%% it. with/2 enumerates a family by walking its row chain.
 -module(instrument_vector).
 -author("benoitc").
 
@@ -13,7 +19,6 @@
   with/2,
   remove_label/2,
   clear_labels/1,
-  collect/1,
   get_or_create_label/2
 ]).
 
@@ -22,29 +27,21 @@
 -type metric_name() :: atom() | binary() | string().
 -type label_values() :: list().
 
+%% new/4,5 register a family with its declared labels and return a minimal
+%% #metric{} carrying only the name. The returned record is an opaque handle:
+%% with_label/with resolve the family by its name field (the storage lives in
+%% the series store, never in the record), so handle is left undefined.
 -spec new(list(), atom(), metric_name(), binary() | string()) -> #metric{}.
 new(Labels, histogram, Name, Help) ->
   new(Labels, histogram, Name, Help, instrument_histogram:default_buckets());
 new(Labels, MetricType, Name, Help) ->
-  new(Labels, MetricType, Name, Help, []).
+  new(Labels, MetricType, Name, Help, undefined).
 
--spec new(list(), atom(), metric_name(), binary() | string(), list()) -> #metric{}.
+-spec new(list(), atom(), metric_name(), binary() | string(), list() | undefined) -> #metric{}.
 new(Labels, MetricType, Name, Help, Buckets) ->
   ok = validate_metric_type(MetricType),
-  Vector = #vector{
-    name = Name,
-    help = Help,
-    metric = MetricType,
-    buckets = Buckets,
-    labels = Labels
-  },
-  Metric = #metric{
-    name=Name,
-    handle=Vector,
-    collect = {?MODULE, collect, [Name]}
-  },
-  ok = instrument_registry:register(Metric),
-  Metric.
+  _ = instrument_series:ensure_family(Name, MetricType, to_help(Help), Labels, Buckets),
+  #metric{name = Name, handle = undefined}.
 
 with_label(VectorMetric, Label, Fun) ->
   with_label_1(VectorMetric, Label, module(Fun), Fun, []).
@@ -63,60 +60,71 @@ module(get_histogram) -> instrument_histogram;
 module(_) -> undefined.
 
 with_label_1(VectorMetric, Label, Mod, Fun, Args) ->
-  instrument_registry:with(
-    VectorMetric,
-    fun(#metric{ name=Name, handle = Vector }) ->
-      case find_label(Label, Vector) of
-        {ok, Metric} ->
-          apply_label_fun(Metric, Mod, Fun, Args);
-        {error, _}=Error ->
-          Error;
-        error ->
-          case cardinality_limit_reached(Name) of
-            true ->
-              case instrument_registry:get_or_create_overflow(Name) of
-                undefined -> ok;
-                OverflowMetric ->
-                  apply_label_fun(OverflowMetric, Mod, Fun, Args)
-              end;
-            false ->
-              ok = instrument_registry:create_vector_metric(Name, Label),
-              with_label(Name, Label, Fun)
-          end
-      end
-    end
-  ).
+  Name = vec_name(VectorMetric),
+  case label_values(Name, Label) of
+    {error, _} = Error ->
+      Error;
+    LabelValues ->
+      %% The closure carries Args through first touch — this is the fix for
+      %% master's with_label/4 dropping its value on the first write of a label
+      %% set (it recursed into the 3-arity form). instrument_series:write
+      %% applies it to the resolved row on both the hot and first-touch paths.
+      instrument_series:write(Name, LabelValues,
+        fun() -> canon(Name, LabelValues) end,
+        fun(Row) -> apply_label_fun(Row, Mod, Fun, Args) end)
+  end.
 
 apply_label_fun(Metric, undefined, Fun, Args) ->
   erlang:apply(Fun, [Metric | Args]);
 apply_label_fun(Metric, Mod, Fun, Args) ->
   erlang:apply(Mod, Fun, [Metric | Args]).
 
-cardinality_limit_reached(Name) ->
-  Limit = instrument_config:get_metric_cardinality_limit(),
-  instrument_registry:label_count(Name) >= Limit.
-
+%% Fold every live label set of a family, applying the getter to each row.
+%% Returns [{LabelValues, Result}] in insertion (chain) order, where
+%% LabelValues is the declared-order values list the caller originally passed
+%% (the stored CacheKey).
 with(VectorMetric, Fun) ->
-  instrument_registry:with(
-    VectorMetric,
-    fun(#metric{ handle = Vector }) ->
-      maps:fold(
-        fun(Labels, M, Acc) ->
-          Mod = module(Fun),
-          Res = erlang:apply(Mod, Fun, [M]),
-          [{Labels, Res} | Acc]
-        end,
-        [],
-        Vector#vector.labels_map
-      )
-    end
-  ).
+  Name = vec_name(VectorMetric),
+  Mod = module(Fun),
+  case instrument_series:family(Name) of
+    #family{row_seq = Seq} ->
+      N = atomics:get(Seq, 1),
+      %% foldl prepends, so reverse to yield insertion (chain) order — the
+      %% legacy suite pins the order label sets were first written in.
+      lists:reverse(lists:foldl(fun(S, Acc) ->
+        case persistent_term:get({instrument_row, Name, S}, undefined) of
+          {_Canon, CacheKey, Row} ->
+            [{CacheKey, apply_label_fun(Row, Mod, Fun, [])} | Acc];
+          undefined ->
+            Acc
+        end
+      end, [], lists:seq(1, N)));
+    _ ->
+      []
+  end.
 
 remove_label(Name, Label) ->
-  instrument_registry:remove_label(Name, Label).
+  instrument_registry:remove_label(vec_name(Name), Label).
 
 clear_labels(Name) ->
-  instrument_registry:clear_labels(Name).
+  instrument_registry:clear_labels(vec_name(Name)).
+
+%% @deprecated retained for API compatibility; no internal callers — prefer instrument_metric:labels/2
+%% get_or_create_label/2 - resolve or create the row for a label set.
+-spec get_or_create_label(metric_name(), label_values()) -> {ok, #metric{}} | {error, term()}.
+get_or_create_label(Name0, LabelValues) ->
+  Name = vec_name(Name0),
+  case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
+    #metric{} = Row ->
+      {ok, Row};
+    undefined ->
+      case instrument_series:write(Name, LabelValues,
+                                   fun() -> canon(Name, LabelValues) end,
+                                   fun(_R) -> ok end) of
+        ok -> {ok, row(Name, LabelValues)};
+        Error -> Error
+      end
+  end.
 
 validate_metric_type(counter)            -> ok;
 validate_metric_type(gauge)              -> ok;
@@ -124,103 +132,62 @@ validate_metric_type(histogram)          -> ok;
 validate_metric_type(observable_counter) -> ok;
 validate_metric_type(_)                  -> erlang:error(bad_metric).
 
-find_label(Label, Vector) when is_list(Label) ->
-  VLen = length(Label),
-  GLen = length(Vector#vector.labels),
-  if
-    VLen =:= GLen -> maps:find(Label, Vector#vector.labels_map);
-    true -> {error, invalid_labels}
+%% Resolve the family name from either a #metric{} handle or a bare name.
+vec_name(#metric{name = Name}) -> Name;
+vec_name(Name) -> Name.
+
+%% Normalize a label argument to a declared-order values list. A positional
+%% list is used as-is; a MAP is resolved by picking the declared keys in
+%% declared order (so a map and the equivalent positional list resolve the same
+%% row). Arity mismatches surface as {error, _} without touching the store.
+label_values(Name, Label) when is_list(Label) ->
+  case declared(Name) of
+    undefined -> {error, not_found};
+    Declared when length(Declared) =:= length(Label) -> Label;
+    _ -> {error, invalid_labels}
   end;
-find_label(LabelMap, #vector{}=Vector) when is_map(LabelMap) ->
-  #vector{ labels = Labels } = Vector,
-  MLen = maps:size(LabelMap),
-  GLen = length(Labels),
-  if
-    MLen =:= GLen ->
-      Label = maps:values(maps:with(Labels, LabelMap)),
-      find_label(Label, Vector);
-    true ->
-      {error, bad_labels}
+label_values(Name, LabelMap) when is_map(LabelMap) ->
+  case declared(Name) of
+    undefined ->
+      {error, not_found};
+    Declared ->
+      case maps:size(LabelMap) =:= length(Declared)
+           andalso lists:all(fun(K) -> maps:is_key(K, LabelMap) end, Declared) of
+        true -> [maps:get(K, LabelMap) || K <- Declared];
+        false -> {error, bad_labels}
+      end
   end;
-find_label(_, _) ->
+label_values(_Name, _Label) ->
   {error, bad_labels}.
 
-%% collect/1 - collect all labeled metrics for Prometheus export
--spec collect(metric_name()) -> map().
-collect(Name) ->
-  case instrument_registry:lookup(Name) of
-    undefined ->
-      #{name => Name, type => unknown, data => []};
-    #metric{handle = #vector{} = Vector} ->
-      #vector{help = Help, metric = StoredType,
-              labels = LabelNames, labels_map = LabelsMap} = Vector,
-      WireType = wire_type(StoredType),
-      Data = maps:fold(
-        fun(LabelValues, Metric, Acc) ->
-          Val = collect_metric_value(StoredType, Metric),
-          [{LabelNames, LabelValues, Val} | Acc]
-        end,
-        [],
-        LabelsMap
-      ),
-      #{name => Name,
-        help => Help,
-        type => WireType,
-        labels => LabelNames,
-        data => Data}
+declared(Name) ->
+  case instrument_series:family(Name) of
+    #family{declared_labels = Declared} -> Declared;
+    _ -> undefined
   end.
 
-collect_metric_value(counter, Metric) ->
-  instrument_counter:get_counter(Metric);
-collect_metric_value(gauge, Metric) ->
-  instrument_gauge:get_gauge(Metric);
-collect_metric_value(histogram, Metric) ->
-  instrument_histogram:get_histogram(Metric);
-collect_metric_value(observable_counter, Metric) ->
-  instrument_gauge:get_gauge(Metric).
+%% Canonicalize a values list against declared names. Delegates to the shared
+%% instrument_series:vec_canon/2 (sort/reorder/stringify, {[], Values} reject
+%% sentinel on arity mismatch / undefined declared labels).
+canon(Name, LabelValues) ->
+  instrument_series:vec_canon(declared(Name), LabelValues).
 
-%% Map an internal storage type to the Prometheus wire type used by the
-%% formatter. observable_counter is gauge-shaped under the hood but renders
-%% as counter (and gets the `_total` suffix via format_counter).
-wire_type(observable_counter) -> counter;
-wire_type(T)                  -> T.
-
-%% get_or_create_label/2 - get or create labeled metric instance
--spec get_or_create_label(metric_name(), label_values()) -> {ok, #metric{}} | {error, term()}.
-get_or_create_label(Name, LabelValues) ->
-  case instrument_registry:lookup_label(Name, LabelValues) of
+%% Resolve a written row by its values-list cache key, with the arbiter-row
+%% fallback for the brief publication race.
+row(Name, LabelValues) ->
+  case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
+    #metric{} = R -> R;
     undefined ->
-      %% Create the labeled metric
-      case instrument_registry:lookup(Name) of
-        undefined ->
-          {error, not_found};
-        #metric{handle = #vector{} = Vector} ->
-          #vector{labels = LabelNames} = Vector,
-          case length(LabelValues) =:= length(LabelNames) of
-            false -> {error, invalid_labels};
-            true ->
-              case cardinality_limit_reached(Name) of
-                true ->
-                  case instrument_registry:get_or_create_overflow(Name) of
-                    undefined -> {error, not_found};
-                    OverflowMetric -> {ok, OverflowMetric}
-                  end;
-                false ->
-                  ok = instrument_registry:create_vector_metric(Name, LabelValues),
-                  case instrument_registry:lookup(Name) of
-                    #metric{handle = #vector{labels_map = Map}} ->
-                      case maps:find(LabelValues, Map) of
-                        {ok, Metric} ->
-                          instrument_registry:cache_label(Name, LabelValues, Metric),
-                          {ok, Metric};
-                        error ->
-                          {error, not_found}
-                      end;
-                    _ -> {error, not_found}
-                  end
-              end
-          end
-      end;
-    Metric ->
-      {ok, Metric}
+      case ets:lookup_element(instrument_series, {Name, canon(Name, LabelValues)}, 2, undefined) of
+        #metric{} = R -> R;
+        undefined -> {error, not_found}
+      end
   end.
+
+to_help(Help) when is_binary(Help) -> Help;
+to_help(Help) when is_list(Help) ->
+  try iolist_to_binary(Help)
+  catch error:badarg -> iolist_to_binary(io_lib:format("~p", [Help]))
+  end;
+to_help(Help) ->
+  iolist_to_binary(io_lib:format("~p", [Help])).

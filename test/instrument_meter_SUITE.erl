@@ -140,6 +140,13 @@ create_up_down_counter(_Config) ->
 
   ok = instrument_meter:add(Counter, 5),
   ok = instrument_meter:add(Counter, -2),
+
+  %% The unlabeled negative add must land (master silently dropped it: the
+  %% gauge inc NIF rejects negatives, so a sign-blind unlabeled path lost the
+  %% delta). 5 + (-2) = 3.0 must render under the real name.
+  Output = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"active_connections 3.0">>)),
   ok.
 
 create_histogram(_Config) ->
@@ -378,43 +385,46 @@ unregister_all_instruments_test(_Config) ->
 
   ok.
 
-%% Test that unregistering an instrument also cleans up associated vec metrics
+%% Attributed meter writes now land in the series store under the real
+%% instrument name (one family, attributes as dimensions) — no derived
+%% {otel_vec, _} families exist. Unregister erases the descriptor; full
+%% series-store family teardown lands in Task 8, so this asserts the
+%% descriptor is gone and get_instrument/1 returns undefined, NOT that every
+%% series-store pt key is cleaned up.
 unregister_cleans_vec_metrics_test(_Config) ->
   Meter = instrument_meter:get_meter(<<"vec_cleanup_test">>),
   Counter = instrument_meter:create_counter(Meter, <<"cleanup_counter">>, #{}),
 
-  %% Add with attributes to create vec metrics
+  %% Add with heterogeneous attribute schemas — all under the one real name.
   ok = instrument_meter:add(Counter, 1, #{method => <<"GET">>}),
   ok = instrument_meter:add(Counter, 2, #{method => <<"POST">>}),
   ok = instrument_meter:add(Counter, 3, #{method => <<"GET">>, status => 200}),
 
-  %% Verify vec metrics were created by checking registry
+  %% No derived {otel_vec, _} families are ever produced.
   AllMetrics1 = instrument_registry:collect_all(),
   VecMetrics1 = [M || #{name := N} = M <- AllMetrics1,
                       is_tuple(N) andalso element(1, N) =:= otel_vec],
-  true = length(VecMetrics1) >= 1,
+  0 = length(VecMetrics1),
 
-  %% Unregister the instrument
+  %% The attributed data renders under the real name as one family.
+  Output1 = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch, binary:match(Output1, <<"cleanup_counter_total">>)),
+
+  %% Descriptor must exist before unregister.
+  #otel_instrument{} = instrument_meter:get_instrument(<<"cleanup_counter">>),
+
+  %% Unregister the instrument.
   ok = instrument_meter:unregister_instrument(<<"cleanup_counter">>),
 
-  %% Verify the instrument is gone
+  %% Descriptor is gone: get_instrument/1 returns undefined and the pt key is
+  %% erased. (Series-store family teardown — the chain rows and cache keys —
+  %% arrives in Task 8; not asserted here.)
   undefined = instrument_meter:get_instrument(<<"cleanup_counter">>),
+  undefined = persistent_term:get({otel_instrument, <<"cleanup_counter">>}, undefined),
 
-  %% Verify vec metrics were also cleaned up
-  AllMetrics2 = instrument_registry:collect_all(),
-  VecMetrics2 = [M || #{name := N} = M <- AllMetrics2,
-                      is_tuple(N) andalso element(1, N) =:= otel_vec,
-                      case N of
-                        {otel_vec, Name} -> binary:match(Name, <<"cleanup_counter">>) =/= nomatch;
-                        _ -> false
-                      end],
-  0 = length(VecMetrics2),
-
-  %% Re-create the counter and verify it starts fresh (no stale state)
+  %% Re-create the counter and verify it is usable (writes succeed).
   Counter2 = instrument_meter:create_counter(Meter, <<"cleanup_counter">>, #{}),
   ok = instrument_meter:add(Counter2, 100, #{method => <<"GET">>}),
-
-  %% Should be able to use it without issues
   ok = instrument_meter:add(Counter2, 50, #{method => <<"GET">>}),
 
   %% Cleanup
@@ -566,14 +576,15 @@ add_negative_to_labeled_up_down_counter(_Config) ->
   %% Negative delta at the same label set — must not crash.
   ok = instrument_meter:add(Counter, -2, #{a => <<"x">>}),
 
-  %% Rendered exposition must reflect 5 - 2 = 3.0 for {a="x"}.
+  %% Rendered exposition must reflect 5 - 2 = 3.0 for {a="x"}, under the real
+  %% instrument name (no derived `_a` label-suffix family anymore).
   Output1 = instrument_prometheus:format(),
   ?assertNotEqual(nomatch,
-                  binary:match(Output1, <<"signed_active_a{a=\"x\"} 3.0">>)),
+                  binary:match(Output1, <<"signed_active{a=\"x\"} 3.0">>)),
 
   %% A negative-only label set must register and render as a negative gauge.
   ok = instrument_meter:add(Counter, -1, #{a => <<"y">>}),
   Output2 = instrument_prometheus:format(),
   ?assertNotEqual(nomatch,
-                  binary:match(Output2, <<"signed_active_a{a=\"y\"} -1.0">>)),
+                  binary:match(Output2, <<"signed_active{a=\"y\"} -1.0">>)),
   ok.

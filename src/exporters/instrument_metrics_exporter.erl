@@ -269,6 +269,9 @@ collect_metrics() ->
     end
   end, RawMetrics).
 
+convert_metric(#{data := []}, _Timestamp) ->
+  undefined;
+
 convert_metric(#{type := counter, name := Name, help := Help, val := Val} = Metric, Timestamp) ->
   StartTime = maps:get(start_time, Metric, undefined),
   #{
@@ -284,17 +287,19 @@ convert_metric(#{type := counter, name := Name, help := Help, val := Val} = Metr
     }]
   };
 
-convert_metric(#{type := counter, name := Name, help := Help, labels := Labels, data := Data}, Timestamp) ->
+convert_metric(#{type := counter, name := Name, help := Help, labels := Union, data := Data} = Metric, Timestamp) ->
+  StartTime = maps:get(start_time, Metric, undefined),
   #{
     name => to_binary(Name),
     description => extract_help(Help),
     unit => get_instrument_unit(Name),
     type => counter,
     data_points => [#{
-      attributes => make_attributes(Labels, LabelVals),
+      attributes => row_attributes(Union, RowNames, RowVals),
       value => Val,
-      timestamp => Timestamp
-    } || {_, LabelVals, Val} <- Data]
+      timestamp => Timestamp,
+      start_time => StartTime
+    } || {RowNames, RowVals, Val} <- Data]
   };
 
 convert_metric(#{type := gauge, name := Name, help := Help, val := Val}, Timestamp) ->
@@ -310,17 +315,17 @@ convert_metric(#{type := gauge, name := Name, help := Help, val := Val}, Timesta
     }]
   };
 
-convert_metric(#{type := gauge, name := Name, help := Help, labels := Labels, data := Data}, Timestamp) ->
+convert_metric(#{type := gauge, name := Name, help := Help, labels := Union, data := Data}, Timestamp) ->
   #{
     name => to_binary(Name),
     description => extract_help(Help),
     unit => get_instrument_unit(Name),
     type => gauge,
     data_points => [#{
-      attributes => make_attributes(Labels, LabelVals),
+      attributes => row_attributes(Union, RowNames, RowVals),
       value => Val,
       timestamp => Timestamp
-    } || {_, LabelVals, Val} <- Data]
+    } || {RowNames, RowVals, Val} <- Data]
   };
 
 convert_metric(#{type := histogram, name := Name, help := Help, count := Count, sum := Sum, buckets := Buckets} = Metric, Timestamp) ->
@@ -342,22 +347,24 @@ convert_metric(#{type := histogram, name := Name, help := Help, count := Count, 
     }]
   };
 
-convert_metric(#{type := histogram, name := Name, help := Help, labels := Labels, data := Data}, Timestamp) ->
+convert_metric(#{type := histogram, name := Name, help := Help, labels := Union, data := Data} = Metric, Timestamp) ->
+  StartTime = maps:get(start_time, Metric, undefined),
   #{
     name => to_binary(Name),
     description => extract_help(Help),
     unit => get_instrument_unit(Name),
     type => histogram,
     data_points => [#{
-      attributes => make_attributes(Labels, LabelVals),
+      attributes => row_attributes(Union, RowNames, RowVals),
       value => #{
         count => maps:get(count, Val),
         sum => maps:get(sum, Val),
         buckets => [#{bound => maps:get(upper_bound, B), count => maps:get(cumulative_count, B)}
                     || B <- maps:get(buckets, Val)]
       },
-      timestamp => Timestamp
-    } || {_, LabelVals, Val} <- Data]
+      timestamp => Timestamp,
+      start_time => StartTime
+    } || {RowNames, RowVals, Val} <- Data]
   };
 
 convert_metric(_, _) ->
@@ -377,11 +384,17 @@ make_attributes(Labels, LabelVals) ->
     maps:put(to_binary(Label), to_binary(Val), Acc)
   end, #{}, lists:zip(Labels, LabelVals)).
 
+%% Build a data point's attributes from the row's OWN label names/values. OTLP
+%% data points carry only the attributes they actually have — the family union
+%% (a Prometheus-text label-column requirement) does not apply here, so absent
+%% union keys are simply not present rather than empty-string padded. RowNames
+%% and RowVals are canonically paired, so the zip never length-mismatches even
+%% for heterogeneous meter families.
+row_attributes(_Union, RowNames, RowVals) ->
+  make_attributes(RowNames, RowVals).
+
 %% Get unit from otel_instrument if available, otherwise default to "1"
 get_instrument_unit({otel, Name}) when is_binary(Name) ->
-  get_instrument_unit(Name);
-get_instrument_unit({otel_vec, Name}) when is_binary(Name) ->
-  %% For vec metrics, strip the label suffix to get base name
   get_instrument_unit(Name);
 get_instrument_unit(Name) when is_binary(Name) ->
   case instrument_meter:get_instrument(Name) of
@@ -392,7 +405,6 @@ get_instrument_unit(_) ->
   <<"1">>.
 
 to_binary({otel, Name}) when is_binary(Name) -> Name;
-to_binary({otel_vec, Name}) when is_binary(Name) -> Name;
 to_binary(V) when is_binary(V) -> V;
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_binary(V) when is_list(V) -> list_to_binary(V);

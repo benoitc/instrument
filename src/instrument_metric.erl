@@ -114,9 +114,11 @@
 
 -spec new_counter(Name :: metric_name(), Help :: help()) -> Counter :: metric().
 new_counter(Name, Help) ->
-  Metric = instrument_counter:new_counter(Name, Help),
-  ok = register(Metric),
-  Metric.
+  _ = instrument_series:ensure_family(Name, counter, to_help(Help), undefined, undefined),
+  Canon = {[], []},
+  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
+  Row = unlabeled_row(Name, Canon),
+  Row#metric{name = Name}.
 
 -spec inc_counter(Counter :: metric()) -> Result :: ok | {error, not_found}.
 inc_counter(Counter) ->
@@ -136,9 +138,11 @@ get_counter(Counter) ->
 
 -spec new_gauge(Name :: metric_name(), Help :: help()) -> Gauge :: metric().
 new_gauge(Name, Help) ->
-  Metric = instrument_gauge:new_gauge(Name, Help),
-  ok = register(Metric),
-  Metric.
+  _ = instrument_series:ensure_family(Name, gauge, to_help(Help), undefined, undefined),
+  Canon = {[], []},
+  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
+  Row = unlabeled_row(Name, Canon),
+  Row#metric{name = Name}.
 
 -spec inc_gauge(Gauge :: metric()) -> Result :: ok | {error, not_found}.
 inc_gauge(Gauge) ->
@@ -175,15 +179,18 @@ get_gauge(Gauge) ->
 
 -spec new_histogram(Name :: metric_name(), Help :: help()) -> Hist::metric().
 new_histogram(Name, Help) ->
-  Metric = instrument_histogram:new_histogram(Name, Help),
-  ok = register(Metric),
-  Metric.
+  new_histogram(Name, Help, instrument_histogram:default_buckets()).
 
 -spec new_histogram(Name :: metric_name(), Help :: help(), Buckets::list()) -> Hist::metric().
 new_histogram(Name, Help, Buckets) ->
-  Metric = instrument_histogram:new_histogram(Name, Help, Buckets),
-  ok = register(Metric),
-  Metric.
+  %% validate_buckets raises before family registration on bad input, preserving
+  %% master's error behavior
+  ok = instrument_histogram:validate_buckets(Buckets),
+  _ = instrument_series:ensure_family(Name, histogram, to_help(Help), undefined, Buckets),
+  Canon = {[], []},
+  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
+  Row = unlabeled_row(Name, Canon),
+  Row#metric{name = Name}.
 
 -spec observe_histogram(Hist::metric(), Value::number()) -> ok | {error, not_found}.
 observe_histogram(Hist, Value) ->
@@ -235,6 +242,39 @@ clear_labels(Vector) ->
 register(Metric) ->
   instrument_registry:register(Metric).
 
+%% Resolve the unlabeled row for a simple (no-label) metric after a write/4
+%% call.  The winner publishes to persistent_term itself; a claim loser racing
+%% that publication falls back to the arbiter row in the ETS series table, which
+%% exists from the instant the claim succeeded and carries the row payload.
+-spec unlabeled_row(metric_name(), {[], []}) -> #metric{}.
+unlabeled_row(Name, Canon) ->
+  case persistent_term:get({instrument_label, Name, Canon}, undefined) of
+    #metric{} = R -> R;
+    undefined -> arbiter_row(Name, Canon)
+  end.
+
+%% Read a row's #metric{} from the ETS arbiter table by its canonical key. The
+%% arbiter row is authoritative from the instant the claim landed, so this
+%% covers a claim loser racing the winner's pt publication. Returns {error,
+%% not_found} if no row exists (e.g. the family was never written / torn down).
+-spec arbiter_row(metric_name(), {list(), list()}) -> #metric{} | {error, not_found}.
+arbiter_row(Name, Canon) ->
+  case ets:lookup_element(instrument_series, {Name, Canon}, 2, undefined) of
+    #metric{} = R -> R;
+    undefined -> {error, not_found}
+  end.
+
+to_help(Help) when is_binary(Help) -> Help;
+to_help(Help) when is_list(Help) ->
+  %% Accept flat string() or binary iolist; for other list terms (e.g. proplists
+  %% passed by tests), fall back to a term-formatted binary.
+  try iolist_to_binary(Help)
+  catch error:badarg ->
+    iolist_to_binary(io_lib:format("~p", [Help]))
+  end;
+to_help(Help) ->
+  iolist_to_binary(io_lib:format("~p", [Help])).
+
 unregister(Name) ->
   instrument_registry:unregister(Name).
 
@@ -243,31 +283,41 @@ unregister_all() ->
 
 
 %% VEC API (prometheus-cpp style)
+%%
+%% Vec families live in the series store keyed by their declared label names.
+%% The hot path uses the raw values list as the cache key (zero reordering);
+%% the canonical {SortedNames, Values} identity is computed by vec_canon/2 only
+%% on the first touch of each label set.
 
 -spec new_counter_vec(Name :: metric_name(), Help :: help(), Labels :: labels()) -> ok.
 new_counter_vec(Name, Help, Labels) ->
-  _ = instrument_vector:new(Labels, counter, Name, Help),
+  _ = instrument_series:ensure_family(Name, counter, to_help(Help), Labels, undefined),
   ok.
 
 -spec new_gauge_vec(Name :: metric_name(), Help :: help(), Labels :: labels()) -> ok.
 new_gauge_vec(Name, Help, Labels) ->
-  _ = instrument_vector:new(Labels, gauge, Name, Help),
+  _ = instrument_series:ensure_family(Name, gauge, to_help(Help), Labels, undefined),
   ok.
 
 -spec new_histogram_vec(Name :: metric_name(), Help :: help(), Labels :: labels()) -> ok.
 new_histogram_vec(Name, Help, Labels) ->
-  _ = instrument_vector:new(Labels, histogram, Name, Help),
-  ok.
+  new_histogram_vec(Name, Help, Labels, instrument_histogram:default_buckets()).
 
 -spec new_histogram_vec(Name :: metric_name(), Help :: help(), Labels :: labels(), Buckets :: list()) -> ok.
 new_histogram_vec(Name, Help, Labels, Buckets) ->
-  _ = instrument_vector:new(Labels, histogram, Name, Help, Buckets),
+  %% validate_buckets raises before family registration on bad input, matching
+  %% the histogram constructor's error behavior
+  ok = instrument_histogram:validate_buckets(Buckets),
+  _ = instrument_series:ensure_family(Name, histogram, to_help(Help), Labels, Buckets),
   ok.
 
+%% Resolve-or-create the row for a label set and return its #metric{} for
+%% handle-held use (inc_counter(Row) etc.). On arity mismatch / missing family
+%% the underlying write returns {error, _}, which we surface unchanged.
 -spec labels(Name :: metric_name(), LabelValues :: list()) -> metric() | {error, term()}.
 labels(Name, LabelValues) ->
-  case instrument_vector:get_or_create_label(Name, LabelValues) of
-    {ok, Metric} -> Metric;
+  case vec_write(Name, LabelValues, fun(_R) -> ok end) of
+    ok -> vec_row(Name, LabelValues);
     Error -> Error
   end.
 
@@ -275,51 +325,74 @@ labels(Name, LabelValues) ->
 
 -spec inc_counter_vec(Name :: metric_name(), LabelValues :: list()) -> ok | {error, term()}.
 inc_counter_vec(Name, LabelValues) ->
-  with_labeled_metric(Name, LabelValues, fun instrument_counter:inc_counter/1).
+  vec_write(Name, LabelValues, fun instrument_counter:inc_counter/1).
 
 -spec inc_counter_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
 inc_counter_vec(Name, LabelValues, Value) ->
-  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_counter:inc_counter(M, Value) end).
+  vec_write(Name, LabelValues, fun(M) -> instrument_counter:inc_counter(M, Value) end).
 
 -spec get_counter_vec(Name :: metric_name(), LabelValues :: list()) -> float() | {error, term()}.
 get_counter_vec(Name, LabelValues) ->
-  with_labeled_metric(Name, LabelValues, fun instrument_counter:get_counter/1).
+  vec_write(Name, LabelValues, fun instrument_counter:get_counter/1).
 
 -spec inc_gauge_vec(Name :: metric_name(), LabelValues :: list()) -> ok | {error, term()}.
 inc_gauge_vec(Name, LabelValues) ->
-  with_labeled_metric(Name, LabelValues, fun instrument_gauge:inc_gauge/1).
+  vec_write(Name, LabelValues, fun instrument_gauge:inc_gauge/1).
 
 -spec inc_gauge_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
 inc_gauge_vec(Name, LabelValues, Value) ->
-  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_gauge:inc_gauge(M, Value) end).
+  vec_write(Name, LabelValues, fun(M) -> instrument_gauge:inc_gauge(M, Value) end).
 
 -spec dec_gauge_vec(Name :: metric_name(), LabelValues :: list()) -> ok | {error, term()}.
 dec_gauge_vec(Name, LabelValues) ->
-  with_labeled_metric(Name, LabelValues, fun instrument_gauge:dec_gauge/1).
+  vec_write(Name, LabelValues, fun instrument_gauge:dec_gauge/1).
 
 -spec dec_gauge_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
 dec_gauge_vec(Name, LabelValues, Value) ->
-  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_gauge:dec_gauge(M, Value) end).
+  vec_write(Name, LabelValues, fun(M) -> instrument_gauge:dec_gauge(M, Value) end).
 
 -spec set_gauge_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
 set_gauge_vec(Name, LabelValues, Value) ->
-  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_gauge:set_gauge(M, Value) end).
+  vec_write(Name, LabelValues, fun(M) -> instrument_gauge:set_gauge(M, Value) end).
 
 -spec get_gauge_vec(Name :: metric_name(), LabelValues :: list()) -> float() | {error, term()}.
 get_gauge_vec(Name, LabelValues) ->
-  with_labeled_metric(Name, LabelValues, fun instrument_gauge:get_gauge/1).
+  vec_write(Name, LabelValues, fun instrument_gauge:get_gauge/1).
 
 -spec observe_histogram_vec(Name :: metric_name(), LabelValues :: list(), Value :: number()) -> ok | {error, term()}.
 observe_histogram_vec(Name, LabelValues, Value) ->
-  with_labeled_metric(Name, LabelValues, fun(M) -> instrument_histogram:observe_histogram(M, Value) end).
+  vec_write(Name, LabelValues, fun(M) -> instrument_histogram:observe_histogram(M, Value) end).
 
 -spec get_histogram_vec(Name :: metric_name(), LabelValues :: list()) -> map() | {error, term()}.
 get_histogram_vec(Name, LabelValues) ->
-  with_labeled_metric(Name, LabelValues, fun instrument_histogram:get_histogram/1).
+  vec_write(Name, LabelValues, fun instrument_histogram:get_histogram/1).
 
-%% Internal helper for vec operations
-with_labeled_metric(Name, LabelValues, Fun) ->
-  case instrument_vector:get_or_create_label(Name, LabelValues) of
-    {ok, Metric} -> Fun(Metric);
-    Error -> Error
+%% The vec write path: CacheKey is the raw values list (hot path does zero
+%% reordering); the canonical identity is computed only on first touch.
+-spec vec_write(metric_name(), list(), fun((#metric{}) -> any())) -> any().
+vec_write(Name, LabelValues, WriteFun) ->
+  instrument_series:write(Name, LabelValues,
+                          fun() -> vec_canon(Name, LabelValues) end, WriteFun).
+
+%% Canonicalize a vec label-values list against the family's declared names.
+%% Resolves the family once, then delegates to the shared
+%% instrument_series:vec_canon/2 (which sorts, reorders, stringifies, and
+%% returns the {[], Values} reject sentinel on an arity mismatch / undefined
+%% declared labels).
+-spec vec_canon(metric_name(), list()) -> {list(), list()}.
+vec_canon(Name, LabelValues) ->
+  Declared = case instrument_series:family(Name) of
+               #family{declared_labels = D} -> D;
+               _ -> undefined
+             end,
+  instrument_series:vec_canon(Declared, LabelValues).
+
+%% Resolve the row #metric{} for an already-written vec label set (cache-key
+%% fast path, arbiter-row fallback for the publication race — generalized from
+%% the unlabeled_row/2 pattern).
+-spec vec_row(metric_name(), list()) -> #metric{} | {error, not_found}.
+vec_row(Name, LabelValues) ->
+  case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
+    #metric{} = R -> R;
+    undefined -> arbiter_row(Name, vec_canon(Name, LabelValues))
   end.

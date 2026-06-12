@@ -337,15 +337,17 @@ observable_counter_unlabeled_renders_as_counter(_Config) ->
   _Counter = instrument_meter:create_observable_counter(
               Meter, <<"obs_counter_unlabeled">>, Callback),
 
-  ok = instrument_meter:collect_observables(),
-
+  %% format/0 runs the observable callbacks itself, so the single collect that
+  %% renders this scrape comes from format/0 — the callback fires once (count
+  %% -> 1). (An extra explicit collect would advance this incrementing callback
+  %% and is no longer needed.)
   Output = instrument_prometheus:format(),
 
   %% Render must include the counter type tag and the `_total` suffix.
   ?assertNotEqual(nomatch,
                   binary:match(Output, <<"# TYPE obs_counter_unlabeled_total counter">>)),
   ?assertNotEqual(nomatch,
-                  binary:match(Output, <<"obs_counter_unlabeled_total 1">>)),
+                  binary:match(Output, <<"obs_counter_unlabeled_total 1.0">>)),
 
   %% Must NOT be misrendered as gauge.
   ?assertEqual(nomatch,
@@ -365,17 +367,21 @@ observable_counter_renders_as_counter(_Config) ->
   ok = instrument_meter:collect_observables(),
   Output = instrument_prometheus:format(),
 
-  %% The labeled vec name carries the sorted-attrs suffix (`_region`).
-  %% format_counter adds `_total` on top of that.
+  %% Attributed observations render under the real instrument name as one
+  %% family; the attribute is a label, never part of the name.
   ?assertNotEqual(nomatch,
-                  binary:match(Output, <<"# TYPE obs_counter_labeled_region_total counter">>)),
+                  binary:match(Output, <<"# TYPE obs_counter_labeled_total counter">>)),
   ?assertNotEqual(nomatch,
                   binary:match(Output,
-                               <<"obs_counter_labeled_region_total{region=\"us-east\"} 7.0">>)),
+                               <<"obs_counter_labeled_total{region=\"us-east\"} 7.0">>)),
+
+  %% No derived `_region` family exists.
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"obs_counter_labeled_region">>)),
 
   %% Must NOT be misrendered as gauge.
   ?assertEqual(nomatch,
-               binary:match(Output, <<"# TYPE obs_counter_labeled_region gauge">>)),
+               binary:match(Output, <<"# TYPE obs_counter_labeled_total gauge">>)),
   ok.
 
 observable_counter_with_multiple_label_schemas(_Config) ->
@@ -393,16 +399,20 @@ observable_counter_with_multiple_label_schemas(_Config) ->
   ok = instrument_meter:collect_observables(),
   Output = instrument_prometheus:format(),
 
-  %% Each label-key schema produces its own vec (suffix derived from
-  %% sorted attribute keys).
+  %% Both label-key schemas live under ONE family with the real name; the
+  %% label columns are the union {a, b}, and the {a}-only row renders b="".
   ?assertNotEqual(nomatch,
-                  binary:match(Output, <<"# TYPE obs_counter_multi_schema_a_total counter">>)),
-  ?assertNotEqual(nomatch,
-                  binary:match(Output, <<"obs_counter_multi_schema_a_total{a=\"x\"} 5.0">>)),
-
-  ?assertNotEqual(nomatch,
-                  binary:match(Output, <<"# TYPE obs_counter_multi_schema_a_b_total counter">>)),
+                  binary:match(Output, <<"# TYPE obs_counter_multi_schema_total counter">>)),
   ?assertNotEqual(nomatch,
                   binary:match(Output,
-                               <<"obs_counter_multi_schema_a_b_total{a=\"x\",b=\"y\"} 7.0">>)),
+                               <<"obs_counter_multi_schema_total{a=\"x\",b=\"\"} 5.0">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output,
+                               <<"obs_counter_multi_schema_total{a=\"x\",b=\"y\"} 7.0">>)),
+
+  %% No derived per-schema families exist.
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"obs_counter_multi_schema_a_total">>)),
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"obs_counter_multi_schema_a_b_total">>)),
   ok.

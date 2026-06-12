@@ -2,6 +2,100 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- In-place upgrade from 1.1.x self-cleans legacy `persistent_term` shapes
+  (`instrument_metrics`, `otel_instrument_vecs`, `instrument_label_overflow`,
+  `otel_instruments`) on the first registry (re)start.
+
+### Changed
+- Attributed meter data now exports under the registered instrument name as
+  one family. Heterogeneous attribute key-sets render with a per-scrape union
+  of all label names; columns absent from a given row emit an empty string.
+  Derived `<name>_<labels>` families and the `[a_b]` / `[a,b]` label-name
+  collision cease to exist.
+- Meter instruments appear on first write, not on creation. The constant-zero
+  phantom series is gone. Simple-API metrics (`new_counter/2`, `new_gauge/2`,
+  `new_histogram/2,3`) still render from creation — that is the expected
+  behavior for the explicit Prometheus-style API.
+- The cardinality cap is now enforced **per family** (per logical metric name)
+  instead of per label-name key-set. A meter family's overflow series carries
+  the OTel reserved attribute `otel.metric.overflow=true`; a vec family's
+  overflow series carries the declared label names with every value set to
+  `<<"otel.metric.overflow">>`. Dropped counts accumulate via
+  `instrument_registry:cardinality_dropped/1`.
+- OTLP labeled counter and histogram data points now include
+  `startTimeUnixNano` (the row's first-write time). It was previously omitted
+  on the labeled path.
+- OTLP unit resolution now uses the real instrument name. The previous
+  suffix-stripping heuristic (removing `_total`, `_bucket`, etc.) is gone.
+- `instrument_prometheus:format/0` now runs observable callbacks before
+  collecting series data. This removes a stale-observable hazard in
+  Prometheus-only deployments (previously the callbacks were only run by the
+  OTLP exporter).
+- `instrument_registry:lookup/1` now returns the family metadata map for
+  series-store-backed names instead of a registered `#metric{}` record. This
+  is a breaking change to a semi-public API; only users who inspect the
+  `#metric` record fields (rather than treating the return as an opaque
+  handle) are affected.
+- The vec API (`new_counter_vec`/`inc_counter_vec`/`labels/2`/…) and the
+  legacy `instrument_vector` labeled-metric API now share the series store
+  with the meter and simple APIs. The fixed-schema container record and its
+  per-key-set storage are gone; a label set is resolved by its raw values list
+  (the hot-path cache key) with the canonical identity computed only on first
+  touch.
+- The registry gen_server no longer participates in instrument creation,
+  label-set creation, or collection; it serializes only destructive operations
+  (unregister, remove_label, clear_labels, unregister_all).
+- **Accepted regression:** the meter's unlabeled write (e.g. `add(Counter, N)`
+  with no attributes) now costs one `persistent_term:get/1` it did not pay
+  before (measured ~+80 ns on a ~25 ns baseline). This is the price of the phantom kill
+  (no storage in descriptors means nothing exists before the first write) and
+  of stale-proof descriptors that carry identity rather than a live cell
+  reference. Compensations: the labeled path — the common case in OTel usage —
+  is faster (one `persistent_term` get instead of two plus a per-write binary
+  construction for the derived name); simple-API records are direct NIF, as
+  before; a future bound-handle API (`bind(Instrument, Attrs) -> BoundRow`) can
+  restore the direct-NIF floor for any hot series.
+
+### Fixed
+- Unlabeled negative `add/2` on an `up_down_counter` was silently dropped.
+  The unlabeled path sent the value to the C NIF `inc` function, which has a
+  `Val >= 0` guard; negative deltas returned an error that callers ignored.
+  The sign split to `inc_gauge` / `dec_gauge` now applies on all paths.
+- `instrument_vector:with_label/4` (and `instrument_metric:with_label/4`) no
+  longer drops its value argument on the **first** write of a label set. It
+  previously recursed into the 3-arity form on first touch, defaulting the
+  increment to 1; the closure now carries the value through, so a fresh label
+  set incremented by N reads back as N.
+- Map-based attribute label resolution now uses the declared label order (vec
+  API) rather than the arbitrary iteration order of the map.
+- Collectorless registered records (those registered via `instrument_registry:
+  register/1` without a `collect` MFA) no longer crash `collect_all/0`.
+
+### Removed
+- Per-scheduler registry replica ETS tables (`instrument_registry_1..N`) and
+  the `instrument_lib:table/0,1` clause ladder. Read traffic moved to
+  `persistent_term`.
+- `instrument_vector:collect/1` (exported; collection is chain-driven, the per-vec collect MFA no longer exists).
+- `instrument_metrics` `persistent_term` index list and the
+  `{instrument_metric, Name}` per-name shape. Replaced by the series store's
+  computable key space.
+- `{otel_instrument_vecs, Base}` and `{instrument_label_overflow, Name}`
+  `persistent_term` shapes.
+- `otel_instruments` `persistent_term` list. `instrument_meter:list_instruments/0`
+  now walks the family chain filtering `{otel, _}` names.
+- `#vector{}` record and all code paths that stored labeled series inside
+  container records (per-key-set `labels_map`, derived-name creation,
+  per-key-set `persistent_term` replace on every new label set).
+
+### Upgrade note
+Observable callbacks must not call `instrument_prometheus:format/0` or the
+OTLP exporter directly. Those functions now invoke observable callbacks
+themselves before collecting; a callback that calls back into the exporter
+creates unbounded recursion.
+
 ## [1.1.3] - 2026-05-28
 
 ### Fixed

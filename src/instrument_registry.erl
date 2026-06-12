@@ -3,6 +3,16 @@
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
 
+%% @doc The registry is the metrics subsystem's janitor and table owner. It no
+%% longer holds any per-metric state: the series store (instrument_series) owns
+%% every family and row in persistent_term, and the registry only
+%%   - owns the label-counts ETS table,
+%%   - sweeps stale instrument-owned persistent_term on restart (clean slate),
+%%   - serializes admin-time teardown (unregister / unregister_all / label ops)
+%%     through its single mailbox so concurrent removals can't interleave.
+%% register/1 is a thin shim onto instrument_series:ensure_custom/2 for the
+%% record-based API; everything else (counters, gauges, histograms, vecs, the
+%% meter) registers families directly through instrument_series.
 -module(instrument_registry).
 -author("benoitc").
 
@@ -17,24 +27,23 @@
 
 -export([
   remove_label/2,
-  clear_labels/1,
-  create_vector_metric/2
+  clear_labels/1
 ]).
 
 %% persistent_term based lookup API
 -export([
   lookup/1,
-  lookup_label/2,
-  cache_label/3,
   collect_all/0
 ]).
+
+%% exported for test use (sweep-coverage assertions); not a public API
+-export([is_instrument_key/1]).
 
 %% Cardinality / overflow API
 -export([
   label_count/1,
   cardinality_dropped/1,
-  overflow_sentinel/1,
-  get_or_create_overflow/1
+  overflow_sentinel/1
 ]).
 
 %% gen_server callbacks
@@ -43,20 +52,22 @@
 -include("instrument.hrl").
 
 -define(LABEL_COUNTS_TABLE, instrument_label_counts).
--define(OVERFLOW_VALUE, <<"otel.metric.overflow">>).
-
-%% State record - metrics_set is the source of truth for registered metric names
--record(state, {
-  metrics_set = sets:new() :: sets:set(term())
-}).
 
 %% API
 
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-register(Metric) ->
-  gen_server:call(?MODULE, {reg, Metric}).
+%% Register a record-based metric as a series-store custom family. Two shapes:
+%%   - collect = {M,F,A}  → a custom collector scraped by collect_all/0
+%%   - any other record   → stored verbatim as {raw, Metric}; lookup/1 round-trips
+%%                          it and collect_all/0 skips it (no collector to call).
+%% Returns {error, already_exists} if the name is taken.
+-spec register(#metric{}) -> ok | {error, already_exists}.
+register(#metric{name = N, collect = {M, F, A}}) ->
+  instrument_series:ensure_custom(N, {M, F, A});
+register(#metric{name = N} = Metric) ->
+  instrument_series:ensure_custom(N, {raw, Metric}).
 
 unregister(Name) ->
   gen_server:call(?MODULE, {unreg, Name}).
@@ -65,21 +76,24 @@ unregister_all() ->
   gen_server:call(?MODULE, unregister_all).
 
 
-with(Metric, Fun) -> with_1(Metric, Fun, []).
-
-
-with_1(#metric{name=Name, handle=#vector{}}, Fun, Args) ->
-  with_1(Name, Fun, Args);
-with_1(#metric{}=M, Fun, Args) ->
-  erlang:apply(Fun, [M |Args]);
-with_1(Metric, Fun, Args) ->
-  case ets:lookup(instrument_lib:table(), Metric) of
-    [#metric{}=M] -> erlang:apply(Fun, [M |Args]);
-    [] -> {error, not_found}
+%% A record-held simple metric writes through its own handle directly. A
+%% by-name reference resolves the unlabeled {[], []} row from the series store,
+%% falling back to the raw record of a record-based family (register/1 with no
+%% collector) so by-name use of such a metric still resolves.
+with(#metric{} = M, Fun) ->
+  Fun(M);
+with(Name, Fun) ->
+  case persistent_term:get({instrument_label, Name, {[], []}}, undefined) of
+    #metric{} = Row -> Fun(Row#metric{name = Name});
+    undefined ->
+      case instrument_series:family(Name) of
+        {custom, {raw, #metric{} = M}, _Idx} -> Fun(M);
+        _ -> {error, not_found}
+      end
   end.
 
 
-%% INTERNAL VECTOR API
+%% INTERNAL VECTOR API (labeled-metric teardown over the series store)
 
 remove_label(Name, Label) ->
   gen_server:call(?MODULE, {remove_label, Name, Label}).
@@ -87,26 +101,19 @@ remove_label(Name, Label) ->
 clear_labels(Name) ->
   gen_server:call(?MODULE, {clear_labels, Name}).
 
-create_vector_metric(Name, Label) ->
-  gen_server:call(?MODULE, {create_vector_metric, Name, Label}).
-
 
 %% gen_server callbacks
 
 init([]) ->
-  _ = create_tables(),
   _ = create_label_counts_table(),
   %% A registry restart is a clean slate: erase any stale instrument-owned
-  %% persistent_term entries left by a previous incarnation before resetting
-  %% the index, so get_instrument/1 returns undefined and create_* re-registers.
+  %% persistent_term entries left by a previous incarnation so get_instrument/1
+  %% returns undefined and create_* re-registers. instrument_series:init/0
+  %% re-mints the family-seq ref the sweep just erased.
   clear_instrument_persistent_terms(),
-  %% Initialize persistent_term index as empty
-  persistent_term:put(instrument_metrics, []),
-  {ok, #state{metrics_set = sets:new()}}.
+  ok = instrument_series:init(),
+  {ok, #{}}.
 
-
-create_tables() ->
-  [ets:new(T, [public, named_table, set, {keypos,#metric.name}]) || T <- tables()].
 
 create_label_counts_table() ->
   case ets:info(?LABEL_COUNTS_TABLE, name) of
@@ -117,65 +124,22 @@ create_label_counts_table() ->
       ok
   end.
 
-handle_call({reg, #metric{name=N}=Metric}, _From, #state{metrics_set = Set} = State) ->
-  case ets:member(instrument_lib:table(), N) of
-    true ->
-      {reply, {error, already_exists}, State};
-    false ->
-      do_reg_metric(Metric),
-      NewSet = sets:add_element(N, Set),
-      sync_metrics_index(NewSet),
-      {reply, ok, State#state{metrics_set = NewSet}}
-  end;
+handle_call({unreg, Name}, _From, State) ->
+  ok = instrument_series:teardown_family(Name),
+  {reply, ok, State};
 
-handle_call({unreg, Name}, _From, #state{metrics_set = Set} = State) ->
-  do_unreg_metric(Name),
-  NewSet = sets:del_element(Name, Set),
-  sync_metrics_index(NewSet),
-  {reply, ok, State#state{metrics_set = NewSet}};
-
-handle_call(unregister_all, _From, _State) ->
+handle_call(unregister_all, _From, State) ->
   do_delete_all(),
   _ = erlang:garbage_collect(self()),
-  {reply, ok, #state{metrics_set = sets:new()}};
-
-
-handle_call({create_vector_metric, Name, Label}, _From, State) ->
-  Reply = case ets:lookup(instrument_lib:table(), Name) of
-            [] -> ok;
-            [Metric] ->
-              Metric2 = do_create_metric(Metric, Label),
-              do_reg_metric(Metric2),
-              ok
-          end,
-  {reply, Reply, State};
-
-handle_call({create_overflow, Name}, _From, State) ->
-  Reply = case persistent_term:get({instrument_label_overflow, Name}, undefined) of
-            undefined -> do_create_overflow(Name);
-            _ -> ok
-          end,
-  {reply, Reply, State};
+  {reply, ok, State};
 
 handle_call({remove_label, Name, Label}, _From, State) ->
-  Reply = case ets:lookup(instrument_lib:table(), Name) of
-            [] -> ok;
-            [Metric] ->
-              Metric2 = do_remove_label(Metric, Label),
-              do_reg_metric(Metric2),
-              ok
-          end,
-  {reply, Reply, State};
+  ok = instrument_series:remove_row(Name, Label),
+  {reply, ok, State};
 
 handle_call({clear_labels, Name}, _From, State) ->
-  Reply = case ets:lookup(instrument_lib:table(), Name) of
-            [] -> ok;
-            [Metric] ->
-              Metric2 = do_clear_labels(Metric),
-              do_reg_metric(Metric2),
-              ok
-          end,
-  {reply, Reply, State};
+  ok = instrument_series:clear_family_rows(Name),
+  {reply, ok, State};
 
 handle_call(Req, _From, State) ->
   {stop, {unhandled_call, Req}, State}.
@@ -192,86 +156,41 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-%% @private Register a metric in ETS and persistent_term (for fast lookup).
-%% Does NOT update the metrics index - that's handled by the gen_server state.
-do_reg_metric(Metric) ->
-  #metric{name = Name} = Metric,
-  %% Store in ETS tables
-  [ets:insert(T, Metric) || T <- tables()],
-  %% Store in persistent_term for fast lookup
-  persistent_term:put({instrument_metric, Name}, Metric).
-
-%% @private Unregister a metric from ETS and persistent_term.
-%% Does NOT update the metrics index - that's handled by the gen_server state.
-do_unreg_metric(Name) ->
-  %% Read the metric first so we can drive cleanup from its #vector.labels_map
-  %% and release any histogram exemplar reservoirs it owns.
-  Metric = case ets:lookup(instrument_lib:table(), Name) of
-             [M] -> M;
-             [] -> undefined
-           end,
-  %% Delete from all ETS tables (they're partitioned by scheduler)
-  [ets:delete(T, Name) || T <- tables()],
-  %% Remove from persistent_term
-  try persistent_term:erase({instrument_metric, Name}) catch _:_ -> ok end,
-  try persistent_term:erase({instrument_label_overflow, Name}) catch _:_ -> ok end,
-  %% Erase cached labels for this metric
-  _ = erase_cached_labels(Name, Metric),
-  _ = release_exemplar_reservoirs(Metric),
-  _ = reset_label_accounting(Name),
-  ok.
-
-%% @private Sync the metrics index from gen_server state to persistent_term.
-%% This is the only place the instrument_metrics list is written.
-sync_metrics_index(Set) ->
-  persistent_term:put(instrument_metrics, sets:to_list(Set)).
-
-%% @private Drop any cached {instrument_label, Name, LabelValues} entries for
-%% this metric. Iterates the metric's own labels_map rather than scanning the
-%% global persistent_term index, which would be O(total persistent_term size).
-erase_cached_labels(_Name, undefined) ->
-  0;
-erase_cached_labels(Name, #metric{handle = #vector{labels_map = LabelsMap}}) ->
-  maps:fold(fun(LabelValues, _, Acc) ->
-    case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
-      undefined -> Acc;
-      _ ->
-        persistent_term:erase({instrument_label, Name, LabelValues}),
-        Acc + 1
-    end
-  end, 0, LabelsMap);
-erase_cached_labels(_Name, _Metric) ->
-  0.
-
-%% @private Release exemplar reservoirs owned by a metric. For vector
-%% metrics this walks every label-specific handle; for simple metrics it
-%% delegates directly to the histogram cleanup helper.
-release_exemplar_reservoirs(undefined) ->
-  ok;
-release_exemplar_reservoirs(#metric{handle = #vector{labels_map = LabelsMap}}) ->
-  maps:foreach(fun(_, LabelMetric) ->
-    instrument_histogram:cleanup(LabelMetric)
-  end, LabelsMap);
-release_exemplar_reservoirs(#metric{} = Metric) ->
-  instrument_histogram:cleanup(Metric).
-
+%% @private Tear down every family (releasing exemplar reservoirs row by row via
+%% the chain), then wipe whatever instrument-owned persistent_term the sweep can
+%% reach, reset the series store's ETS state and seq ref, and clear label
+%% accounting. Walking family_seq first means teardown_family/1 releases each
+%% histogram's reservoir before clear_instrument_persistent_terms/0 erases the
+%% row keys it needs to find them.
 do_delete_all() ->
-  %% Release histogram exemplar reservoirs for every registered metric
-  %% before we wipe the tables.
-  AllMetrics = case instrument_lib:tables() of
-                 [T | _] -> ets:tab2list(T);
-                 [] -> []
-               end,
-  lists:foreach(fun release_exemplar_reservoirs/1, AllMetrics),
-  [ets:delete_all_objects(T) || T <- instrument_lib:tables()],
-  %% Clear all instrument-owned persistent_term entries
+  teardown_all_families(),
+  %% Clear all instrument-owned persistent_term entries (this also sweeps
+  %% instrument_family_seq, so the series store must be re-initialized below).
   clear_instrument_persistent_terms(),
+  %% Re-establish a clean series store: re-mint the family-seq ref the sweep
+  %% just erased and drop any arbiter rows the teardown chain missed.
+  ok = instrument_series:reset(),
   %% Clear label accounting
   case ets:info(?LABEL_COUNTS_TABLE, name) of
     undefined -> ok;
     _ -> ets:delete_all_objects(?LABEL_COUNTS_TABLE)
-  end,
-  persistent_term:put(instrument_metrics, []).
+  end.
+
+%% Walk the family-sequence chain and tear down each live family through the
+%% same path unregister/1 uses, so reservoir cleanup and chain erasure stay in
+%% one place.
+teardown_all_families() ->
+  case persistent_term:get(instrument_family_seq, undefined) of
+    undefined -> ok;
+    FamSeq ->
+      N = atomics:get(FamSeq, 1),
+      lists:foreach(fun(K) ->
+        case persistent_term:get({instrument_family_idx, K}, undefined) of
+          undefined -> ok;
+          Name -> ok = instrument_series:teardown_family(Name)
+        end
+      end, lists:seq(1, N))
+  end.
 
 
 %% Erase every instrument-owned persistent_term entry so a registry restart or
@@ -281,7 +200,18 @@ clear_instrument_persistent_terms() ->
   [persistent_term:erase(K)
    || {K, _} <- persistent_term:get(), is_instrument_key(K)].
 
+%% instrument_row entries are published by the write path (claim_row/5) and must
+%% be swept here so a registry restart produces a clean slate. The legacy tuple
+%% shapes (instrument_metric/instrument_label_overflow/otel_instrument) and the
+%% bare-atom otel_instruments list carry no live writers since the series-store
+%% cutover but are kept so an in-place upgrade from an older incarnation still
+%% self-cleans.
+%% master-1.1.3 shapes: never written by this branch; swept so an in-place upgrade self-cleans.
 is_instrument_key(otel_instruments) ->
+  true;
+is_instrument_key(instrument_metrics) ->
+  true;
+is_instrument_key(instrument_family_seq) ->
   true;
 is_instrument_key(K) when is_tuple(K), tuple_size(K) >= 2 ->
   case element(1, K) of
@@ -289,34 +219,27 @@ is_instrument_key(K) when is_tuple(K), tuple_size(K) >= 2 ->
     instrument_label          -> true;
     instrument_label_overflow -> true;
     otel_instrument           -> true;
+    otel_instrument_vecs      -> true;
+    instrument_family         -> true;
+    instrument_family_idx     -> true;
+    instrument_row            -> true;
     _                         -> false
   end;
 is_instrument_key(_) ->
   false.
 
 
-tables() -> instrument_lib:tables().
-
 %% persistent_term based lookup API
 
--spec lookup(term()) -> #metric{} | undefined.
+%% Returns the family meta for series-store families. A record-based family
+%% (register/1) stores its #metric{} as {custom, {raw, Metric}, _}; unwrap it so
+%% lookup round-trips the original record. Custom-collector families return
+%% their {custom, {M,F,A}, _} meta unchanged.
+-spec lookup(term()) -> #family{} | {custom, term(), pos_integer()} | #metric{} | undefined.
 lookup(Name) ->
-  persistent_term:get({instrument_metric, Name}, undefined).
-
--spec lookup_label(term(), list()) -> #metric{} | undefined.
-lookup_label(Name, LabelValues) ->
-  persistent_term:get({instrument_label, Name, LabelValues}, undefined).
-
--spec cache_label(term(), list(), #metric{}) -> ok.
-cache_label(Name, LabelValues, Metric) ->
-  case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
-    undefined ->
-      persistent_term:put({instrument_label, Name, LabelValues}, Metric),
-      _ = incr_label_count(Name),
-      ok;
-    _ ->
-      persistent_term:put({instrument_label, Name, LabelValues}, Metric),
-      ok
+  case instrument_series:family(Name) of
+    {custom, {raw, #metric{} = Metric}, _Idx} -> Metric;
+    Meta -> Meta
   end.
 
 %% @doc Returns the number of distinct label sets currently cached for `Name'.
@@ -344,138 +267,23 @@ cardinality_dropped(Name) ->
       end
   end.
 
-%% @doc Returns the cached overflow sentinel metric for `Name' if one has
-%% been created, `undefined' otherwise.
+%% @doc Returns the overflow row #metric{} for `Name' if the cardinality cap
+%% has been hit (and the overflow series therefore created), `undefined'
+%% otherwise. The overflow series is an ordinary series-store row whose canon
+%% is the per-API overflow shape: for a vec family that is the declared label
+%% names (sorted) with every value <<"otel.metric.overflow">>; for a
+%% schema-free family it is {[<<"otel.metric.overflow">>], [<<"true">>]}. The
+%% row carries the accumulated dropped writes, so callers can read its value.
 -spec overflow_sentinel(term()) -> #metric{} | undefined.
 overflow_sentinel(Name) ->
-  persistent_term:get({instrument_label_overflow, Name}, undefined).
-
-%% @doc Returns the overflow sentinel metric for `Name', creating it on the
-%% first call. Also increments the dropped-cardinality counter for `Name'.
-%% Returns `undefined' if the parent metric does not exist.
--spec get_or_create_overflow(term()) -> #metric{} | undefined.
-get_or_create_overflow(Name) ->
-  _ = incr_dropped_count(Name),
-  case persistent_term:get({instrument_label_overflow, Name}, undefined) of
-    undefined ->
-      _ = gen_server:call(?MODULE, {create_overflow, Name}),
-      persistent_term:get({instrument_label_overflow, Name}, undefined);
-    Metric ->
-      Metric
+  case instrument_series:family(Name) of
+    #family{declared_labels = Declared} ->
+      OverflowCanon = instrument_series:overflow_canon(Declared),
+      persistent_term:get({instrument_label, Name, OverflowCanon}, undefined);
+    _ ->
+      undefined
   end.
 
 -spec collect_all() -> [map()].
 collect_all() ->
-  Names = persistent_term:get(instrument_metrics, []),
-  lists:filtermap(fun(Name) ->
-    case lookup(Name) of
-      undefined -> false;
-      #metric{collect = {Mod, Fun, Args}} ->
-        try
-          {true, erlang:apply(Mod, Fun, Args)}
-        catch
-          Class:Reason:Stacktrace ->
-            logger:warning("Metric collector ~p:~p failed: ~p:~p",
-                          [Mod, Fun, Class, Reason],
-                          #{error_logger => #{tag => warning_msg},
-                            mfa => {Mod, Fun, length(Args)},
-                            stacktrace => Stacktrace}),
-            false
-        end
-    end
-  end, Names).
-
-%% Internal vector functions
-
-do_create_metric(Metric, Label) ->
-  #metric{ handle = Vector } = Metric,
-  #vector{ labels_map = LabelsMap } = Vector,
-  case maps:find(Label, LabelsMap) of
-    {ok, _} -> Metric;
-    error ->
-      M = mk_metric(Vector),
-      Vector2 = Vector#vector{labels_map=maps:put(Label, M, LabelsMap)},
-      Metric#metric{handle=Vector2}
-  end.
-
-mk_metric(#vector{ name=Name, help=Help, metric=counter }) ->
-  instrument_counter:new_counter(Name, Help);
-mk_metric(#vector{ name=Name, help=Help, metric=gauge }) ->
-  instrument_gauge:new_gauge(Name, Help);
-mk_metric(#vector{ name=Name, help=Help, metric=observable_counter }) ->
-  instrument_gauge:new_gauge(Name, Help);
-mk_metric(#vector{ name=Name, help=Help, metric=histogram, buckets=Buckets }) ->
-  instrument_histogram:new_histogram(Name, Help, Buckets).
-
-do_remove_label(#metric{ name = Name, handle = Vector } = Metric, Label) ->
-  #vector{ labels_map = LabelsMap } = Vector,
-  %% Erase the cache entry for this specific label
-  case persistent_term:get({instrument_label, Name, Label}, undefined) of
-    undefined -> ok;
-    _ ->
-      persistent_term:erase({instrument_label, Name, Label}),
-      _ = decr_label_count(Name, 1)
-  end,
-  Vector2 = Vector#vector{labels_map=maps:remove(Label, LabelsMap)},
-  Metric#metric{handle=Vector2}.
-
-do_clear_labels(#metric{ name = Name, handle = Vector } = Metric) ->
-  #vector{ labels_map = LabelsMap } = Vector,
-  %% Erase cache entries for all labels
-  Erased = maps:fold(fun(LabelValues, _, Acc) ->
-    case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
-      undefined -> Acc;
-      _ ->
-        persistent_term:erase({instrument_label, Name, LabelValues}),
-        Acc + 1
-    end
-  end, 0, LabelsMap),
-  case Erased of
-    0 -> ok;
-    _ -> decr_label_count(Name, Erased)
-  end,
-  Vector2 = Vector#vector{labels_map=#{}},
-  Metric#metric{handle=Vector2}.
-
-%% @private Create the overflow sentinel metric for `Name'. Must be called
-%% from the gen_server so that only one overflow metric is created per name.
-do_create_overflow(Name) ->
-  case ets:lookup(instrument_lib:table(), Name) of
-    [] -> {error, not_found};
-    [#metric{handle = #vector{labels = LabelNames}} = Parent] ->
-      OverflowLabels = [?OVERFLOW_VALUE || _ <- LabelNames],
-      Parent2 = do_create_metric(Parent, OverflowLabels),
-      do_reg_metric(Parent2),
-      case (Parent2#metric.handle)#vector.labels_map of
-        #{OverflowLabels := Sentinel} ->
-          persistent_term:put({instrument_label_overflow, Name}, Sentinel),
-          ok;
-        _ ->
-          {error, not_found}
-      end;
-    _ ->
-      {error, not_a_vector}
-  end.
-
-%% @private Reset all label-accounting state for `Name'.
-reset_label_accounting(Name) ->
-  case ets:info(?LABEL_COUNTS_TABLE, name) of
-    undefined -> ok;
-    _ ->
-      ets:delete(?LABEL_COUNTS_TABLE, {count, Name}),
-      ets:delete(?LABEL_COUNTS_TABLE, {dropped, Name}),
-      ok
-  end.
-
-incr_label_count(Name) ->
-  ets:update_counter(?LABEL_COUNTS_TABLE, {count, Name}, {2, 1}, {{count, Name}, 0}).
-
-decr_label_count(_Name, 0) ->
-  ok;
-decr_label_count(Name, N) when N > 0 ->
-  ets:update_counter(?LABEL_COUNTS_TABLE, {count, Name},
-                     {2, -N, 0, 0}, {{count, Name}, 0}),
-  ok.
-
-incr_dropped_count(Name) ->
-  ets:update_counter(?LABEL_COUNTS_TABLE, {dropped, Name}, {2, 1}, {{dropped, Name}, 0}).
+  instrument_series:collect_all().
