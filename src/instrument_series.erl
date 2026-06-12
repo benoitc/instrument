@@ -9,7 +9,7 @@
 %% fresh keys only — no key is ever replaced on a designed path, so creation
 %% never schedules a literal-GC sweep. Enumeration uses atomics-minted
 %% sequence chains; see the design spec
-%% docs/superpowers/specs/2026-06-11-p5-series-store-design.md.
+%% docs/superpowers/specs/2026-06-11-series-store-design.md.
 -module(instrument_series).
 
 -include("instrument.hrl").

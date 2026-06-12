@@ -4,13 +4,13 @@
 %% See the NOTICE for more information.
 
 %% @doc Master-vs-branch performance benchmark for the series store
-%% (Task 11 of the p5-series-store plan). Verifies the §10 performance
-%% contract of docs/superpowers/specs/2026-06-11-p5-series-store-design.md
+%% (Task 11 of the series-store plan). Verifies the §10 performance
+%% contract of docs/superpowers/specs/2026-06-11-series-store-design.md
 %% empirically.
 %%
 %% Self-contained and build-agnostic: scenarios 1-5 and 7 call only public
 %% API that exists byte-identically on both `be7e75e` (master) and the
-%% p5-series-store branch, so the SAME compiled module runs against EITHER
+%% series-store branch, so the SAME compiled module runs against EITHER
 %% build purely via code path. Scenario-setup differences are guarded by
 %% catching `undef` / probing `erlang:function_exported/3`; no scenario
 %% calls a branch-only function.
@@ -459,10 +459,10 @@ which_build() ->
         false ->
             case code:where_is_file("instrument_series.beam") of
                 non_existing -> "master (be7e75e)";
-                _ -> "branch (p5-series-store)"
+                _ -> "branch (series-store)"
             end;
         _ ->
-            "branch (p5-series-store)"
+            "branch (series-store)"
     end.
 
 %% ----------------------------------------------------------------------------
