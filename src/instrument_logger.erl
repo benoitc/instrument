@@ -111,11 +111,11 @@ install(Opts) ->
 -spec uninstall() -> ok.
 uninstall() ->
   %% Remove filter
-  try logger:remove_primary_filter(?FILTER_ID) catch _:_ -> ok end,
+  instrument_lib:safe_apply(logger, remove_primary_filter, [?FILTER_ID], ok),
   %% Remove handler
-  try logger:remove_handler(?HANDLER_ID) catch _:_ -> ok end,
+  instrument_lib:safe_apply(logger, remove_handler, [?HANDLER_ID], ok),
   %% Remove exporter handler
-  try logger:remove_handler(?EXPORTER_HANDLER_ID) catch _:_ -> ok end,
+  instrument_lib:safe_apply(logger, remove_handler, [?EXPORTER_HANDLER_ID], ok),
   ok.
 
 %% @doc Adds trace context to a metadata map.

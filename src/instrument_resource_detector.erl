@@ -79,12 +79,9 @@ list() ->
 detect_all() ->
   Detectors = persistent_term:get(?DETECTORS_KEY, default_detectors()),
   lists:foldl(fun({_Name, DetectorFun}, AccResource) ->
-    try
-      DetectedResource = DetectorFun(),
-      instrument_resource:merge(AccResource, DetectedResource)
-    catch
-      _:_ -> AccResource
-    end
+    instrument_lib:safe_call(
+      fun() -> instrument_resource:merge(AccResource, DetectorFun()) end,
+      AccResource)
   end, instrument_resource:empty(), Detectors).
 
 %% @doc Runs a specific detector by name.
@@ -93,11 +90,7 @@ detect(Name) when is_atom(Name) ->
   Detectors = persistent_term:get(?DETECTORS_KEY, default_detectors()),
   case lists:keyfind(Name, 1, Detectors) of
     {Name, DetectorFun} ->
-      try
-        DetectorFun()
-      catch
-        _:_ -> instrument_resource:empty()
-      end;
+      instrument_lib:safe_call(DetectorFun, instrument_resource:empty());
     false ->
       {error, not_found}
   end.

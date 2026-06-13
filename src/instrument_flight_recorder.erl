@@ -244,7 +244,7 @@ handle_call(clear, _From, State) ->
   {reply, ok, State};
 
 handle_call(stats, _From, #state{buffer_size = BufferSize} = State) ->
-  TableSize = try ets:info(?BUFFER_TABLE, size) catch _:_ -> 0 end,
+  TableSize = instrument_lib:safe_apply(ets, info, [?BUFFER_TABLE, size], 0),
   Stats = #{
     enabled => is_enabled(),
     buffer_size => BufferSize,
@@ -264,7 +264,7 @@ handle_cast(_Msg, State) ->
 
 %% Periodic eviction check
 handle_info(check_eviction, #state{buffer_size = Max} = State) ->
-  TableSize = try ets:info(?BUFFER_TABLE, size) catch _:_ -> 0 end,
+  TableSize = instrument_lib:safe_apply(ets, info, [?BUFFER_TABLE, size], 0),
   case TableSize > Max of
     true ->
       evict_oldest(TableSize - Max);
@@ -279,7 +279,7 @@ handle_info(_Info, State) ->
 
 terminate(_Reason, _State) ->
   %% Stop the pool
-  try instrument_tracer_pool:stop_pool() catch _:_ -> ok end,
+  instrument_lib:safe_apply(instrument_tracer_pool, stop_pool, [], ok),
   persistent_term:put(?ENABLED_KEY, false),
   ok.
 
