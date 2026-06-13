@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.1.4] - 2026-06-13
 
 ### Changed
 - Factored the repeated `try Expr catch _:_ -> Default end` swallow idiom
