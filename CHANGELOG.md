@@ -71,20 +71,20 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Histogram bucket counts and the running sum are now backed by a single
-  OTP `atomics' array per histogram (slot 1 = IEEE-754 bits of the sum
+  OTP `atomics` array per histogram (slot 1 = IEEE-754 bits of the sum
   via CAS retry, slots 2..N+2 = signed int64 bucket counts via
-  `atomics:add/3'). Drops the per-bucket NIF resources and makes
-  `get_histogram' / `collect' ~1.5x faster; `observe_histogram' is
+  `atomics:add/3`). Drops the per-bucket NIF resources and makes
+  `get_histogram` / `collect` ~1.5x faster; `observe_histogram` is
   unchanged. Counters, gauges, and up-down counters remain on the NIF
   path.
-- Histogram `count' and per-bucket `count' fields in the collected map
-  are now integers, matching the `instrument_metrics_exporter' spec
-  which already declared them as `integer()'. Callers that compared
-  these fields with `=:=' against `float()' values must update their
+- Histogram `count` and per-bucket `count` fields in the collected map
+  are now integers, matching the `instrument_metrics_exporter` spec
+  which already declared them as `integer()`. Callers that compared
+  these fields with `=:=` against `float()` values must update their
   expectations.
 
 ### Added
-- `instrument_atomics' module: thin wrapper over `atomics' providing
+- `instrument_atomics` module: thin wrapper over `atomics` providing
   signed-integer slots and IEEE-754 double slots via bit-cast with a
   CAS retry loop.
 
