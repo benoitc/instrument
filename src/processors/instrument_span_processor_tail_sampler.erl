@@ -152,7 +152,7 @@ shutdown() ->
     undefined ->
       ok;
     #state{exporter = Exporter, exporter_state = ExporterState} ->
-      try shutdown_exporter(Exporter, ExporterState) catch _:_ -> ok end,
+      instrument_lib:safe_call(fun() -> shutdown_exporter(Exporter, ExporterState) end, ok),
       persistent_term:erase(?STATE_KEY)
   end,
   ok.
@@ -160,7 +160,7 @@ shutdown() ->
 %% @doc Shuts down the processor with state.
 -spec shutdown(#state{}) -> ok.
 shutdown(#state{exporter = Exporter, exporter_state = ExporterState}) ->
-  try shutdown_exporter(Exporter, ExporterState) catch _:_ -> ok end,
+  instrument_lib:safe_call(fun() -> shutdown_exporter(Exporter, ExporterState) end, ok),
   persistent_term:erase(?STATE_KEY),
   ok.
 
@@ -173,7 +173,7 @@ force_flush() ->
     #state{exporter = undefined} ->
       ok;
     #state{exporter = Exporter, exporter_state = ExporterState} ->
-      try Exporter:force_flush(ExporterState) catch _:_ -> ok end,
+      instrument_lib:safe_apply(Exporter, force_flush, [ExporterState], ok),
       ok
   end.
 
@@ -182,7 +182,7 @@ force_flush() ->
 force_flush(#state{exporter = undefined}) ->
   ok;
 force_flush(#state{exporter = Exporter, exporter_state = ExporterState}) ->
-  try Exporter:force_flush(ExporterState) catch _:_ -> ok end,
+  instrument_lib:safe_apply(Exporter, force_flush, [ExporterState], ok),
   ok.
 
 %% ============================================================================
@@ -335,7 +335,7 @@ export_span(Span, #state{exporter = Exporter, exporter_state = ExporterState} = 
 shutdown_exporter(undefined, _) ->
   ok;
 shutdown_exporter(Exporter, ExporterState) ->
-  try Exporter:shutdown(ExporterState) catch _:_ -> ok end,
+  instrument_lib:safe_apply(Exporter, shutdown, [ExporterState], ok),
   ok.
 
 %% @private Validate all rules.

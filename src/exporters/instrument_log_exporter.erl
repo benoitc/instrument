@@ -152,7 +152,7 @@ handle_call({unregister, Module}, _From, State) ->
   ),
   %% Shutdown removed exporters
   lists:foreach(fun(#{module := M, state := S}) ->
-    try M:exporter_shutdown(S) catch _:_ -> ok end
+    instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
   end, Removed),
   {reply, ok, State#state{exporters = Remaining}};
 
@@ -168,7 +168,7 @@ handle_call(flush, _From, State) ->
 handle_call(shutdown, _From, State) ->
   State2 = do_flush(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    try M:exporter_shutdown(S) catch _:_ -> ok end
+    instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
   end, State2#state.exporters),
   {reply, ok, State2#state{exporters = []}};
 
@@ -201,7 +201,7 @@ terminate(_Reason, State) ->
   %% Final flush and shutdown
   State2 = do_flush(State),
   lists:foreach(fun(#{module := M, state := S}) ->
-    try M:exporter_shutdown(S) catch _:_ -> ok end
+    instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
   end, State2#state.exporters),
   ok.
 

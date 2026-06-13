@@ -132,11 +132,7 @@ extract(Carrier, Ctx) when is_map(Carrier), is_map(Ctx) ->
 fields() ->
   Propagators = list(),
   lists:usort(lists:flatmap(fun(Module) ->
-    try
-      Module:fields()
-    catch
-      _:_ -> []
-    end
+    instrument_lib:safe_apply(Module, fields, [], [])
   end, Propagators)).
 
 %% ============================================================================

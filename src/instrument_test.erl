@@ -635,7 +635,7 @@ start_log_collector() ->
         config => #{table => ?LOG_TAB}
     },
     persistent_term:put(?LOG_EXPORTER_KEY, Exporter),
-    try instrument_log_exporter:register(Exporter) catch _:_ -> ok end,
+    instrument_lib:safe_apply(instrument_log_exporter, register, [Exporter], ok),
     ok.
 
 %% @doc Stops the log collector.
@@ -644,7 +644,7 @@ stop_log_collector() ->
     case persistent_term:get(?LOG_EXPORTER_KEY, undefined) of
         undefined -> ok;
         #{module := Mod} ->
-            try instrument_log_exporter:unregister(Mod) catch _:_ -> ok end,
+            instrument_lib:safe_apply(instrument_log_exporter, unregister, [Mod], ok),
             persistent_term:erase(?LOG_EXPORTER_KEY)
     end,
     case ets:info(?LOG_TAB) of

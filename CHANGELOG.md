@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Factored the repeated `try Expr catch _:_ -> Default end` swallow idiom
+  into shared helpers in `instrument_lib`: `safe_call/1`, `safe_call/2`
+  (fun-based) and `safe_apply/4` (MFA-based, no closure). Converted the
+  cold-path swallows (shutdown, force_flush, `persistent_term:erase`,
+  `logger:remove`, `ets:info`, detector callbacks) across the span
+  processor, exporters, registry, logger, flight recorder, resource
+  detector, propagator and processors. Per-span hot paths, specific-class
+  catches (`error:badarg`, race handling, `exit:`/`throw:`),
+  `try ... of ... catch` blocks with guards and catches that log stay
+  inline by design.
+- Bumped `hackney` 3.2.1 to 4.4.0 and the `quickrand` test dependency
+  1.7.0 to 2.0.7. Transitive deps updated via the lock file.
+
 ## [1.1.3] - 2026-05-28
 
 ### Fixed

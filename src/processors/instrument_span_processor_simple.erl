@@ -102,7 +102,7 @@ shutdown() ->
     undefined ->
       ok;
     #state{exporter = Exporter, exporter_state = ExporterState} ->
-      try Exporter:shutdown(ExporterState) catch _:_ -> ok end,
+      instrument_lib:safe_apply(Exporter, shutdown, [ExporterState], ok),
       persistent_term:erase({?MODULE, state})
   end,
   ok.

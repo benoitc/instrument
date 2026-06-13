@@ -156,7 +156,7 @@ handle_call({unregister, Module}, _From, State) ->
   ),
   %% Shutdown removed exporters
   lists:foreach(fun(#{module := M, state := S}) ->
-    try M:shutdown(S) catch _:_ -> ok end
+    instrument_lib:safe_apply(M, shutdown, [S], ok)
   end, Removed),
   {reply, ok, State#state{exporters = Remaining}};
 
@@ -177,7 +177,7 @@ handle_call(shutdown, _From, State) ->
     HookFun -> gen_server:cast(self(), {unregister_hook, HookFun})
   end,
   lists:foreach(fun(#{module := M, state := S}) ->
-    try M:shutdown(S) catch _:_ -> ok end
+    instrument_lib:safe_apply(M, shutdown, [S], ok)
   end, State2#state.exporters),
   {reply, ok, State2#state{exporters = [], hook_fun = undefined}};
 
@@ -197,7 +197,7 @@ handle_cast({export_spans, Spans}, State) ->
   {noreply, State3};
 
 handle_cast({unregister_hook, HookFun}, State) ->
-  try instrument_tracer:unregister_exporter(HookFun) catch _:_ -> ok end,
+  instrument_lib:safe_apply(instrument_tracer, unregister_exporter, [HookFun], ok),
   {noreply, State};
 
 handle_cast(_Msg, State) ->
@@ -219,7 +219,7 @@ terminate(_Reason, State) ->
     HookFun -> instrument_tracer:unregister_exporter(HookFun)
   end,
   lists:foreach(fun(#{module := M, state := S}) ->
-    try M:shutdown(S) catch _:_ -> ok end
+    instrument_lib:safe_apply(M, shutdown, [S], ok)
   end, State2#state.exporters),
   ok.
 

@@ -211,14 +211,14 @@ handle_call({unregister, ProcessorModule}, _From, State) ->
   case lists:keyfind(ProcessorModule, 1, State#state.processors) of
     {ProcessorModule, external} ->
       %% Stop externally managed gen_server (batch processor)
-      try ProcessorModule:shutdown() catch _:_ -> ok end,
-      try stop_batch_processor() catch _:_ -> ok end,
+      instrument_lib:safe_apply(ProcessorModule, shutdown, [], ok),
+      instrument_lib:safe_call(fun() -> stop_batch_processor() end, ok),
       NewProcessors = lists:keydelete(ProcessorModule, 1, State#state.processors),
       NewState = State#state{processors = NewProcessors},
       refresh_processor_cache(NewState),
       {reply, ok, NewState};
     {ProcessorModule, ProcessorState} ->
-      try ProcessorModule:shutdown(ProcessorState) catch _:_ -> ok end,
+      instrument_lib:safe_apply(ProcessorModule, shutdown, [ProcessorState], ok),
       NewProcessors = lists:keydelete(ProcessorModule, 1, State#state.processors),
       NewState = State#state{processors = NewProcessors},
       refresh_processor_cache(NewState),
@@ -255,10 +255,10 @@ handle_call({on_start, Span, ParentCtx}, _From, State) ->
 handle_call(shutdown, _From, State) ->
   lists:foreach(
     fun({Module, external}) ->
-      try Module:shutdown() catch _:_ -> ok end,
-      try stop_batch_processor() catch _:_ -> ok end;
+      instrument_lib:safe_apply(Module, shutdown, [], ok),
+      instrument_lib:safe_call(fun() -> stop_batch_processor() end, ok);
     ({Module, ProcessorState}) ->
-      try Module:shutdown(ProcessorState) catch _:_ -> ok end
+      instrument_lib:safe_apply(Module, shutdown, [ProcessorState], ok)
     end,
     State#state.processors
   ),
@@ -267,9 +267,9 @@ handle_call(shutdown, _From, State) ->
 handle_call(force_flush, _From, State) ->
   lists:foreach(
     fun({Module, external}) ->
-      try Module:force_flush() catch _:_ -> ok end;
+      instrument_lib:safe_apply(Module, force_flush, [], ok);
     ({Module, ProcessorState}) ->
-      try Module:force_flush(ProcessorState) catch _:_ -> ok end
+      instrument_lib:safe_apply(Module, force_flush, [ProcessorState], ok)
     end,
     State#state.processors
   ),
@@ -307,10 +307,10 @@ terminate(_Reason, State) ->
   %% Shutdown all processors
   lists:foreach(
     fun({Module, external}) ->
-      try Module:shutdown() catch _:_ -> ok end,
-      try stop_batch_processor() catch _:_ -> ok end;
+      instrument_lib:safe_apply(Module, shutdown, [], ok),
+      instrument_lib:safe_call(fun() -> stop_batch_processor() end, ok);
     ({Module, ProcessorState}) ->
-      try Module:shutdown(ProcessorState) catch _:_ -> ok end
+      instrument_lib:safe_apply(Module, shutdown, [ProcessorState], ok)
     end,
     State#state.processors
   ),
