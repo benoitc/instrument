@@ -193,14 +193,22 @@ add(Instrument, Value) ->
 
 %% @doc Adds a value to a Counter or UpDownCounter with attributes.
 -spec add(instrument(), number(), map()) -> any().
+%% Unlabeled fast path (no attrs): bare kind/value, no per-call closures.
 add(#otel_instrument{kind = counter, handle = RegName}, Value, Attrs)
-    when is_number(Value), Value >= 0 ->
+    when is_number(Value), Value >= 0, map_size(Attrs) =:= 0 ->
+  instrument_series:write_unlabeled(RegName, counter, Value);
+add(#otel_instrument{kind = up_down_counter, handle = RegName}, Value, Attrs)
+    when is_number(Value), map_size(Attrs) =:= 0 ->
+  instrument_series:write_unlabeled(RegName, up_down_counter, Value);
+%% Labeled path (unchanged behavior; map_size guard made explicit).
+add(#otel_instrument{kind = counter, handle = RegName}, Value, Attrs)
+    when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
   do_write(RegName, Attrs, fun(R) -> instrument_counter:inc_counter(R, Value) end);
 add(#otel_instrument{kind = up_down_counter, handle = RegName}, Value, Attrs)
-    when is_number(Value), Value >= 0 ->
+    when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
   do_write(RegName, Attrs, fun(R) -> instrument_gauge:inc_gauge(R, Value) end);
 add(#otel_instrument{kind = up_down_counter, handle = RegName}, Value, Attrs)
-    when is_number(Value), Value < 0 ->
+    when is_number(Value), Value < 0, map_size(Attrs) > 0 ->
   do_write(RegName, Attrs, fun(R) -> instrument_gauge:dec_gauge(R, -Value) end);
 add(_, _, _) ->
   {error, invalid_operation}.
@@ -213,7 +221,10 @@ record(Instrument, Value) ->
 %% @doc Records a value in a Histogram with attributes.
 -spec record(instrument(), number(), map()) -> any().
 record(#otel_instrument{kind = histogram, handle = RegName}, Value, Attrs)
-    when is_number(Value) ->
+    when is_number(Value), map_size(Attrs) =:= 0 ->
+  instrument_series:write_unlabeled(RegName, histogram, Value);
+record(#otel_instrument{kind = histogram, handle = RegName}, Value, Attrs)
+    when is_number(Value), map_size(Attrs) > 0 ->
   do_write(RegName, Attrs, fun(R) -> instrument_histogram:observe_histogram(R, Value) end);
 record(_, _, _) ->
   {error, invalid_operation}.
@@ -226,7 +237,10 @@ set(Instrument, Value) ->
 %% @doc Sets a value on a Gauge with attributes.
 -spec set(instrument(), number(), map()) -> any().
 set(#otel_instrument{kind = gauge, handle = RegName}, Value, Attrs)
-    when is_number(Value) ->
+    when is_number(Value), map_size(Attrs) =:= 0 ->
+  instrument_series:write_unlabeled(RegName, gauge, Value);
+set(#otel_instrument{kind = gauge, handle = RegName}, Value, Attrs)
+    when is_number(Value), map_size(Attrs) > 0 ->
   do_write(RegName, Attrs, fun(R) -> instrument_gauge:set_gauge(R, Value) end);
 set(_, _, _) ->
   {error, invalid_operation}.
