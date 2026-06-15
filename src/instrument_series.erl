@@ -20,6 +20,7 @@
   ensure_custom/2,
   family/1,
   write/4,
+  write_unlabeled/3,
   collect_all/0,
   remove_row/2,
   clear_family_rows/1,
@@ -33,6 +34,7 @@
 -define(TAB, instrument_series).
 -define(COUNTS, instrument_label_counts).
 -define(OVERFLOW_VALUE, <<"otel.metric.overflow">>).
+-define(UNLABELED, {[], []}).
 
 %% Called from instrument_registry:init/1 (the registry owns the tables).
 init() ->
@@ -167,6 +169,29 @@ write(Name, CacheKey, CanonFun, WriteFun) ->
     #metric{} = Row -> WriteFun(Row);
     undefined -> first_write(Name, CacheKey, CanonFun, WriteFun)
   end.
+
+%% Unlabeled (no-attribute) write. Same persistent_term state as write/4 with a
+%% {[],[]} canon, but the hot (cache-hit) path allocates nothing: Kind is a bare
+%% atom and the per-kind op is dispatched by function head, so there is no
+%% CanonFun/WriteFun closure and no runtime canon build. The miss path delegates
+%% to the unchanged first_write/4 arbiter, so it publishes the identical
+%% {instrument_label, Name, {[],[]}} key, chain slot, and count.
+-spec write_unlabeled(term(), atom(), number()) -> any().
+write_unlabeled(Name, Kind, Value) ->
+  case persistent_term:get({instrument_label, Name, ?UNLABELED}, undefined) of
+    #metric{} = Row -> apply_unlabeled(Kind, Row, Value);
+    undefined ->
+      first_write(Name, ?UNLABELED,
+                  fun() -> ?UNLABELED end,
+                  fun(R) -> apply_unlabeled(Kind, R, Value) end)
+  end.
+
+%% Mirrors the per-kind write funs the meter builds today; compile-time dispatched.
+apply_unlabeled(counter, Row, V)                     -> instrument_counter:inc_counter(Row, V);
+apply_unlabeled(up_down_counter, Row, V) when V >= 0 -> instrument_gauge:inc_gauge(Row, V);
+apply_unlabeled(up_down_counter, Row, V)             -> instrument_gauge:dec_gauge(Row, -V);
+apply_unlabeled(gauge, Row, V)                       -> instrument_gauge:set_gauge(Row, V);
+apply_unlabeled(histogram, Row, V)                   -> instrument_histogram:observe_histogram(Row, V).
 
 first_write(Name, CacheKey, CanonFun, WriteFun) ->
   case family(Name) of
