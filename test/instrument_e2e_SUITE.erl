@@ -30,7 +30,8 @@
   prometheus_scrapes_counter/1,
   prometheus_scrapes_gauge/1,
   prometheus_scrapes_histogram/1,
-  prometheus_scrapes_labeled_metrics/1
+  prometheus_scrapes_labeled_metrics/1,
+  prometheus_metrics_survive_recorder_exit/1
 ]).
 
 %% Jaeger tests
@@ -64,7 +65,8 @@ groups() ->
       prometheus_scrapes_counter,
       prometheus_scrapes_gauge,
       prometheus_scrapes_histogram,
-      prometheus_scrapes_labeled_metrics
+      prometheus_scrapes_labeled_metrics,
+      prometheus_metrics_survive_recorder_exit
     ]},
     {jaeger, [sequence], [
       jaeger_receives_simple_span,
@@ -216,7 +218,8 @@ init_per_testcase(TestCase, Config) when
     TestCase =:= prometheus_scrapes_counter;
     TestCase =:= prometheus_scrapes_gauge;
     TestCase =:= prometheus_scrapes_histogram;
-    TestCase =:= prometheus_scrapes_labeled_metrics ->
+    TestCase =:= prometheus_scrapes_labeled_metrics;
+    TestCase =:= prometheus_metrics_survive_recorder_exit ->
   ok = instrument_metric:unregister_all(),
   timer:sleep(100),
   Config;
@@ -307,6 +310,61 @@ prometheus_scrapes_labeled_metrics(_Config) ->
   #{<<"status">> := <<"success">>, <<"data">> := Data} = Result,
   #{<<"result">> := Results} = Data,
   2 = length(Results), %% GET/200 and GET/404
+  ok.
+
+%% Records metrics across a process-lifetime boundary: one worker registers the
+%% metrics and records first (creating the exemplar reservoir, owned by that
+%% worker pre-fix), then exits; afterwards more workers and the parent record the
+%% same by-name metrics. Pre-fix, each post-exit histogram observe hits the
+%% orphaned reservoir and crashes the recorder (DOWN reason =/= normal); post-fix
+%% the reservoir is owned by the supervised registry and survives, so every
+%% observe lands and the scraped totals match.
+prometheus_metrics_survive_recorder_exit(_Config) ->
+  Hist = e2e_mp_hist,
+  Counter = e2e_mp_counter,
+  Buckets = [0.1, 0.5, 1.0, 5.0],
+
+  %% Phase 1 — create-then-die.
+  {Creator, CRef} = spawn_monitor(fun() ->
+    _ = instrument_metric:new_histogram(Hist, "E2E multiproc histogram", Buckets),
+    _ = instrument_metric:new_counter(Counter, "E2E multiproc counter"),
+    _ = instrument_metric:observe_histogram(Hist, 0.3),
+    _ = instrument_metric:inc_counter(Counter, 1)
+  end),
+  receive
+    {'DOWN', CRef, process, Creator, CReason} ->
+      normal = CReason
+  after 5000 -> ct:fail(creator_timeout) end,
+
+  %% Phase 2 — record after the creator is gone.
+  NumWorkers = 4,
+  Workers = [spawn_monitor(fun() ->
+               _ = instrument_metric:observe_histogram(Hist, 0.3),
+               _ = instrument_metric:observe_histogram(Hist, 0.8),
+               _ = instrument_metric:inc_counter(Counter, 2)
+             end) || _ <- lists:seq(1, NumWorkers)],
+  lists:foreach(fun({Pid, MRef}) ->
+    receive
+      {'DOWN', MRef, process, Pid, WReason} ->
+        normal = WReason
+    after 5000 -> ct:fail({worker_timeout, Pid}) end
+  end, Workers),
+
+  %% Parent records too.
+  _ = instrument_metric:observe_histogram(Hist, 0.3),
+  _ = instrument_metric:inc_counter(Counter, 1),
+
+  %% Totals: histogram observes = 1 (creator) + 4*2 (workers) + 1 (parent) = 10
+  %%         counter            = 1 (creator) + 4*2 (workers) + 1 (parent) = 10
+  {ok, CountResult} =
+    instrument_e2e_helpers:query_prometheus(?PROM_URL, <<"e2e_mp_hist_count">>),
+  #{<<"data">> := #{<<"result">> := [#{<<"value">> := [_, HistCountStr]} | _]}} = CountResult,
+  <<"10">> = HistCountStr,
+
+  {ok, CounterResult} =
+    instrument_e2e_helpers:query_prometheus(?PROM_URL, <<"e2e_mp_counter_total">>),
+  #{<<"data">> := #{<<"result">> := [#{<<"value">> := [_, CounterStr]} | _]}} = CounterResult,
+  <<"10">> = CounterStr,
   ok.
 
 %% ============================================================================
