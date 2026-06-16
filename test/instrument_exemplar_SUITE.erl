@@ -32,7 +32,8 @@
   reservoir_collect_reset_test/1,
   %% ETS-based API tests
   reservoir_ref_test/1,
-  reservoir_ref_concurrent_test/1
+  reservoir_ref_concurrent_test/1,
+  exemplar_reservoir_survives_transient_creator_test/1
 ]).
 
 all() ->
@@ -50,7 +51,8 @@ all() ->
     reservoir_collect_reset_test,
     %% ETS-based API tests
     reservoir_ref_test,
-    reservoir_ref_concurrent_test
+    reservoir_ref_concurrent_test,
+    exemplar_reservoir_survives_transient_creator_test
   ].
 
 init_per_suite(Config) ->
@@ -281,3 +283,32 @@ reservoir_ref_concurrent_test(_Config) ->
     ?assert(E#exemplar.value >= 1.0)
   end, Exemplars),
   ok.
+
+%% Regression: the exemplar reservoir table must be created at startup and owned
+%% by the supervised registry, so a histogram recorded from a short-lived process
+%% does not orphan it. Pre-fix the table is created lazily by the first recorder
+%% and deleted when that process exits, badarg-ing every later offer_ref/3.
+exemplar_reservoir_survives_transient_creator_test(_Config) ->
+  Tid = ets:whereis(instrument_exemplar_reservoirs),
+  ?assertNotEqual(undefined, Tid),
+  ?assertEqual(whereis(instrument_registry), ets:info(Tid, owner)),
+
+  Parent = self(),
+  {Worker, MRef} = spawn_monitor(fun() ->
+    Ref = instrument_exemplar:new_reservoir_ref(4),
+    ok = instrument_exemplar:offer_ref(Ref, 1.0, #{}),
+    Parent ! {reservoir_ref, Ref}
+  end),
+  Ref = receive {reservoir_ref, R} -> R after 5000 -> ct:fail(no_ref_from_worker) end,
+  receive {'DOWN', MRef, process, Worker, _} -> ok after 5000 -> ct:fail(worker_did_not_exit) end,
+
+  ?assertNotEqual(undefined, ets:whereis(instrument_exemplar_reservoirs)),
+  ?assertEqual(ok, instrument_exemplar:offer_ref(Ref, 2.0, #{})),
+  %% reservoir size 4 >> 2 offers, so both values are retained (no sampling)
+  Values = [E#exemplar.value || E <- instrument_exemplar:collect_ref(Ref)],
+  ?assertEqual(2, length(Values)),
+  ?assert(lists:member(1.0, Values)),
+  ?assert(lists:member(2.0, Values)),
+
+  %% tidy the row we created so it does not linger in the shared table
+  ok = instrument_exemplar:delete_reservoir(Ref).
