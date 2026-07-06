@@ -96,6 +96,10 @@ create_vector_metric(Name, Label) ->
 init([]) ->
   _ = create_tables(),
   _ = create_label_counts_table(),
+  %% Own the exemplar reservoir table here so it lives for the registry's
+  %% lifetime instead of being lazily created (and orphaned) by whatever
+  %% transient process first records a histogram.
+  ok = instrument_exemplar:init_table(),
   %% A registry restart is a clean slate: erase any stale instrument-owned
   %% persistent_term entries left by a previous incarnation before resetting
   %% the index, so get_instrument/1 returns undefined and create_* re-registers.

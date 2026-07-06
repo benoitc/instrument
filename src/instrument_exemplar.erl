@@ -155,7 +155,6 @@ new_reservoir_ref() ->
 %% @doc Creates a new reservoir with specified size and returns a reference key.
 -spec new_reservoir_ref(pos_integer()) -> reference().
 new_reservoir_ref(Size) ->
-  ensure_table(),
   Ref = make_ref(),
   Reservoir = new_reservoir(Size),
   ets:insert(?EXEMPLAR_TABLE, {Ref, Reservoir}),
@@ -207,18 +206,5 @@ delete_reservoir(Ref) when is_reference(Ref) ->
     undefined -> ok;
     _ ->
       ets:delete(?EXEMPLAR_TABLE, Ref),
-      ok
-  end.
-
-%% Ensure the ETS table exists
-ensure_table() ->
-  case ets:whereis(?EXEMPLAR_TABLE) of
-    undefined ->
-      try
-        ets:new(?EXEMPLAR_TABLE, [named_table, public, set, {write_concurrency, true}])
-      catch
-        error:badarg -> ok  %% Table already exists (race condition)
-      end;
-    _ ->
       ok
   end.
