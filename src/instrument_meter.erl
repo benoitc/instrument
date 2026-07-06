@@ -495,15 +495,21 @@ register_instrument(Name, Instrument) ->
     false -> persistent_term:put(otel_instruments, [Name | Names])
   end.
 
-%% Unlabeled — kind-agnostic; gauge NIF is sign-permissive.
+%% Unlabeled counter-shaped handle (start_time tracked for cumulative
+%% temporality); counters are monotonic so negatives are dropped at the gauge
+%% layer, matching add/3's Value >= 0 guard.
 do_add(#metric{handle = {Ref, _StartTime}}, _Kind, Value, Attrs)
         when is_number(Value), map_size(Attrs) =:= 0 ->
-  %% counter-shaped handle (start_time tracked for cumulative temporality)
+  instrument_nif:inc_gauge(Ref, float(Value));
+%% Unlabeled gauge-shaped handle (plain ref) — the up_down_counter path. Split
+%% on sign so a negative delta decrements: inc_gauge drops negatives at the C
+%% layer, so route them to dec_gauge instead.
+do_add(#metric{handle = Ref}, _Kind, Value, Attrs)
+        when is_number(Value), Value >= 0, map_size(Attrs) =:= 0, is_reference(Ref) ->
   instrument_nif:inc_gauge(Ref, float(Value));
 do_add(#metric{handle = Ref}, _Kind, Value, Attrs)
-        when is_number(Value), map_size(Attrs) =:= 0, is_reference(Ref) ->
-  %% gauge-shaped handle (plain ref)
-  instrument_nif:inc_gauge(Ref, float(Value));
+        when is_number(Value), Value < 0, map_size(Attrs) =:= 0, is_reference(Ref) ->
+  instrument_nif:dec_gauge(Ref, float(-Value));
 
 %% Labeled counter — unchanged behaviour (monotonic vec storage).
 do_add(#metric{name = Name} = Metric, counter, Value, Attrs)
