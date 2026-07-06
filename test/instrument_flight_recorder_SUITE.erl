@@ -119,11 +119,8 @@ capture_span_events(_Config) ->
     receive test_message -> ok end
   end),
 
-  %% Wait for worker to flush events (flush interval is 50ms)
-  timer:sleep(100),
-
-  %% Should have captured events
-  Events = instrument_flight_recorder:dump_all(),
+  %% Wait for the worker pool to flush the events
+  Events = wait_for_events(fun instrument_flight_recorder:dump_all/0, 2),
   ct:pal("Captured events: ~p", [Events]),
   true = length(Events) >= 2,  %% At least send + receive
   ok.
@@ -147,9 +144,9 @@ capture_cross_process_messages(_Config) ->
       ct:fail(timeout)
     end,
 
-    %% Wait for worker to flush events (flush interval is 50ms)
-    timer:sleep(100),
-    Events = instrument_flight_recorder:get_trace(TraceIdBin),
+    %% Wait for the worker pool to flush the events
+    Events = wait_for_events(
+               fun() -> instrument_flight_recorder:get_trace(TraceIdBin) end, 2),
     ct:pal("Cross-process events: ~p", [Events]),
     %% Should have at least send + receive events
     true = length(Events) >= 2
@@ -677,3 +674,26 @@ spawned_child_cleanup_after_parent(_Config) ->
 
   exit(ChildPid, kill),
   ok.
+
+%% ============================================================================
+%% Helpers
+%% ============================================================================
+
+%% The tracer worker pool flushes events asynchronously (50ms interval), so a
+%% fixed sleep races the flush on slow CI runners. Poll until the expected
+%% number of events shows up, or return whatever arrived once the deadline
+%% passes and let the caller's assertion fail with the actual events.
+%% Only safe for read-only accessors (dump_all/0, get_trace/1) and positive
+%% assertions; tests asserting that NO events arrive must keep a fixed wait.
+wait_for_events(EventsFun, MinCount) ->
+  wait_for_events(EventsFun, MinCount, 2000).
+
+wait_for_events(EventsFun, MinCount, TimeoutMs) ->
+  Events = EventsFun(),
+  case length(Events) >= MinCount of
+    true -> Events;
+    false when TimeoutMs =< 0 -> Events;
+    false ->
+      timer:sleep(50),
+      wait_for_events(EventsFun, MinCount, TimeoutMs - 50)
+  end.
