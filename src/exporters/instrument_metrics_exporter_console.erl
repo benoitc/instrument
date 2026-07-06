@@ -176,7 +176,8 @@ format_data_point_json(histogram, #{attributes := Attrs, value := Value, timesta
     <<"timeUnixNano">> => Ts,
     <<"count">> => Count,
     <<"sum">> => Sum,
-    <<"bucketCounts">> => [maps:get(count, B) || B <- Buckets],
+    %% OTLP-style bucketCounts are per-bucket; buckets store cumulative counts.
+    <<"bucketCounts">> => instrument_metrics_exporter:decumulative_counts(Buckets),
     <<"explicitBounds">> => [maps:get(bound, B) || B <- Buckets, maps:get(bound, B) =/= infinity]
   };
 
