@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- OTLP metrics: a histogram no longer raises `{badkey, upper_bound}` during
+  encoding. Because the whole batch is encoded under one `catch`, any histogram
+  previously crashed the encoder and silently dropped every metric in that
+  export, counters and gauges included.
+- OTLP and console JSON histogram `bucketCounts` are now per-bucket counts as
+  the OTLP spec requires, instead of the cumulative counts stored internally
+  (which made every bucket over-count on a spec-compliant backend).
+- The exemplar reservoir table is created at registry startup and owned by the
+  supervised registry, so a histogram first recorded from a short-lived process
+  no longer orphans the table and breaks all later exemplar recording.
+- Unlabeled negative `add` on an `up_down_counter` is now honoured; it was
+  routed through `inc_gauge`, whose sign guard silently dropped the delta.
+- `with_label/4` records its value on the first write of a new label set; the
+  first touch previously dropped the value and recorded the no-arg default.
+- Map-form vector labels resolve in declared label order rather than the map's
+  key order, so a map and the equivalent positional list address the same row.
+- `instrument_registry:collect_all/0` skips a registered record that has no
+  collector instead of raising a `case_clause` that aborted the whole scrape.
+
 ## [1.1.4] - 2026-06-13
 
 ### Changed
