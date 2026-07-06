@@ -28,7 +28,8 @@
   concurrent_vec_operations/1,
   remove_label_test/1,
   clear_labels_test/1,
-  with_label_value_on_first_write/1
+  with_label_value_on_first_write/1,
+  map_label_resolves_in_declared_order/1
 ]).
 
 
@@ -42,7 +43,8 @@ all() ->
     concurrent_vec_operations,
     remove_label_test,
     clear_labels_test,
-    with_label_value_on_first_write
+    with_label_value_on_first_write,
+    map_label_resolves_in_declared_order
   ].
 
 
@@ -173,4 +175,20 @@ with_label_value_on_first_write(_Config) ->
   %% A later write to the same label set adds normally.
   ok = instrument_metric:with_label(M, ["foo", "bar"], inc_counter, 2),
   [{["foo", "bar"], 7.0}] = instrument_metric:get_vector_with(M, get_counter),
+  ok.
+
+%% Regression: a map label must resolve values in declared label order, not in
+%% the map's key-iteration order. Declared order [method, status] differs from
+%% the map's key order here, so a map must address the declared-order row. Both
+%% orderings are pre-created as distinct rows so this exercises only resolution.
+map_label_resolves_in_declared_order(_Config) ->
+  M = instrument_metric:new_vector([method, status], counter, "map_order", "help"),
+  ok = instrument_metric:with_label(M, [<<"GET">>, <<"200">>], inc_counter),
+  ok = instrument_metric:with_label(M, [<<"200">>, <<"GET">>], inc_counter),
+  %% Map must hit the declared-order row [method=GET, status=200], not the
+  %% reversed one built from the map's key order.
+  ok = instrument_metric:with_label(M, #{method => <<"GET">>, status => <<"200">>}, inc_counter),
+  Rows = instrument_metric:get_vector_with(M, get_counter),
+  ?assertEqual(2.0, proplists:get_value([<<"GET">>, <<"200">>], Rows)),
+  ?assertEqual(1.0, proplists:get_value([<<"200">>, <<"GET">>], Rows)),
   ok.

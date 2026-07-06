@@ -140,7 +140,10 @@ find_label(LabelMap, #vector{}=Vector) when is_map(LabelMap) ->
   GLen = length(Labels),
   if
     MLen =:= GLen ->
-      Label = maps:values(maps:with(Labels, LabelMap)),
+      %% Project the map onto declared label order. maps:values/1 would return
+      %% values in term-sorted key order, aliasing a map-addressed row apart
+      %% from the equivalent positional list when declared order /= term order.
+      Label = [maps:get(K, LabelMap) || K <- Labels],
       find_label(Label, Vector);
     true ->
       {error, bad_labels}
