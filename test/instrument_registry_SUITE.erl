@@ -24,6 +24,7 @@
   unregister_all_test/1,
   lookup_test/1,
   collect_all_test/1,
+  collect_all_skips_collectorless_test/1,
   concurrent_registration_test/1,
   concurrent_registration_stress_test/1
 ]).
@@ -35,6 +36,7 @@ all() ->
     unregister_all_test,
     lookup_test,
     collect_all_test,
+    collect_all_skips_collectorless_test,
     concurrent_registration_test,
     concurrent_registration_stress_test
   ].
@@ -165,6 +167,27 @@ collect_all_test(_Config) ->
   end,
 
   ?assertEqual([#{name => collectable_metric, value => 42}], Results),
+  ok.
+
+%% Regression: a registered record with no collector (collect = undefined) must
+%% be skipped, not raise a case_clause that aborts the whole scrape and takes
+%% every other metric down with it.
+collect_all_skips_collectorless_test(_Config) ->
+  Collectable = #metric{
+    name = has_collector,
+    description = <<"Collectable">>,
+    handle = undefined,
+    collect = {erlang, apply, [fun() -> #{name => has_collector, value => 7} end, []]}
+  },
+  Collectorless = #metric{
+    name = no_collector,
+    description = <<"No collector">>,
+    handle = undefined
+  },
+  ok = instrument_registry:register(Collectable),
+  ok = instrument_registry:register(Collectorless),
+  Results = instrument_registry:collect_all(),
+  ?assertEqual([#{name => has_collector, value => 7}], Results),
   ok.
 
 %% Test concurrent registration to verify no race conditions

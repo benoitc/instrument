@@ -385,7 +385,11 @@ collect_all() ->
                             mfa => {Mod, Fun, length(Args)},
                             stacktrace => Stacktrace}),
             false
-        end
+        end;
+      #metric{} ->
+        %% Registered record with no collector: skip it rather than letting a
+        %% case_clause abort the whole scrape.
+        false
     end
   end, Names).
 
