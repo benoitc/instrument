@@ -27,7 +27,8 @@
   histogram_vec_operations/1,
   concurrent_vec_operations/1,
   remove_label_test/1,
-  clear_labels_test/1
+  clear_labels_test/1,
+  with_label_value_on_first_write/1
 ]).
 
 
@@ -40,7 +41,8 @@ all() ->
     histogram_vec_operations,
     concurrent_vec_operations,
     remove_label_test,
-    clear_labels_test
+    clear_labels_test,
+    with_label_value_on_first_write
   ].
 
 
@@ -159,4 +161,16 @@ clear_labels_test(_Config) ->
   Post = instrument_metric:get_counter_vec(cl_requests, [<<"POST">>]),
   ?assert(Get == 0.0 orelse Get == undefined),
   ?assert(Post == 0.0 orelse Post == undefined),
+  ok.
+
+%% Regression: the first write of a brand-new label set through with_label/4
+%% must record the passed value, not the no-arg default. The first-touch branch
+%% used to recurse into with_label/3 and drop the value argument.
+with_label_value_on_first_write(_Config) ->
+  M = instrument_metric:new_vector([a, b], counter, "wl4_counter", "help"),
+  ok = instrument_metric:with_label(M, ["foo", "bar"], inc_counter, 5),
+  [{["foo", "bar"], 5.0}] = instrument_metric:get_vector_with(M, get_counter),
+  %% A later write to the same label set adds normally.
+  ok = instrument_metric:with_label(M, ["foo", "bar"], inc_counter, 2),
+  [{["foo", "bar"], 7.0}] = instrument_metric:get_vector_with(M, get_counter),
   ok.

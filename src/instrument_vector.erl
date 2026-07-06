@@ -81,7 +81,10 @@ with_label_1(VectorMetric, Label, Mod, Fun, Args) ->
               end;
             false ->
               ok = instrument_registry:create_vector_metric(Name, Label),
-              with_label(Name, Label, Fun)
+              %% Re-enter through with_label_1 carrying Mod/Args: recursing into
+              %% with_label/3 here would drop the caller's value argument, so the
+              %% first write of a new label set recorded the no-arg default.
+              with_label_1(Name, Label, Mod, Fun, Args)
           end
       end
     end
