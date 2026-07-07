@@ -361,20 +361,18 @@ trace_propagation_impl() ->
       ct:fail(timeout)
     end,
 
-    %% Give trace events time to be processed (flush interval is 50ms)
-    timer:sleep(100),
-
-    %% Check that events from child process were captured
-    Events = instrument_flight_recorder:get_trace(TraceIdBin),
-    ct:pal("Trace events: ~p", [Events]),
-
-    %% Verify we have events and specifically that child's send was captured
+    %% Wait for the worker pool to flush; poll the filtered child-send events.
     %% Event format: {Timestamp, {send, SenderPid, Msg, ReceiverPid}}
-    ChildSendEvents = [E || {_, E} <- Events,
-                            is_tuple(E),
-                            tuple_size(E) >= 2,
-                            element(1, E) =:= send,
-                            element(2, E) =:= ChildPid],
+    ChildSendEvents = wait_until(
+      fun() ->
+        Events = instrument_flight_recorder:get_trace(TraceIdBin),
+        [E || {_, E} <- Events,
+              is_tuple(E),
+              tuple_size(E) >= 2,
+              element(1, E) =:= send,
+              element(2, E) =:= ChildPid]
+      end,
+      fun(L) -> length(L) >= 1 end),
     ct:pal("Child send events: ~p", [ChildSendEvents]),
     true = length(ChildSendEvents) >= 1
   end),
@@ -481,11 +479,9 @@ async_parent_span_traced(_Config) ->
     {span_done, TraceIdBin} ->
       ct:pal("Worker finished span, trace_id: ~p", [TraceIdBin]),
 
-      %% Wait for events to flush
-      timer:sleep(100),
-
-      %% Get events for this trace
-      Events = instrument_flight_recorder:get_trace(TraceIdBin),
+      %% Wait for the worker pool to flush the events
+      Events = wait_for_events(
+                 fun() -> instrument_flight_recorder:get_trace(TraceIdBin) end, 1),
       ct:pal("Async parent events: ~p", [Events]),
 
       %% Should have events from the worker process
@@ -549,15 +545,13 @@ marker_in_spawned_child(_Config) ->
 
     receive child_done -> ok after 1000 -> ct:fail(timeout) end,
 
-    %% Wait for events to flush
-    timer:sleep(100),
-
-    %% Get events for this trace
-    Events = instrument_flight_recorder:get_trace(TraceIdBin),
-    ct:pal("Events with child marker: ~p", [Events]),
-
-    %% Find the child marker
-    Markers = [E || {_, E} <- Events, element(1, E) =:= marker],
+    %% Wait for the worker pool to flush; poll the filtered markers.
+    Markers = wait_until(
+      fun() ->
+        Events = instrument_flight_recorder:get_trace(TraceIdBin),
+        [E || {_, E} <- Events, element(1, E) =:= marker]
+      end,
+      fun(L) -> length(L) >= 1 end),
     ct:pal("Markers found: ~p", [Markers]),
 
     %% Should have at least one marker from the child
@@ -595,8 +589,10 @@ tracer_bootstrap_filtered(_Config) ->
     TraceId
   end),
 
-  timer:sleep(100),
-  Events = instrument_flight_recorder:get_trace(TraceIdBin),
+  %% The child has already exited, so its events flush as one batch; poll until
+  %% at least one arrives (the bootstrap-filter check below runs on the batch).
+  Events = wait_for_events(
+             fun() -> instrument_flight_recorder:get_trace(TraceIdBin) end, 1),
   ct:pal("Events (should not contain tracer bootstrap): ~p", [Events]),
 
   %% Verify we actually captured some events (sanity check)
@@ -680,20 +676,25 @@ spawned_child_cleanup_after_parent(_Config) ->
 %% ============================================================================
 
 %% The tracer worker pool flushes events asynchronously (50ms interval), so a
-%% fixed sleep races the flush on slow CI runners. Poll until the expected
-%% number of events shows up, or return whatever arrived once the deadline
-%% passes and let the caller's assertion fail with the actual events.
-%% Only safe for read-only accessors (dump_all/0, get_trace/1) and positive
-%% assertions; tests asserting that NO events arrive must keep a fixed wait.
+%% fixed sleep races the flush on slow CI runners. Poll a read-only producer
+%% until a positive predicate holds, returning the last value once the deadline
+%% passes so the caller's assertion still runs with the real data. Only safe for
+%% read-only accessors (dump_all/0, get_trace/1) and positive assertions; tests
+%% asserting that NO events arrive must keep a fixed wait.
 wait_for_events(EventsFun, MinCount) ->
-  wait_for_events(EventsFun, MinCount, 2000).
+  wait_until(EventsFun, fun(Events) -> length(Events) >= MinCount end).
 
-wait_for_events(EventsFun, MinCount, TimeoutMs) ->
-  Events = EventsFun(),
-  case length(Events) >= MinCount of
-    true -> Events;
-    false when TimeoutMs =< 0 -> Events;
+%% Poll Producer() until Pred(Result) holds, for callers whose assertion is on a
+%% filtered subset rather than the raw event count.
+wait_until(Producer, Pred) ->
+  wait_until(Producer, Pred, 2000).
+
+wait_until(Producer, Pred, TimeoutMs) ->
+  Result = Producer(),
+  case Pred(Result) of
+    true -> Result;
+    false when TimeoutMs =< 0 -> Result;
     false ->
       timer:sleep(50),
-      wait_for_events(EventsFun, MinCount, TimeoutMs - 50)
+      wait_until(Producer, Pred, TimeoutMs - 50)
   end.
