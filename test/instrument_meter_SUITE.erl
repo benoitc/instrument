@@ -38,7 +38,8 @@
   temporality_option_cumulative_test/1,
   temporality_option_delta_test/1,
   temporality_default_test/1,
-  add_negative_to_labeled_up_down_counter/1
+  add_negative_to_labeled_up_down_counter/1,
+  add_negative_to_unlabeled_up_down_counter/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -69,7 +70,8 @@ all() ->
     temporality_option_cumulative_test,
     temporality_option_delta_test,
     temporality_default_test,
-    add_negative_to_labeled_up_down_counter
+    add_negative_to_labeled_up_down_counter,
+    add_negative_to_unlabeled_up_down_counter
   ].
 
 init_per_suite(Config) ->
@@ -576,4 +578,19 @@ add_negative_to_labeled_up_down_counter(_Config) ->
   Output2 = instrument_prometheus:format(),
   ?assertNotEqual(nomatch,
                   binary:match(Output2, <<"signed_active_a{a=\"y\"} -1.0">>)),
+  ok.
+
+%% Regression: an unlabeled up_down_counter must honour negative deltas. The
+%% unlabeled add path routed every value through inc_gauge, whose C sign guard
+%% drops negatives, so add(C, -N) with no attributes was silently a no-op.
+add_negative_to_unlabeled_up_down_counter(_Config) ->
+  Meter = instrument_meter:get_meter(<<"unlabeled_updc_test">>),
+  Counter = instrument_meter:create_up_down_counter(Meter, <<"unlabeled_conns">>),
+
+  ok = instrument_meter:add(Counter, 5),
+  ok = instrument_meter:add(Counter, -2),
+
+  Output = instrument_prometheus:format(),
+  ct:pal("unlabeled up_down_counter exposition:~n~s", [Output]),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"unlabeled_conns 3.0">>)),
   ok.

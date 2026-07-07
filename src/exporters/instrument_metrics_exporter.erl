@@ -34,7 +34,8 @@
   collect/0,
   export/0,
   flush/0,
-  shutdown/0
+  shutdown/0,
+  decumulative_counts/1
 ]).
 
 %% Exporter behaviour callbacks
@@ -362,6 +363,20 @@ convert_metric(#{type := histogram, name := Name, help := Help, labels := Labels
 
 convert_metric(_, _) ->
   undefined.
+
+%% @doc Convert cumulative bucket counts to per-bucket counts for OTLP-style
+%% output. Buckets are in ascending bound order with the +Inf bucket last, and
+%% each `count' is the cumulative count up to and including that bound; OTLP
+%% `bucketCounts' want the per-bucket delta. The Prometheus/console-text paths
+%% keep using the cumulative form, so this is only for the JSON encoders.
+-spec decumulative_counts([#{count => number(), _ => _}]) -> [number()].
+decumulative_counts(Buckets) ->
+  {Counts, _Last} =
+    lists:mapfoldl(fun(B, Prev) ->
+      Cum = maps:get(count, B, 0),
+      {Cum - Prev, Cum}
+    end, 0, Buckets),
+  Counts.
 
 %% Extract help text from proplist or return as-is if already a string/binary
 extract_help(Help) when is_list(Help) ->

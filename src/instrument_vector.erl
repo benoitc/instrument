@@ -81,7 +81,10 @@ with_label_1(VectorMetric, Label, Mod, Fun, Args) ->
               end;
             false ->
               ok = instrument_registry:create_vector_metric(Name, Label),
-              with_label(Name, Label, Fun)
+              %% Re-enter through with_label_1 carrying Mod/Args: recursing into
+              %% with_label/3 here would drop the caller's value argument, so the
+              %% first write of a new label set recorded the no-arg default.
+              with_label_1(Name, Label, Mod, Fun, Args)
           end
       end
     end
@@ -137,7 +140,10 @@ find_label(LabelMap, #vector{}=Vector) when is_map(LabelMap) ->
   GLen = length(Labels),
   if
     MLen =:= GLen ->
-      Label = maps:values(maps:with(Labels, LabelMap)),
+      %% Project the map onto declared label order. maps:values/1 would return
+      %% values in term-sorted key order, aliasing a map-addressed row apart
+      %% from the equivalent positional list when declared order /= term order.
+      Label = [maps:get(K, LabelMap) || K <- Labels],
       find_label(Label, Vector);
     true ->
       {error, bad_labels}

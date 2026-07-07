@@ -36,7 +36,7 @@
 -author("benoitc").
 
 %% Public API
--export([new/1]).
+-export([new/1, encode_metrics/1]).
 
 %% Exporter callbacks
 -export([exporter_init/1, exporter_export/2, exporter_shutdown/1]).
@@ -233,12 +233,13 @@ encode_number_data_point(#{attributes := Attrs, value := Value, timestamp := Ts}
 
 encode_histogram_data_point(#{attributes := Attrs, value := Value, timestamp := Ts} = DP) ->
   #{count := Count, sum := Sum, buckets := Buckets} = Value,
-  %% OTLP bucketCounts must be one longer than explicitBounds (includes +Inf bucket)
-  %% Get individual bucket counts (not cumulative)
-  BucketCounts = [maps:get(count, B, 0) || B <- Buckets],
+  %% OTLP bucketCounts must be one longer than explicitBounds (includes +Inf bucket).
+  %% Buckets carry cumulative counts in ascending bound order; OTLP wants
+  %% per-bucket counts, so take the difference from the previous bound.
+  BucketCounts = instrument_metrics_exporter:decumulative_counts(Buckets),
   %% ExplicitBounds excludes +Inf
-  ExplicitBounds = [maps:get(upper_bound, B) || B <- Buckets,
-                    maps:get(upper_bound, B) =/= infinity],
+  ExplicitBounds = [maps:get(bound, B) || B <- Buckets,
+                    maps:get(bound, B) =/= infinity],
   Exemplars = maps:get(exemplars, Value, []),
   Base = #{
     <<"attributes">> => encode_attributes(Attrs),
