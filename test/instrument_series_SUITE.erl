@@ -17,6 +17,9 @@
   overflow_vec_canon/1,
   unlabeled_negative_updown/1,
   degraded_series_still_writable/1,
+  aliasing_adopts_existing_series/1,
+  aliasing_at_cap_no_misroute/1,
+  killed_winner_repairs_cache_key/1,
   loser_after_winner_undo_returns_not_found/1,
   collect_families/1,
   collect_skips_holes_and_empty/1,
@@ -35,6 +38,9 @@ all() ->
    overflow_vec_canon,
    unlabeled_negative_updown,
    degraded_series_still_writable,
+   aliasing_adopts_existing_series,
+   aliasing_at_cap_no_misroute,
+   killed_winner_repairs_cache_key,
    loser_after_winner_undo_returns_not_found,
    collect_families,
    collect_skips_holes_and_empty,
@@ -176,6 +182,71 @@ degraded_series_still_writable(_Config) ->
   ok = instrument_series:write(w7, Canon, fun() -> Canon end,
                                fun(R) -> instrument_counter:inc_counter(R) end),
   ?assertEqual(2.0, instrument_counter:get_counter(Row)),   %% same cell — no misroute
+  ok.
+
+%% Two distinct raw cache keys that canonicalize to the same Canon (e.g. an
+%% integer 200 and the binary <<"200">>) must resolve to ONE series. The second
+%% (aliased) write adopts the existing cell and publishes its own cache key, so
+%% it becomes a fast-path hit instead of a permanent miss that re-mints a cell
+%% every write.
+aliasing_adopts_existing_series(_Config) ->
+  _ = instrument_series:ensure_family(a1, counter, <<>>, [k], undefined),
+  Canon = {[k], [<<"200">>]},
+  Inc = fun(R) -> instrument_counter:inc_counter(R) end,
+  ok = instrument_series:write(a1, [200], fun() -> Canon end, Inc),
+  Row = persistent_term:get({instrument_label, a1, [200]}),
+  %% aliased shape: distinct raw list, same Canon
+  ok = instrument_series:write(a1, [<<"200">>], fun() -> Canon end, Inc),
+  ?assertEqual(2.0, instrument_counter:get_counter(Row)),   %% one cell, both writes
+  %% the aliased cache key was adopted (published), not left a permanent miss
+  ?assertEqual(Row, persistent_term:get({instrument_label, a1, [<<"200">>]}, undefined)),
+  %% only one row minted, one live series
+  #family{row_seq = Seq} = instrument_series:family(a1),
+  ?assertEqual(1, atomics:get(Seq, 1)),
+  ?assertEqual(1, instrument_registry:label_count(a1)),
+  ok.
+
+%% At the cardinality cap, an aliased write to an ALREADY-LIVE series must land
+%% on that series, not be misrouted to the overflow bucket and counted as
+%% dropped (the over_limit pre-check only sees the live count).
+aliasing_at_cap_no_misroute(_Config) ->
+  os:putenv("OTEL_METRIC_CARDINALITY_LIMIT", "3"),
+  _ = instrument_series:ensure_family(a2, counter, <<>>, [k], undefined),
+  Inc = fun(R) -> instrument_counter:inc_counter(R) end,
+  Canon1 = {[k], [<<"1">>]},
+  ok = instrument_series:write(a2, [1], fun() -> Canon1 end, Inc),
+  %% fill the rest of the cap with distinct series
+  [ok = instrument_series:write(a2, [integer_to_binary(I)],
+         fun() -> {[k], [integer_to_binary(I)]} end, Inc) || I <- [2, 3]],
+  ?assertEqual(3, instrument_registry:label_count(a2)),   %% at the cap
+  DroppedBefore = instrument_registry:cardinality_dropped(a2),
+  %% aliased form of the FIRST series ([1] -> [<<"1">>], same Canon)
+  ok = instrument_series:write(a2, [<<"1">>], fun() -> Canon1 end, Inc),
+  Row1 = persistent_term:get({instrument_label, a2, [1]}),
+  ?assertEqual(2.0, instrument_counter:get_counter(Row1)),   %% adopted, not overflowed
+  ?assertEqual(DroppedBefore, instrument_registry:cardinality_dropped(a2)),
+  os:unsetenv("OTEL_METRIC_CARDINALITY_LIMIT"),
+  ok.
+
+%% A winner killed after publishing its chain slot but before its cache key
+%% (269 done, 270 not): a later write must repair the cache key and reuse the
+%% same cell, without minting a new row, and the series still exports.
+killed_winner_repairs_cache_key(_Config) ->
+  _ = instrument_series:ensure_family(k1, counter, <<>>, undefined, undefined),
+  Canon = {[x], [<<"1">>]},
+  Inc = fun(R) -> instrument_counter:inc_counter(R) end,
+  ok = instrument_series:write(k1, Canon, fun() -> Canon end, Inc),
+  Row = persistent_term:get({instrument_label, k1, Canon}),
+  #family{row_seq = Seq} = instrument_series:family(k1),
+  SlotBefore = atomics:get(Seq, 1),
+  %% simulate the kill: erase only the cache key, leaving arbiter + chain slot
+  persistent_term:erase({instrument_label, k1, Canon}),
+  ok = instrument_series:write(k1, Canon, fun() -> Canon end, Inc),
+  ?assertEqual(2.0, instrument_counter:get_counter(Row)),
+  ?assertEqual(Row, persistent_term:get({instrument_label, k1, Canon}, undefined)), %% repaired
+  ?assertEqual(SlotBefore, atomics:get(Seq, 1)),   %% no re-mint / churn
+  [#{data := Data}] = [E || #{name := k1} = E <- instrument_series:collect_all()],
+  ?assertEqual([{[x], [<<"1">>], 2.0}], Data),   %% still exports
   ok.
 
 %% The winner's post-claim ets:member re-check fails because the family arbiter

@@ -202,9 +202,20 @@ first_write(Name, CacheKey, CanonFun, WriteFun) ->
       case valid_arity(Fam, Canon) of
         false -> {error, invalid_labels};
         true ->
-          case over_limit(Name, Canon) of
-            true -> overflow_write(Name, Fam, WriteFun);
-            false -> claim_row(Name, Fam, Canon, CacheKey, WriteFun)
+          %% Adopt an already-claimed series: an aliased CacheKey (distinct raw
+          %% label values that canonicalize to the same Canon) or a later write to
+          %% a series whose winner died mid-claim finds the arbiter row here,
+          %% publishes its own cache key, and writes the existing cell -- no mint,
+          %% no cardinality consumption, no overflow misroute at the cap.
+          case ets:lookup_element(?TAB, {Name, Canon}, 2, undefined) of
+            #metric{} = Existing ->
+              adopt_cache_key(Name, CacheKey, Existing),
+              WriteFun(Existing);
+            undefined ->
+              case over_limit(Name, Canon) of
+                true -> overflow_write(Name, Fam, WriteFun);
+                false -> claim_row(Name, Fam, Canon, CacheKey, WriteFun)
+              end
           end
       end
   end.
@@ -283,9 +294,25 @@ claim_row(Name, #family{} = Fam, Canon, CacheKey, WriteFun) ->
           discard_row(Row),
           case ets:lookup_element(?TAB, {Name, Canon}, 2, undefined) of
             undefined -> {error, not_found};   %% winner undid its claim (family torn down)
-            #metric{} = Existing -> WriteFun(Existing)
+            #metric{} = Existing ->
+              %% Lost the claim to a concurrent winner (possibly an aliased
+              %% CacheKey racing the same Canon): adopt our own cache key so the
+              %% next write with this shape hits the fast path instead of
+              %% re-minting and discarding a cell every time.
+              adopt_cache_key(Name, CacheKey, Existing),
+              WriteFun(Existing)
           end
       end
+  end.
+
+%% Publish this writer's cache key for a series already claimed by another
+%% writer -- an aliased CacheKey, or a winner that died before publishing.
+%% Absent-only, so it never issues a replacing persistent_term:put on the create
+%% path; concurrent adopters of the same key store an identical Row.
+adopt_cache_key(Name, CacheKey, Row) ->
+  case persistent_term:get({instrument_label, Name, CacheKey}, undefined) of
+    undefined -> persistent_term:put({instrument_label, Name, CacheKey}, Row);
+    _ -> ok
   end.
 
 %% Cells are master's exact storage shapes; rows are the same unregistered
