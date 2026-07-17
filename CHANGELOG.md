@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Relax the `hackney` requirement from `4.4.0` (exact) to `~> 4.4`, so
+  consumers can use a newer hackney. An exact pin forced every dependent onto
+  4.4.0 and collided with their own pins (barrel-db/barrel#2).
+
 ### Fixed
 - OTLP metrics: a histogram no longer raises `{badkey, upper_bound}` during
   encoding. Because the whole batch is encoded under one `catch`, any histogram
