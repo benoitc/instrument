@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.1.5] - 2026-07-18
 
 ### Changed
 - Relax the `hackney` requirement from `4.4.0` (exact) to `~> 4.4`, so
