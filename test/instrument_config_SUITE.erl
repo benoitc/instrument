@@ -27,6 +27,8 @@
   sampler_parentbased_test/1,
   propagators_env_test/1,
   batch_processor_config_test/1,
+  batch_processor_invalid_env_test/1,
+  metric_export_interval_test/1,
   otlp_endpoint_test/1,
   otlp_signal_endpoints_test/1,
   log_level_test/1,
@@ -52,6 +54,8 @@ all() ->
     sampler_parentbased_test,
     propagators_env_test,
     batch_processor_config_test,
+    batch_processor_invalid_env_test,
+    metric_export_interval_test,
     otlp_endpoint_test,
     otlp_signal_endpoints_test,
     log_level_test,
@@ -93,6 +97,8 @@ clear_otel_env() ->
     "OTEL_BSP_SCHEDULE_DELAY",
     "OTEL_BSP_MAX_QUEUE_SIZE",
     "OTEL_BSP_MAX_EXPORT_BATCH_SIZE",
+    "OTEL_BSP_EXPORT_TIMEOUT",
+    "OTEL_METRIC_EXPORT_INTERVAL",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
     "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
@@ -105,7 +111,8 @@ clear_otel_env() ->
   ],
   lists:foreach(fun(Var) -> os:unsetenv(Var) end, EnvVars),
   application:unset_env(instrument, span_processor),
-  application:unset_env(instrument, span_exporter).
+  application:unset_env(instrument, span_exporter),
+  application:unset_env(instrument, metrics_export_interval).
 
 %% ============================================================================
 %% Test Cases
@@ -188,9 +195,39 @@ batch_processor_config_test(_Config) ->
   ok = application:start(instrument),
 
   Config = instrument_config:get_batch_processor_config(),
-  ?assertEqual(1000, maps:get(schedule_delay, Config)),
+  %% Keys match the batch processor's own option names.
+  ?assertEqual(1000, maps:get(schedule_delay_millis, Config)),
   ?assertEqual(5000, maps:get(max_queue_size, Config)),
   ?assertEqual(256, maps:get(max_export_batch_size, Config)),
+  ?assertNot(maps:is_key(schedule_delay, Config)),
+  ok.
+
+batch_processor_invalid_env_test(_Config) ->
+  ok = application:stop(instrument),
+  os:putenv("OTEL_BSP_SCHEDULE_DELAY", "0"),
+  os:putenv("OTEL_BSP_MAX_QUEUE_SIZE", "-5"),
+  os:putenv("OTEL_BSP_EXPORT_TIMEOUT", "2500"),
+  ok = application:start(instrument),
+  Config = instrument_config:get_batch_processor_config(),
+  ?assertNot(maps:is_key(schedule_delay_millis, Config)),
+  ?assertNot(maps:is_key(max_queue_size, Config)),
+  ?assertEqual(2500, maps:get(export_timeout_millis, Config)),
+  ok.
+
+metric_export_interval_test(_Config) ->
+  ?assertEqual(60000, instrument_config:get_metric_export_interval()),
+  os:putenv("OTEL_METRIC_EXPORT_INTERVAL", "15000"),
+  ?assertEqual(15000, instrument_config:get_metric_export_interval()),
+  %% Application env wins over the env var.
+  ok = application:set_env(instrument, metrics_export_interval, 5000),
+  ?assertEqual(5000, instrument_config:get_metric_export_interval()),
+  %% Invalid values fall back to the default instead of a busy loop.
+  ok = application:set_env(instrument, metrics_export_interval, 0),
+  ?assertEqual(60000, instrument_config:get_metric_export_interval()),
+  ok = application:set_env(instrument, metrics_export_interval, fast),
+  ?assertEqual(60000, instrument_config:get_metric_export_interval()),
+  ok = application:unset_env(instrument, metrics_export_interval),
+  os:unsetenv("OTEL_METRIC_EXPORT_INTERVAL"),
   ok.
 
 otlp_endpoint_test(_Config) ->

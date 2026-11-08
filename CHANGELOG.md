@@ -23,6 +23,19 @@ All notable changes to this project will be documented in this file.
   events; it used to stay dead and its events were lost.
 - Out-of-range flight recorder settings (pool size, buffer size) are ignored
   with a warning.
+- `OTEL_BSP_SCHEDULE_DELAY` is now applied to the batch span processor. It
+  was stored under the wrong name and silently ignored.
+- `OTEL_BSP_EXPORT_TIMEOUT` and `OTEL_METRIC_EXPORT_INTERVAL` are now read.
+- A zero, negative or non-integer metrics export interval or batch processor
+  setting is ignored with a warning. A zero interval used to make the exporter
+  loop without pause.
+- Stopping the metrics exporter shuts exporters down with their latest state,
+  so resources opened during the final export are released.
+- Compressed log rotation works in small chunks instead of loading the whole
+  file into memory.
+- The file log exporter no longer drops the batch it receives right after
+  reopening its file.
+
 
 ## [1.1.5] - 2026-07-18
 
