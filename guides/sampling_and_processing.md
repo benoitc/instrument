@@ -232,6 +232,9 @@ Configure sampling and processing via environment variables:
 | `OTEL_BSP_SCHEDULE_DELAY` | Export interval in ms | `5000` |
 | `OTEL_BSP_MAX_QUEUE_SIZE` | Max queue size | `2048` |
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Max batch size | `512` |
+| `OTEL_BSP_EXPORT_TIMEOUT` | Max time for one export in ms | `30000` |
+
+Values must be positive integers; anything else is ignored and the default applies.
 
 ### Using Environment Variables
 
