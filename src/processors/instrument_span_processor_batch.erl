@@ -35,7 +35,10 @@
 
 %% API
 -export([
-  start_link/1
+  start_link/1,
+  dropped_spans/0,
+  flush_timeout/0,
+  shutdown_timeout/0
 ]).
 
 %% Processor callbacks
@@ -62,7 +65,8 @@
 -define(DEFAULT_MAX_EXPORT_BATCH_SIZE, 512).
 -define(DEFAULT_SCHEDULE_DELAY_MILLIS, 5000).
 -define(DEFAULT_EXPORT_TIMEOUT_MILLIS, 30000).
--define(SHUTDOWN_TIMEOUT_MILLIS, 10000).
+-define(ADMISSION, '$instrument_bsp_admission').
+-define(TIMEOUT_KEY, '$instrument_bsp_export_timeout').
 %% Max times a batch may be rescheduled after a retryable export failure
 %% before it is dropped. The OTLP exporter itself also does bounded retry,
 %% so across both layers a batch can see up to roughly
@@ -78,7 +82,9 @@
                       ref := reference(),
                       spans := [#span{}],
                       kill_timer := reference(),
-                      pending_froms := [gen_server:from()]}.
+                      %% flush callers and the time by which they must
+                      %% be answered
+                      pending_froms := [{gen_server:from(), integer()}]}.
 
 -record(state, {
   exporter :: module(),
@@ -140,6 +146,11 @@ init(Config) ->
 
   case Exporter:init(ExporterConfig) of
     {ok, ExporterState} ->
+      ok = instrument_admission:init(?ADMISSION, MaxQueueSize),
+      case persistent_term:get(?TIMEOUT_KEY, undefined) of
+        ExportTimeout -> ok;
+        _ -> persistent_term:put(?TIMEOUT_KEY, ExportTimeout)
+      end,
       State = #state{
         exporter = Exporter,
         exporter_state = ExporterState,
@@ -179,12 +190,33 @@ on_end(#span{is_recording = false}) ->
   %% Don't export non-recording spans
   ok;
 on_end(Span) ->
-  gen_server:cast(?MODULE, {on_end, Span}).
+  %% Admission happens here, in the span's process, so spans past
+  %% max_queue_size are dropped before they reach the processor's mailbox.
+  case instrument_admission:admit(?ADMISSION, 1) of
+    true -> gen_server:cast(?MODULE, {on_end, Span});
+    false -> ok
+  end.
+
+%% @doc Spans dropped because the queue was full or their export failed.
+-spec dropped_spans() -> non_neg_integer().
+dropped_spans() ->
+  instrument_admission:dropped(?ADMISSION).
+
+%% @doc Client timeout for force_flush/0: one export plus margin.
+-spec flush_timeout() -> pos_integer().
+flush_timeout() ->
+  persistent_term:get(?TIMEOUT_KEY, ?DEFAULT_EXPORT_TIMEOUT_MILLIS) + 5000.
+
+%% @doc Client timeout for shutdown/0: it may wait for an in-flight export
+%% and then run a final one.
+-spec shutdown_timeout() -> pos_integer().
+shutdown_timeout() ->
+  2 * persistent_term:get(?TIMEOUT_KEY, ?DEFAULT_EXPORT_TIMEOUT_MILLIS) + 5000.
 
 %% @doc Shuts down the processor.
 -spec shutdown() -> ok.
 shutdown() ->
-  gen_server:call(?MODULE, shutdown, ?SHUTDOWN_TIMEOUT_MILLIS).
+  gen_server:call(?MODULE, shutdown, shutdown_timeout()).
 
 %% @doc Shuts down the processor with state.
 -spec shutdown(#state{}) -> ok.
@@ -200,7 +232,7 @@ shutdown(#state{exporter = Exporter, exporter_state = ExporterState}) ->
 %% @doc Forces an immediate export of all queued spans.
 -spec force_flush() -> ok.
 force_flush() ->
-  gen_server:call(?MODULE, force_flush).
+  gen_server:call(?MODULE, force_flush, flush_timeout()).
 
 %% @doc Forces an immediate export with state.
 -spec force_flush(#state{}) -> ok.
@@ -234,6 +266,7 @@ handle_call(shutdown, _From, State) ->
     Class:Reason:Stack ->
       logger:debug("Exporter shutdown failed: ~p:~p~n~p", [Class, Reason, Stack])
   end,
+  ok = instrument_admission:release(?ADMISSION, State1#state.queue_size),
   {reply, ok, State1#state{queue = [], queue_size = 0,
                            retry_spans = [], retry_attempts = 0,
                            exporter_state = NewExporterState}};
@@ -245,11 +278,11 @@ handle_call(force_flush, From, State) ->
     undefined ->
       case has_pending_spans(State) of
         false -> {reply, ok, State};
-        true -> {noreply, start_async_export([From], State)}
+        true -> {noreply, start_async_export([flush_waiter(From, State)], State)}
       end;
     Inflight ->
       Pending = maps:get(pending_froms, Inflight),
-      NewInflight = Inflight#{pending_froms := [From | Pending]},
+      NewInflight = Inflight#{pending_froms := [flush_waiter(From, State) | Pending]},
       {noreply, State#state{export_inflight = NewInflight}}
   end;
 
@@ -269,6 +302,8 @@ handle_cast({on_end, Span}, State) ->
   case QueueSize >= MaxQueueSize of
     true ->
       %% Drop the span
+      ok = instrument_admission:release(?ADMISSION, 1),
+      ok = instrument_admission:record_drop(?ADMISSION, 1),
       {noreply, State#state{dropped_spans = Dropped + 1}};
     false ->
       NewQueue = [Span | Queue],
@@ -380,11 +415,9 @@ start_async_export(Froms, State) ->
   #state{
     exporter = Exporter,
     exporter_state = ExporterState,
-    queue = Queue,
-    retry_spans = RetrySpans,
     export_timeout = ExportTimeout
   } = State,
-  Combined = RetrySpans ++ Queue,
+  {Combined, State0} = next_chunk(State),
   Parent = self(),
   Ref = make_ref(),
   {Pid, MonRef} = erlang:spawn_monitor(fun() ->
@@ -395,7 +428,24 @@ start_async_export(Froms, State) ->
   Inflight = #{pid => Pid, monitor => MonRef, ref => Ref,
                spans => Combined, kill_timer => KillTimer,
                pending_froms => Froms},
-  State#state{queue = [], queue_size = 0, export_inflight = Inflight}.
+  State0#state{export_inflight = Inflight}.
+
+%% The next batch to export, newest first: a batch being retried, or else at
+%% most max_export_batch_size of the oldest queued spans. Spans taken from the
+%% queue release their admission slots.
+next_chunk(#state{retry_spans = [_ | _] = RetrySpans} = State) ->
+  {RetrySpans, State};
+next_chunk(#state{queue = Queue, queue_size = QueueSize,
+                  max_export_batch_size = BatchSize} = State) ->
+  {Chunk, Rest} = case QueueSize =< BatchSize of
+                    true -> {Queue, []};
+                    false ->
+                      {Rest0, Chunk0} = lists:split(QueueSize - BatchSize, Queue),
+                      {Chunk0, Rest0}
+                  end,
+  Taken = QueueSize - length(Rest),
+  ok = instrument_admission:release(?ADMISSION, Taken),
+  {Chunk, State#state{queue = Rest, queue_size = QueueSize - Taken}}.
 
 %% Apply the export outcome, reply to any queued flush callers, and kick off
 %% another export if new spans arrived during the in-flight one.
@@ -406,7 +456,6 @@ finalize_export(Outcome, NewExporterState, Inflight, State) ->
     monitor := MonRef} = Inflight,
   cancel_timer(KillTimer),
   erlang:demonitor(MonRef, [flush]),
-  lists:foreach(fun(F) -> gen_server:reply(F, ok) end, Froms),
   #state{max_batch_retries = MaxBatchRetries,
          retry_attempts = RetryAttempts,
          dropped_spans = Dropped} = State,
@@ -416,19 +465,35 @@ finalize_export(Outcome, NewExporterState, Inflight, State) ->
                Ok when Ok =:= ok; Ok =:= empty ->
                  Base#state{retry_spans = [], retry_attempts = 0};
                permanent ->
+                 ok = instrument_admission:record_drop(?ADMISSION, length(Spans)),
                  Base#state{retry_spans = [], retry_attempts = 0,
                             dropped_spans = Dropped + length(Spans)};
                retryable when RetryAttempts + 1 >= MaxBatchRetries ->
+                 ok = instrument_admission:record_drop(?ADMISSION, length(Spans)),
                  Base#state{retry_spans = [], retry_attempts = 0,
                             dropped_spans = Dropped + length(Spans)};
                retryable ->
                  Base#state{retry_spans = Spans,
                             retry_attempts = RetryAttempts + 1}
              end,
+  %% Flush callers wait until everything queued is exported, across chunks,
+  %% but no longer than one export timeout.
   case has_pending_spans(NewState) of
-    true -> start_async_export([], NewState);
-    false -> NewState
+    true ->
+      Now = erlang:monotonic_time(millisecond),
+      {Due, Keep} = lists:partition(fun({_, Deadline}) -> Deadline =< Now end, Froms),
+      reply_waiters(Due),
+      start_async_export(Keep, NewState);
+    false ->
+      reply_waiters(Froms),
+      NewState
   end.
+
+flush_waiter(From, #state{export_timeout = Timeout}) ->
+  {From, erlang:monotonic_time(millisecond) + Timeout}.
+
+reply_waiters(Waiters) ->
+  lists:foreach(fun({F, _}) -> gen_server:reply(F, ok) end, Waiters).
 
 %% Synchronously wait for any in-flight export to complete. Used by shutdown
 %% and terminate where we cannot return control to the main loop.
@@ -450,7 +515,7 @@ drain_inflight(#state{export_inflight = Inflight} = State) ->
   cancel_timer(KillTimer),
   erlang:demonitor(MonRef, [flush]),
   drain_ref_messages(Ref),
-  lists:foreach(fun(F) -> gen_server:reply(F, ok) end, Froms),
+  reply_waiters(Froms),
   {_Outcome, NewExporterState} = Result,
   _ = Spans,
   State#state{export_inflight = undefined,

@@ -524,6 +524,18 @@ force_flush(State) ->
     {ok, State}.
 ```
 
+### Exporting Outside the Server Process
+
+By default `export/2` runs inside the exporter server, so a slow call delays the next batch. If your exporter's state is not tied to the process that ran `init/1` (no raw file handles, no ports it owns), declare it safe to run elsewhere:
+
+```erlang
+-export([export_async/0]).
+
+export_async() -> true.
+```
+
+Exports then run in a separate process, one at a time, and are stopped after 30 seconds. The built-in OTLP exporters do this. Log exporters use the same callback.
+
 ## Batch Processing
 
 The exporter manager batches spans for efficient export.
@@ -533,8 +545,16 @@ The exporter manager batches spans for efficient export.
 Default settings:
 - **Batch size**: 512 spans
 - **Batch timeout**: 5000ms (5 seconds)
+- **Queue limit**: 2048 spans (`exporter_max_queue_size`; `log_exporter_max_queue_size` or `OTEL_BLRP_MAX_QUEUE_SIZE` for logs)
 
-Spans are exported when either threshold is reached.
+Spans are exported when either threshold is reached. When the queue is full, for example while a collector is unreachable, new spans are dropped instead of piling up in memory. Check what was dropped:
+
+```erlang
+#{queued := Queued, dropped := Dropped} = instrument_exporter:stats().
+#{dropped := LogsDropped} = instrument_log_exporter:stats().
+```
+
+Setting `OTEL_TRACES_EXPORTER` registers the batch span processor rather than this exporter manager; see [Sampling and Processing](sampling_and_processing.md). Its dropped spans are reported by `instrument_span_processor_batch:dropped_spans/0`.
 
 ### Manual Flush
 
@@ -809,9 +829,12 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 Configure endpoints via environment variables for flexibility across environments:
 
 ```bash
+export OTEL_TRACES_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4318"
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer token"
 ```
+
+With `OTEL_TRACES_EXPORTER` set, spans go through the batch span processor, tuned by the `OTEL_BSP_*` variables. When several exporters are listed, the first goes through the batch processor and the others through the exporter manager.
 
 ```erlang
 %% Initialize from environment

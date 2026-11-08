@@ -26,12 +26,9 @@ start(_StartType, _StartArgs) ->
     persistent_term:put('$instrument_exporters', []),
     case instrument_sup:start_link() of
         {ok, Pid} ->
-            %% Only register legacy exporters if no span processor is configured
-            %% to avoid dual export (spans exported by both paths)
-            case instrument_config:has_span_processor_config() of
-                true -> ok;
-                false -> instrument_config:auto_register_exporters()
-            end,
+            %% Traces go through the batch span processor; the span exporter
+            %% only gets extra trace exporters, so no span is exported twice.
+            instrument_config:auto_register_exporters(),
             instrument_config:auto_register_span_processor(),
             {ok, Pid};
         Error ->

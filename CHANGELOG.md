@@ -9,7 +9,30 @@ All notable changes to this project will be documented in this file.
   `flight_recorder_auto_enable` to `true` or call
   `instrument_flight_recorder:enable/0` to turn it on.
 
+### Changed
+- Setting `OTEL_TRACES_EXPORTER` (or the `span_exporter` application setting)
+  now sends spans through the batch span processor, as other OpenTelemetry
+  SDKs do. It used to go through the older exporter manager, which exported
+  inside its own process and queued without limit while a collector was slow
+  or down. `OTEL_BSP_*` settings apply without having to be set explicitly.
+- The span exporter manager is only called by the tracer while it has an
+  exporter registered, which makes span creation cheaper when it is idle and
+  avoids exporting spans twice when a processor is also configured.
+
 ### Fixed
+- The span and log exporter managers now drop spans and log records once 2048
+  are waiting, instead of letting their mailbox grow without limit while an
+  export is slow. Drops are reported by `stats/0`, and the limit is
+  configurable. OTLP exports run outside the manager process so retries no
+  longer block it.
+- The batch span processor drops spans past its queue size before they reach
+  its mailbox, sends at most `max_export_batch_size` spans per export, and
+  reports drops through `dropped_spans/0`.
+- `force_flush/0` and `shutdown/0` on the batch processor no longer time out
+  on the caller while an export is still allowed to run.
+- The simple and tail-sampling span processors no longer call their exporter
+  from many processes at once or rewrite its state in `persistent_term` on
+  every span; each exporter now runs in its own process.
 - The flight recorder's memory is now bounded. It used to copy every traced
   message, at full size, into worker mailboxes with no limit, so a busy
   traced process could grow memory quickly. Each worker now holds at most

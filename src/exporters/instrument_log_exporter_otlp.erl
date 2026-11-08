@@ -44,6 +44,12 @@
 
 %% Exporter callbacks
 -export([exporter_init/1, exporter_export/2, exporter_shutdown/1, exporter_force_flush/1]).
+-export([export_async/0]).
+
+%% @doc Exports run outside the log exporter server process: this exporter
+%% only holds connection settings, and network retries must not block it.
+-spec export_async() -> true.
+export_async() -> true.
 
 -include("instrument_otel.hrl").
 
