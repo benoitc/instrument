@@ -43,7 +43,8 @@
   %% OTLP temporality test (OTel spec compliance)
   otlp_temporality_export_test/1,
   %% Console exporter file output (regression for io_device unwrap bug)
-  console_exporter_file_output_test/1
+  console_exporter_file_output_test/1,
+  terminate_shuts_down_final_state/1
 ]).
 
 -include_lib("stdlib/include/assert.hrl").
@@ -79,7 +80,8 @@ all() ->
     %% OTLP temporality test (OTel spec compliance)
     otlp_temporality_export_test,
     %% Console exporter file output (regression for io_device unwrap bug)
-    console_exporter_file_output_test
+    console_exporter_file_output_test,
+    terminate_shuts_down_final_state
   ].
 
 init_per_suite(Config) ->
@@ -655,3 +657,30 @@ console_exporter_file_output_test(_Config) ->
   ?assertNotEqual(nomatch, binary:match(Bin, <<"my_counter">>)),
   _ = file:delete(Path),
   ok.
+
+%% terminate/2 must shut exporters down with the state returned by the final
+%% export, not the state from before it.
+terminate_shuts_down_final_state(_Config) ->
+  Parent = self(),
+  ok = meck:new(stateful_metrics_exporter, [non_strict]),
+  try
+    ok = meck:expect(stateful_metrics_exporter, exporter_init, fun(_) -> {ok, 0} end),
+    ok = meck:expect(stateful_metrics_exporter, exporter_export,
+                     fun(_Metrics, N) -> {ok, N + 1} end),
+    ok = meck:expect(stateful_metrics_exporter, exporter_shutdown,
+                     fun(N) -> Parent ! {shutdown_state, N}, ok end),
+    ok = instrument_metrics_exporter:register(#{module => stateful_metrics_exporter}),
+    Counter = instrument_metric:new_counter(terminate_state_counter, [{help, "t"}]),
+    ok = instrument_metric:inc_counter(Counter),
+    State = sys:get_state(instrument_metrics_exporter),
+    %% Run the callback on a copy of the live state; the server keeps running.
+    ok = instrument_metrics_exporter:terminate(shutdown, State),
+    receive
+      {shutdown_state, N} -> ?assertEqual(1, N)
+    after 1000 ->
+      ct:fail(no_shutdown)
+    end,
+    ok = instrument_metrics_exporter:unregister(stateful_metrics_exporter)
+  after
+    meck:unload(stateful_metrics_exporter)
+  end.
