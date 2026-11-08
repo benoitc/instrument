@@ -110,6 +110,8 @@ init([]) ->
   %% lifetime instead of being lazily created (and orphaned) by whatever
   %% transient process first records a histogram.
   ok = instrument_exemplar:init_table(),
+  %% Callbacks registered for several observable instruments.
+  ok = instrument_meter:init_callback_table(),
   %% A registry restart is a clean slate: erase any stale instrument-owned
   %% persistent_term entries left by a previous incarnation so get_instrument/1
   %% returns undefined and create_* re-registers. instrument_series:init/0
@@ -174,6 +176,7 @@ do_delete_all() ->
   %% Re-establish a clean series store: re-mint the family-seq ref the sweep
   %% just erased and drop any arbiter rows the teardown chain missed.
   ok = instrument_series:reset(),
+  ok = instrument_meter:clear_callbacks(),
   %% Clear label accounting
   case ets:info(?LABEL_COUNTS_TABLE, name) of
     undefined -> ok;

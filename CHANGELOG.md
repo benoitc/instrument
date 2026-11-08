@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [2.0.0] - Unreleased
 
+### Added
+- One callback can now feed several observable instruments. When several
+  metrics come from the same expensive source, such as one RPC returning all
+  queue statistics, the source is read once per collection instead of once
+  per instrument. Observable instruments can also be created with options
+  (description, unit) and no callback of their own, to be fed this way.
+
 ### Breaking
 - Labeled meter metrics now export under the instrument's own name, with the
   attributes as labels. A counter `requests` written with `method` and
