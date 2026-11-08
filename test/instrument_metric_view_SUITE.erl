@@ -279,12 +279,18 @@ histogram_view_boundaries_test(_Config) ->
   ok = instrument_meter:record(Histogram, 25.0),
   ok = instrument_meter:record(Histogram, 75.0),
 
-  %% Get the underlying metric and check boundaries
-  #otel_instrument{handle = Handle} = Histogram,
-  ActualBoundaries = instrument_histogram:get_bucket_boundaries(Handle),
-
-  %% Verify view boundaries were used
-  ?assertEqual(CustomBoundaries, ActualBoundaries),
+  %% The meter handle no longer carries the underlying #metric{} (it is just
+  %% the series-store RegName), so verify the view boundaries were applied by
+  %% the rendered exposition: the custom bucket bounds appear and the OTel
+  %% defaults do not.
+  Output = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"view_bounded_hist_bucket{le=\"5.0\"}">>)),
+  ?assertNotEqual(nomatch,
+                  binary:match(Output, <<"view_bounded_hist_bucket{le=\"100.0\"}">>)),
+  %% A default-boundary bucket (0.005) must NOT be present for this histogram.
+  ?assertEqual(nomatch,
+               binary:match(Output, <<"view_bounded_hist_bucket{le=\"0.005\"}">>)),
 
   %% Cleanup
   ok = instrument_meter:unregister_instrument(<<"view_bounded_hist">>),

@@ -18,10 +18,16 @@ content_type() ->
 %% @doc Formats all registered metrics in Prometheus text exposition format
 -spec format() -> binary().
 format() ->
+  %% Run observable callbacks first so their values are current for this scrape
+  %% (removes the stale-observable footgun for Prometheus-only deployments).
+  ok = instrument_meter:collect_observables(),
   Metrics = instrument_registry:collect_all(),
   iolist_to_binary([format_metric(M) || M <- Metrics]).
 
 -spec format_metric(map()) -> iolist().
+%% A family with no rows emits nothing (the phantom-zero series is gone).
+format_metric(#{data := []}) ->
+  [];
 format_metric(#{type := counter} = M) ->
   format_counter(M);
 format_metric(#{type := gauge} = M) ->
@@ -41,15 +47,16 @@ format_counter(#{name := Name, help := Help, val := Val}) ->
     <<"# TYPE ">>, TotalName, <<" counter\n">>,
     TotalName, <<" ">>, format_value(Val), <<"\n">>
   ];
-%% Counter vec with labels
-format_counter(#{name := Name, help := Help, labels := Labels, data := Data}) ->
+%% Counter family with labels (one row per live label set; each row padded
+%% against the family-union label set, absent keys rendered as "").
+format_counter(#{name := Name, help := Help, labels := Union, data := Data}) ->
   NameBin = format_name(Name),
   TotalName = <<NameBin/binary, "_total">>,
   [
     <<"# HELP ">>, TotalName, <<" ">>, escape_help(Help), <<"\n">>,
     <<"# TYPE ">>, TotalName, <<" counter\n">>,
-    [format_labeled_value(TotalName, Labels, LabelVals, Val)
-     || {_LabelNames, LabelVals, Val} <- Data]
+    [format_value_pairs(TotalName, pad_row(Union, RowNames, RowVals), Val)
+     || {RowNames, RowVals, Val} <- Data]
   ].
 
 -spec format_gauge(map()) -> iolist().
@@ -61,14 +68,14 @@ format_gauge(#{name := Name, help := Help, val := Val}) ->
     <<"# TYPE ">>, NameBin, <<" gauge\n">>,
     NameBin, <<" ">>, format_value(Val), <<"\n">>
   ];
-%% Gauge vec with labels
-format_gauge(#{name := Name, help := Help, labels := Labels, data := Data}) ->
+%% Gauge family with labels (per-row padded against the family union).
+format_gauge(#{name := Name, help := Help, labels := Union, data := Data}) ->
   NameBin = format_name(Name),
   [
     <<"# HELP ">>, NameBin, <<" ">>, escape_help(Help), <<"\n">>,
     <<"# TYPE ">>, NameBin, <<" gauge\n">>,
-    [format_labeled_value(NameBin, Labels, LabelVals, Val)
-     || {_LabelNames, LabelVals, Val} <- Data]
+    [format_value_pairs(NameBin, pad_row(Union, RowNames, RowVals), Val)
+     || {RowNames, RowVals, Val} <- Data]
   ].
 
 -spec format_histogram(map()) -> iolist().
@@ -83,23 +90,23 @@ format_histogram(#{name := Name, help := Help, count := Count, sum := Sum, bucke
     NameBin, <<"_sum ">>, format_value(Sum), <<"\n">>,
     NameBin, <<"_count ">>, format_value(Count), <<"\n">>
   ];
-%% Histogram vec with labels
-format_histogram(#{name := Name, help := Help, labels := Labels, data := Data}) ->
+%% Histogram family with labels (per-row padded against the family union).
+format_histogram(#{name := Name, help := Help, labels := Union, data := Data}) ->
   NameBin = format_name(Name),
   [
     <<"# HELP ">>, NameBin, <<" ">>, escape_help(Help), <<"\n">>,
     <<"# TYPE ">>, NameBin, <<" histogram\n">>,
-    [format_histogram_data(NameBin, Labels, LabelVals, Val)
-     || {_LabelNames, LabelVals, Val} <- Data]
+    [format_histogram_data(NameBin, pad_row(Union, RowNames, RowVals), Val)
+     || {RowNames, RowVals, Val} <- Data]
   ].
 
--spec format_histogram_data(binary(), list(), list(), map()) -> iolist().
-format_histogram_data(Name, Labels, LabelVals, #{count := Count, sum := Sum, buckets := Buckets}) ->
+-spec format_histogram_data(binary(), list(), map()) -> iolist().
+format_histogram_data(Name, LabelPairs, #{count := Count, sum := Sum, buckets := Buckets}) ->
   [
-    format_histogram_buckets(Name, lists:zip(Labels, LabelVals), Buckets),
-    format_histogram_bucket_inf(Name, lists:zip(Labels, LabelVals), Count),
-    format_labeled_value(<<Name/binary, "_sum">>, Labels, LabelVals, Sum),
-    format_labeled_value(<<Name/binary, "_count">>, Labels, LabelVals, Count)
+    format_histogram_buckets(Name, LabelPairs, Buckets),
+    format_histogram_bucket_inf(Name, LabelPairs, Count),
+    format_value_pairs(<<Name/binary, "_sum">>, LabelPairs, Sum),
+    format_value_pairs(<<Name/binary, "_count">>, LabelPairs, Count)
   ].
 
 -spec format_histogram_buckets(binary(), list(), list()) -> iolist().
@@ -130,10 +137,19 @@ format_bucket_le(Le) when is_float(Le) ->
 format_bucket_le(Le) when is_integer(Le) ->
   integer_to_binary(Le).
 
--spec format_labeled_value(binary(), list(), list(), number()) -> iolist().
-format_labeled_value(Name, Labels, LabelVals, Val) ->
-  LabelPairs = lists:zip(Labels, LabelVals),
+-spec format_value_pairs(binary(), list(), number()) -> iolist().
+format_value_pairs(Name, LabelPairs, Val) ->
   [Name, format_labels(LabelPairs), <<" ">>, format_value(Val), <<"\n">>].
+
+%% Pad a row's own label names/values against the family union; keys the row
+%% does not carry render as empty strings. Fast clause: the row's names ARE the
+%% union (homogeneous family / single key-set), so just zip.
+-spec pad_row(list(), list(), list()) -> [{term(), term()}].
+pad_row(Union, Union, Vals) ->
+  lists:zip(Union, Vals);
+pad_row(Union, Names, Vals) ->
+  Pairs = maps:from_list(lists:zip(Names, Vals)),
+  [{L, maps:get(L, Pairs, <<>>)} || L <- Union].
 
 -spec format_labels(list()) -> iolist() | binary().
 format_labels([]) ->
@@ -150,7 +166,6 @@ format_label_pair(Key, Value) ->
 
 -spec format_name(atom() | list() | binary() | tuple()) -> binary().
 format_name({otel, Name}) when is_binary(Name) -> Name;
-format_name({otel_vec, Name}) when is_binary(Name) -> Name;
 format_name(Name) when is_atom(Name) ->
   atom_to_binary(Name, utf8);
 format_name(Name) when is_list(Name) ->

@@ -5,11 +5,38 @@ All notable changes to this project will be documented in this file.
 ## [2.0.0] - Unreleased
 
 ### Breaking
+- Labeled meter metrics now export under the instrument's own name, with the
+  attributes as labels. A counter `requests` written with `method` and
+  `status` used to export as `requests_method_status_total`; it now exports as
+  `requests_total{method="...",status="..."}`. Dashboards and alerts that use
+  the old names must be updated. See the 2.0 migration guide.
+- Meter instruments no longer export a zero value before their first write.
+  Prometheus-style metrics created with the simple API still appear as soon as
+  they are created.
+- The cardinality limit now applies per metric. Before, each combination of
+  label keys under one instrument had its own limit, so one instrument could
+  hold several times the configured number of series.
+- `instrument_registry:lookup/1` returns metric metadata instead of the
+  internal metric record.
+- Observable callbacks must not call the Prometheus formatter or the OTLP
+  exporter: both now run the callbacks themselves, so doing so recurses.
 - The flight recorder is now disabled by default. Set
   `flight_recorder_auto_enable` to `true` or call
   `instrument_flight_recorder:enable/0` to turn it on.
 
 ### Changed
+- Creating an instrument or writing a new label set no longer goes through the
+  registry process and no longer triggers a garbage collection pass across the
+  whole VM. Bursts of new label values used to queue every writer behind the
+  registry and could bring the node down; they now complete quickly.
+- Writes with labels are about twice as fast. Meter writes without labels are
+  slower (tens of nanoseconds); the simple API keeps the fastest path for
+  unlabeled counters.
+- The Prometheus formatter runs observable callbacks before each scrape, so
+  Prometheus-only setups no longer serve stale observable values.
+- OTLP labeled counters and histograms now carry their start time.
+- Upgrading in place from 1.1.x cleans up the old internal state on first
+  start.
 - Setting `OTEL_TRACES_EXPORTER` (or the `span_exporter` application setting)
   now sends spans through the batch span processor, as other OpenTelemetry
   SDKs do. It used to go through the older exporter manager, which exported
@@ -20,6 +47,8 @@ All notable changes to this project will be documented in this file.
   avoids exporting spans twice when a processor is also configured.
 
 ### Fixed
+- Label key sets such as `[a_b]` and `[a, b]` no longer collide. The second
+  one's writes used to be lost silently.
 - The span and log exporter managers now drop spans and log records once 2048
   are waiting, instead of letting their mailbox grow without limit while an
   export is slow. Drops are reported by `stats/0`, and the limit is
@@ -59,6 +88,12 @@ All notable changes to this project will be documented in this file.
 - The file log exporter no longer drops the batch it receives right after
   reopening its file.
 
+### Removed
+- `instrument_registry:lookup_label/2`, `cache_label/3`,
+  `create_vector_metric/2` and `get_or_create_overflow/1`.
+- `instrument_lib:table/0` and `tables/0`, along with the per-scheduler
+  registry tables.
+- `instrument_vector:collect/1`.
 
 ## [1.1.5] - 2026-07-18
 

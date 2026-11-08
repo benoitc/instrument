@@ -23,6 +23,7 @@
   register_duplicate_test/1,
   unregister_all_test/1,
   lookup_test/1,
+  lookup_simple_metric_returns_family/1,
   collect_all_test/1,
   collect_all_skips_collectorless_test/1,
   concurrent_registration_test/1,
@@ -35,6 +36,7 @@ all() ->
     register_duplicate_test,
     unregister_all_test,
     lookup_test,
+    lookup_simple_metric_returns_family,
     collect_all_test,
     collect_all_skips_collectorless_test,
     concurrent_registration_test,
@@ -116,14 +118,14 @@ unregister_all_test(_Config) ->
   end, lists:seq(1, 10)),
 
   %% Verify they exist
-  Names = persistent_term:get(instrument_metrics, []),
+  Names = registered_names(),
   ?assertEqual(10, length(Names)),
 
   %% Unregister all
   ok = instrument_registry:unregister_all(),
 
   %% Verify all are gone
-  ?assertEqual([], persistent_term:get(instrument_metrics, [])),
+  ?assertEqual([], registered_names()),
   ok.
 
 lookup_test(_Config) ->
@@ -140,6 +142,12 @@ lookup_test(_Config) ->
   ok = instrument_registry:register(Metric),
 
   ?assertEqual(Metric, instrument_registry:lookup(lookup_test_metric)),
+  ok.
+
+lookup_simple_metric_returns_family(_Config) ->
+  _ = instrument_metric:new_counter(lookup_fam_counter, <<"family lookup">>),
+  Fam = instrument_registry:lookup(lookup_fam_counter),
+  ?assertMatch(#family{kind = counter, help = <<"family lookup">>}, Fam),
   ok.
 
 collect_all_test(_Config) ->
@@ -221,7 +229,7 @@ concurrent_registration_test(_Config) ->
   end, Results),
 
   %% Verify all metrics are registered
-  Names = persistent_term:get(instrument_metrics, []),
+  Names = registered_names(),
   ?assertEqual(NumProcesses, length(Names)),
 
   %% Verify no duplicates
@@ -259,7 +267,7 @@ concurrent_registration_stress_test(_Config) ->
 
   %% Verify correct number of metrics registered
   ExpectedCount = NumProcesses * IterationsPerProcess,
-  Names = persistent_term:get(instrument_metrics, []),
+  Names = registered_names(),
   ?assertEqual(ExpectedCount, length(Names)),
 
   %% Verify no duplicates
@@ -267,3 +275,19 @@ concurrent_registration_stress_test(_Config) ->
 
   ct:pal("Stress test: ~p metrics registered successfully", [ExpectedCount]),
   ok.
+
+%% Enumerate the names of all registered series-store families by walking the
+%% family-sequence chain in persistent_term — the replacement for the deleted
+%% `instrument_metrics' index that these tests used to read directly.
+registered_names() ->
+  case persistent_term:get(instrument_family_seq, undefined) of
+    undefined -> [];
+    FamSeq ->
+      N = atomics:get(FamSeq, 1),
+      lists:foldl(fun(K, Acc) ->
+        case persistent_term:get({instrument_family_idx, K}, undefined) of
+          undefined -> Acc;
+          Name -> [Name | Acc]
+        end
+      end, [], lists:seq(1, N))
+  end.
