@@ -17,6 +17,7 @@ Instrument is an Erlang library providing high-performance metrics and tracing c
 | Observable Counter | Stable | Async counter with callback |
 | Observable Gauge | Stable | Async gauge with callback |
 | Observable UpDownCounter | Stable | Async up/down counter with callback |
+| Multi-instrument Callbacks | Stable | One callback observes several observable instruments |
 | Metric Views | Stable | Transform and filter metrics during export |
 | Attribute Support | Stable | Key-value dimensions for metrics |
 
@@ -74,7 +75,7 @@ Instrument is an Erlang library providing high-performance metrics and tracing c
 | UpDownCounter | Full | Bidirectional counter |
 | Histogram | Full | Configurable bucket boundaries |
 | Gauge | Full | Point-in-time values |
-| Observable Instruments | Full | Callback-based async instruments |
+| Observable Instruments | Full | Callback-based async instruments, including one callback for several instruments |
 | Attributes | Full | Key-value dimensions |
 | Views | Full | Transform metrics during collection |
 

@@ -383,24 +383,83 @@ Creates a gauge instrument.
 
 #### Observable Instruments
 
+Observable instruments are read when metrics are collected, not written by your code. Use them for values you can only sample, such as memory use or queue depth.
+
 ```erlang
-%% Observable counter (read-only, callback-based)
-instrument_meter:create_observable_counter(Meter, Name, Callback).
-
-%% Observable gauge
-instrument_meter:create_observable_gauge(Meter, Name, Callback).
-
-%% Observable up-down counter
-instrument_meter:create_observable_up_down_counter(Meter, Name, Callback).
+instrument_meter:create_observable_counter(Meter, Name, CallbackOrOpts).
+instrument_meter:create_observable_gauge(Meter, Name, CallbackOrOpts).
+instrument_meter:create_observable_up_down_counter(Meter, Name, CallbackOrOpts).
 ```
 
-**Example:**
+The third argument is one of:
+
+- `fun() -> number()`: returns one value, no attributes.
+- `fun(Observe) -> any()`: calls `Observe(Value, Attributes)` once per series.
+- an options map (`description`, `unit`): no callback of its own; feed the instrument with `register_callback/2`.
+
+Callbacks run on every collection: before each OTLP export, and on every `instrument_prometheus:format/0` call. Don't call the formatter or an exporter from a callback. A callback that crashes is skipped for that collection.
+
+**Single value:**
 
 ```erlang
 instrument_meter:create_observable_gauge(Meter, <<"memory_usage">>, fun() ->
     erlang:memory(total)
 end).
 ```
+
+**One series per attribute set:**
+
+```erlang
+instrument_meter:create_observable_gauge(Meter, <<"process_memory">>, fun(Observe) ->
+    Observe(erlang:memory(processes), #{kind => <<"processes">>}),
+    Observe(erlang:memory(ets), #{kind => <<"ets">>})
+end).
+```
+
+#### Feed several instruments from one callback
+
+Use `register_callback/2` when several observable instruments come from the same source, for example one RPC that returns all queue statistics. The callback runs once per collection, so the source is read once instead of once per instrument.
+
+```erlang
+-spec register_callback([Instrument], fun((Observe) -> any())) ->
+    {ok, reference()} | {error, term()} when
+    Observe :: fun((Instrument | Name, number(), map()) -> ok | {error, term()}).
+-spec unregister_callback(reference()) -> ok.
+```
+
+1. Create the instruments with an options map instead of a callback:
+
+```erlang
+Messages = instrument_meter:create_observable_gauge(Meter, <<"queue_messages">>,
+    #{description => <<"Messages ready">>}),
+Consumers = instrument_meter:create_observable_gauge(Meter, <<"queue_consumers">>,
+    #{description => <<"Active consumers">>}).
+```
+
+2. Register one callback for all of them:
+
+```erlang
+{ok, Ref} = instrument_meter:register_callback([Messages, Consumers], fun(Observe) ->
+    Stats = my_broker:queue_stats(),
+    lists:foreach(fun(#{name := Q, messages := M, consumers := C}) ->
+        Observe(Messages, M, #{queue => Q}),
+        Observe(Consumers, C, #{queue => Q})
+    end, Stats)
+end).
+```
+
+3. Remove it when you no longer need it:
+
+```erlang
+ok = instrument_meter:unregister_callback(Ref).
+```
+
+Notes:
+
+- `Observe` accepts the instrument record or its name. It returns `{error, unknown_instrument}` for an instrument not passed to `register_callback/2` or since unregistered, and `{error, invalid_observation}` for a value that is not a number.
+- `register_callback/2` returns `{error, {not_observable, Name}}` for a synchronous instrument and `{error, no_instruments}` for an empty list.
+- Each registered callback runs in a `try`: if one crashes, values it observed before the crash are kept and the other callbacks still run.
+- An instrument can have its own callback and also appear in registered callbacks.
 
 ### Recording Values
 

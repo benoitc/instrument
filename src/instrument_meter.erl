@@ -55,6 +55,12 @@
   set/3
 ]).
 
+%% Callbacks registered for several observable instruments
+-export([
+  register_callback/2,
+  unregister_callback/1
+]).
+
 %% Utility
 -export([
   get_instrument/1,
@@ -64,8 +70,16 @@
   unregister_all_instruments/0
 ]).
 
+%% Internal: callback table lifecycle, driven by instrument_registry
+-export([
+  init_callback_table/0,
+  clear_callbacks/0
+]).
+
 -include("instrument.hrl").
 -include("instrument_otel.hrl").
+
+-define(CALLBACKS, instrument_observable_callbacks).
 
 -type meter() :: #meter{}.
 -type instrument() :: #otel_instrument{}.
@@ -76,7 +90,9 @@
   temporality => cumulative | delta  %% aggregation temporality (default: cumulative)
 }.
 
--export_type([meter/0, instrument/0, instrument_opts/0]).
+-type observe_fun() :: fun((instrument() | binary() | atom(), number(), map()) -> ok | {error, term()}).
+
+-export_type([meter/0, instrument/0, instrument_opts/0, observe_fun/0]).
 
 %% ============================================================================
 %% MeterProvider API
@@ -158,29 +174,41 @@ create_gauge(Meter, Name) ->
 create_gauge(Meter, Name, Opts) ->
   create_instrument(Meter, Name, gauge, Opts).
 
-%% @doc Creates an ObservableCounter with a callback.
-%% Callback can be:
-%% - 0-arity: fun() -> number() - returns a single value
-%% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
--spec create_observable_counter(meter(), binary() | atom(), fun()) -> instrument().
+%% @doc Creates an ObservableCounter.
+%% The third argument is either a callback or an options map:
+%% - 0-arity fun: fun() -> number() - returns a single value
+%% - 1-arity fun: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+%% - map (description, unit): no callback of its own; feed it from a callback
+%%   passed to register_callback/2
+-spec create_observable_counter(meter(), binary() | atom(), fun() | instrument_opts()) -> instrument().
 create_observable_counter(Meter, Name, Callback) when is_function(Callback) ->
-  create_observable_instrument(Meter, Name, observable_counter, Callback).
+  create_observable_instrument(Meter, Name, observable_counter, Callback, #{});
+create_observable_counter(Meter, Name, Opts) when is_map(Opts) ->
+  create_observable_instrument(Meter, Name, observable_counter, undefined, Opts).
 
-%% @doc Creates an ObservableGauge with a callback.
-%% Callback can be:
-%% - 0-arity: fun() -> number() - returns a single value
-%% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
--spec create_observable_gauge(meter(), binary() | atom(), fun()) -> instrument().
+%% @doc Creates an ObservableGauge.
+%% The third argument is either a callback or an options map:
+%% - 0-arity fun: fun() -> number() - returns a single value
+%% - 1-arity fun: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+%% - map (description, unit): no callback of its own; feed it from a callback
+%%   passed to register_callback/2
+-spec create_observable_gauge(meter(), binary() | atom(), fun() | instrument_opts()) -> instrument().
 create_observable_gauge(Meter, Name, Callback) when is_function(Callback) ->
-  create_observable_instrument(Meter, Name, observable_gauge, Callback).
+  create_observable_instrument(Meter, Name, observable_gauge, Callback, #{});
+create_observable_gauge(Meter, Name, Opts) when is_map(Opts) ->
+  create_observable_instrument(Meter, Name, observable_gauge, undefined, Opts).
 
-%% @doc Creates an ObservableUpDownCounter with a callback.
-%% Callback can be:
-%% - 0-arity: fun() -> number() - returns a single value
-%% - 1-arity: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
--spec create_observable_up_down_counter(meter(), binary() | atom(), fun()) -> instrument().
+%% @doc Creates an ObservableUpDownCounter.
+%% The third argument is either a callback or an options map:
+%% - 0-arity fun: fun() -> number() - returns a single value
+%% - 1-arity fun: fun(Observe) -> ok - calls Observe(Value, Attrs) for each observation
+%% - map (description, unit): no callback of its own; feed it from a callback
+%%   passed to register_callback/2
+-spec create_observable_up_down_counter(meter(), binary() | atom(), fun() | instrument_opts()) -> instrument().
 create_observable_up_down_counter(Meter, Name, Callback) when is_function(Callback) ->
-  create_observable_instrument(Meter, Name, observable_up_down_counter, Callback).
+  create_observable_instrument(Meter, Name, observable_up_down_counter, Callback, #{});
+create_observable_up_down_counter(Meter, Name, Opts) when is_map(Opts) ->
+  create_observable_instrument(Meter, Name, observable_up_down_counter, undefined, Opts).
 
 %% ============================================================================
 %% Operations
@@ -283,33 +311,128 @@ resolve_instrument(Name) ->
 
 %% @doc Invokes all observable instrument callbacks.
 %% This should be called before metrics collection to update observable values.
+%% Runs each instrument's own callback, then each callback registered with
+%% register_callback/2, once per call.
 -spec collect_observables() -> ok.
 collect_observables() ->
   lists:foreach(fun collect_observable/1, list_instruments()),
+  lists:foreach(fun run_registered_callback/1, registered_callbacks()),
   ok.
 
 collect_observable(#otel_instrument{kind = Kind,
                                     handle = {observable, RegName, Callback}})
-    when Kind =:= observable_counter;
-         Kind =:= observable_gauge;
-         Kind =:= observable_up_down_counter ->
+    when is_function(Callback),
+         (Kind =:= observable_counter orelse
+          Kind =:= observable_gauge orelse
+          Kind =:= observable_up_down_counter) ->
   try
     case erlang:fun_info(Callback, arity) of
       {arity, 0} ->
         %% Legacy 0-arity callback — returns a single absolute value.
-        Value = Callback(),
-        do_write(RegName, #{}, set_fun(Value));
+        observe(RegName, Callback(), #{});
       {arity, 1} ->
         %% Observer-pattern callback — observes (Value, Attrs) tuples; each is
         %% an ordinary labeled write under the real instrument name.
-        Callback(fun(Value, ObsAttrs) ->
-          do_write(RegName, ObsAttrs, set_fun(Value))
-        end)
+        Callback(fun(Value, ObsAttrs) -> observe(RegName, Value, ObsAttrs) end)
     end
   catch
     _:_ -> ok
   end;
 collect_observable(_) ->
+  ok.
+
+%% One observation into an observable instrument's series.
+observe(RegName, Value, Attrs) when is_number(Value), is_map(Attrs) ->
+  do_write(RegName, Attrs, set_fun(Value));
+observe(_RegName, _Value, _Attrs) ->
+  {error, invalid_observation}.
+
+%% ============================================================================
+%% Callbacks registered for several observable instruments
+%% ============================================================================
+
+%% @doc Registers one callback that observes several observable instruments.
+%% The callback runs once per collection and receives an Observe function:
+%% Observe(Instrument, Value, Attrs) records Value for Instrument, which may be
+%% given as the instrument record or its name. Observations for instruments
+%% not passed here, or no longer registered, are ignored. Use it when several
+%% instruments derive from one expensive source: fetch it once in the callback
+%% and observe every instrument from the result.
+-spec register_callback([instrument()], fun((observe_fun()) -> term())) ->
+  {ok, reference()} | {error, term()}.
+register_callback([], _Callback) ->
+  {error, no_instruments};
+register_callback(Instruments, Callback)
+    when is_list(Instruments), is_function(Callback, 1) ->
+  case callback_names(Instruments, []) of
+    {ok, Names} ->
+      Ref = make_ref(),
+      true = ets:insert(?CALLBACKS, {Ref, Names, Callback}),
+      {ok, Ref};
+    {error, _} = Error ->
+      Error
+  end;
+register_callback(_Instruments, _Callback) ->
+  {error, badarg}.
+
+%% @doc Removes a callback registered with register_callback/2.
+-spec unregister_callback(reference()) -> ok.
+unregister_callback(Ref) when is_reference(Ref) ->
+  _ = instrument_lib:safe_apply(ets, delete, [?CALLBACKS, Ref], true),
+  ok.
+
+callback_names([#otel_instrument{name = Name, kind = Kind} | Rest], Acc)
+    when Kind =:= observable_counter;
+         Kind =:= observable_gauge;
+         Kind =:= observable_up_down_counter ->
+  callback_names(Rest, [Name | Acc]);
+callback_names([#otel_instrument{name = Name} | _], _Acc) ->
+  {error, {not_observable, Name}};
+callback_names([Other | _], _Acc) ->
+  {error, {not_an_instrument, Other}};
+callback_names([], Acc) ->
+  {ok, lists:usort(Acc)}.
+
+registered_callbacks() ->
+  instrument_lib:safe_call(fun() -> ets:tab2list(?CALLBACKS) end, []).
+
+run_registered_callback({_Ref, Names, Callback}) ->
+  Observe = fun(Target, Value, Attrs) ->
+    observe_registered(Names, target_name(Target), Value, Attrs)
+  end,
+  try Callback(Observe) catch _:_ -> ok end.
+
+observe_registered(_Names, undefined, _Value, _Attrs) ->
+  {error, unknown_instrument};
+observe_registered(Names, Name, Value, Attrs) ->
+  case lists:member(Name, Names) andalso get_instrument(Name) of
+    #otel_instrument{handle = {observable, RegName, _}} ->
+      observe(RegName, Value, Attrs);
+    _ ->
+      {error, unknown_instrument}
+  end.
+
+target_name(#otel_instrument{name = Name}) -> Name;
+target_name(Name) when is_binary(Name) -> Name;
+target_name(Name) when is_atom(Name) -> atom_to_binary(Name, utf8);
+target_name(_) -> undefined.
+
+%% @private Created by instrument_registry:init/1 so the table lives as long
+%% as the registry.
+-spec init_callback_table() -> ok.
+init_callback_table() ->
+  case ets:info(?CALLBACKS, name) of
+    undefined ->
+      _ = ets:new(?CALLBACKS, [set, public, named_table, {read_concurrency, true}]),
+      ok;
+    _ ->
+      ok
+  end.
+
+%% @private Drops every registered callback (registry unregister_all).
+-spec clear_callbacks() -> ok.
+clear_callbacks() ->
+  _ = instrument_lib:safe_apply(ets, delete_all_objects, [?CALLBACKS], true),
   ok.
 
 %% Observable callbacks report absolute values (set-semantics) into gauge-shaped
@@ -374,25 +497,29 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_m
       Existing
   end.
 
-create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_atom(Name) ->
-  create_observable_instrument(Meter, atom_to_binary(Name, utf8), Kind, Callback);
-create_observable_instrument(#meter{} = Meter, Name, Kind, Callback) when is_binary(Name), is_function(Callback) ->
-  %% Validate callback arity (0 or 1)
-  Arity = erlang:fun_info(Callback, arity),
-  case Arity of
-    {arity, 0} -> ok;
-    {arity, 1} -> ok;
-    _ -> error({invalid_callback_arity, Arity})
+create_observable_instrument(#meter{} = Meter, Name, Kind, Callback, Opts) when is_atom(Name) ->
+  create_observable_instrument(Meter, atom_to_binary(Name, utf8), Kind, Callback, Opts);
+create_observable_instrument(#meter{} = Meter, Name, Kind, Callback, Opts) when is_binary(Name) ->
+  %% Validate callback arity (0 or 1); undefined means no callback of its own.
+  case Callback of
+    undefined -> ok;
+    _ ->
+      case erlang:fun_info(Callback, arity) of
+        {arity, 0} -> ok;
+        {arity, 1} -> ok;
+        Arity -> error({invalid_callback_arity, Arity})
+      end
   end,
   case get_instrument(Name) of
     undefined ->
       RegName = {otel, Name},
-      register_family(RegName, Kind, undefined, #{}),
+      Description = maps:get(description, Opts, undefined),
+      register_family(RegName, Kind, Description, Opts),
       Instrument = #otel_instrument{
         name = Name,
         kind = Kind,
-        description = undefined,
-        unit = undefined,
+        description = Description,
+        unit = maps:get(unit, Opts, undefined),
         meter = Meter,
         handle = {observable, RegName, Callback}
       },

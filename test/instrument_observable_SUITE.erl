@@ -31,7 +31,16 @@
   observable_multi_attribute_test/1,
   observable_counter_unlabeled_renders_as_counter/1,
   observable_counter_renders_as_counter/1,
-  observable_counter_with_multiple_label_schemas/1
+  observable_counter_with_multiple_label_schemas/1,
+  %% Callbacks registered for several instruments
+  batch_callback_feeds_several_instruments/1,
+  batch_callback_attributes_use_real_name/1,
+  batch_callback_unregister_stops_calls/1,
+  batch_callback_ignores_unregistered_target/1,
+  batch_callback_error_isolated/1,
+  batch_callback_skips_removed_instrument/1,
+  batch_callback_rejects_bad_instruments/1,
+  observable_with_opts_has_no_own_callback/1
 ]).
 
 all() ->
@@ -48,7 +57,16 @@ all() ->
     observable_multi_attribute_test,
     observable_counter_unlabeled_renders_as_counter,
     observable_counter_renders_as_counter,
-    observable_counter_with_multiple_label_schemas
+    observable_counter_with_multiple_label_schemas,
+    %% Callbacks registered for several instruments
+    batch_callback_feeds_several_instruments,
+    batch_callback_attributes_use_real_name,
+    batch_callback_unregister_stops_calls,
+    batch_callback_ignores_unregistered_target,
+    batch_callback_error_isolated,
+    batch_callback_skips_removed_instrument,
+    batch_callback_rejects_bad_instruments,
+    observable_with_opts_has_no_own_callback
   ].
 
 init_per_suite(Config) ->
@@ -416,3 +434,153 @@ observable_counter_with_multiple_label_schemas(_Config) ->
   ?assertEqual(nomatch,
                binary:match(Output, <<"obs_counter_multi_schema_a_b_total">>)),
   ok.
+
+%% ============================================================================
+%% Callbacks registered for several instruments
+%% ============================================================================
+
+%% One fetch per collection feeds a counter, a gauge and an up/down counter.
+batch_callback_feeds_several_instruments(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_feed_test">>),
+  C = instrument_meter:create_observable_counter(Meter, <<"batch_feed_counter">>, #{}),
+  G = instrument_meter:create_observable_gauge(Meter, <<"batch_feed_gauge">>, #{}),
+  U = instrument_meter:create_observable_up_down_counter(Meter, <<"batch_feed_updown">>, #{}),
+  Fetches = atomics:new(1, []),
+  {ok, Ref} = instrument_meter:register_callback([C, G, U], fun(Observe) ->
+    atomics:add(Fetches, 1, 1),
+    #{done := D, depth := Q, delta := X} = #{done => 10, depth => 3, delta => -2},
+    ok = Observe(C, D, #{}),
+    ok = Observe(G, Q, #{}),
+    ok = Observe(<<"batch_feed_updown">>, X, #{})
+  end),
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(1, atomics:get(Fetches, 1)),
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(2, atomics:get(Fetches, 1)),
+  Output = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_feed_counter_total 10.0">>)),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_feed_gauge 3.0">>)),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_feed_updown -2.0">>)),
+  ok = instrument_meter:unregister_callback(Ref).
+
+%% Attributes become labels under the instrument's own name.
+batch_callback_attributes_use_real_name(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_attr_test">>),
+  G = instrument_meter:create_observable_gauge(Meter, <<"batch_attr_queue">>, #{}),
+  {ok, Ref} = instrument_meter:register_callback([G], fun(Observe) ->
+    Observe(G, 4, #{queue => <<"orders">>}),
+    Observe(G, 9, #{queue => <<"billing">>})
+  end),
+  Output = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_attr_queue{queue=\"orders\"} 4.0">>)),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_attr_queue{queue=\"billing\"} 9.0">>)),
+  ?assertEqual(nomatch, binary:match(Output, <<"batch_attr_queue_queue">>)),
+  ok = instrument_meter:unregister_callback(Ref).
+
+batch_callback_unregister_stops_calls(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_unreg_test">>),
+  G = instrument_meter:create_observable_gauge(Meter, <<"batch_unreg_gauge">>, #{}),
+  Calls = atomics:new(1, []),
+  {ok, Ref} = instrument_meter:register_callback([G], fun(Observe) ->
+    atomics:add(Calls, 1, 1),
+    Observe(G, 1, #{})
+  end),
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(1, atomics:get(Calls, 1)),
+  ok = instrument_meter:unregister_callback(Ref),
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(1, atomics:get(Calls, 1)),
+  %% Unregistering twice is harmless.
+  ok = instrument_meter:unregister_callback(Ref).
+
+%% A callback can only observe the instruments it was registered with.
+batch_callback_ignores_unregistered_target(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_target_test">>),
+  Mine = instrument_meter:create_observable_gauge(Meter, <<"batch_target_mine">>, #{}),
+  Other = instrument_meter:create_observable_gauge(Meter, <<"batch_target_other">>, #{}),
+  Self = self(),
+  {ok, Ref} = instrument_meter:register_callback([Mine], fun(Observe) ->
+    Self ! {results, Observe(Mine, 1, #{}), Observe(Other, 2, #{}),
+            Observe(<<"batch_target_missing">>, 3, #{}), Observe(Mine, not_a_number, #{})}
+  end),
+  ok = instrument_meter:collect_observables(),
+  receive
+    {results, R1, R2, R3, R4} ->
+      ?assertEqual(ok, R1),
+      ?assertEqual({error, unknown_instrument}, R2),
+      ?assertEqual({error, unknown_instrument}, R3),
+      ?assertEqual({error, invalid_observation}, R4)
+  after 1000 -> ct:fail(callback_not_invoked)
+  end,
+  Output = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_target_mine 1.0">>)),
+  ?assertEqual(nomatch, binary:match(Output, <<"batch_target_other">>)),
+  ok = instrument_meter:unregister_callback(Ref).
+
+%% A crashing callback keeps what it observed before the crash and does not
+%% stop other callbacks.
+batch_callback_error_isolated(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_error_test">>),
+  A = instrument_meter:create_observable_gauge(Meter, <<"batch_error_a">>, #{}),
+  B = instrument_meter:create_observable_gauge(Meter, <<"batch_error_b">>, #{}),
+  {ok, R1} = instrument_meter:register_callback([A], fun(Observe) ->
+    ok = Observe(A, 5, #{}),
+    error(boom)
+  end),
+  {ok, R2} = instrument_meter:register_callback([B], fun(Observe) ->
+    Observe(B, 6, #{})
+  end),
+  Output = instrument_prometheus:format(),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_error_a 5.0">>)),
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_error_b 6.0">>)),
+  ok = instrument_meter:unregister_callback(R1),
+  ok = instrument_meter:unregister_callback(R2).
+
+%% An instrument removed after registration is skipped; the others still work.
+batch_callback_skips_removed_instrument(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_removed_test">>),
+  Keep = instrument_meter:create_observable_gauge(Meter, <<"batch_removed_keep">>, #{}),
+  Gone = instrument_meter:create_observable_gauge(Meter, <<"batch_removed_gone">>, #{}),
+  Self = self(),
+  {ok, Ref} = instrument_meter:register_callback([Keep, Gone], fun(Observe) ->
+    Self ! {gone, Observe(Gone, 2, #{})},
+    Observe(Keep, 1, #{})
+  end),
+  ok = instrument_meter:unregister_instrument(<<"batch_removed_gone">>),
+  Output = instrument_prometheus:format(),
+  receive
+    {gone, R} -> ?assertEqual({error, unknown_instrument}, R)
+  after 1000 -> ct:fail(callback_not_invoked)
+  end,
+  ?assertNotEqual(nomatch, binary:match(Output, <<"batch_removed_keep 1.0">>)),
+  ?assertEqual(nomatch, binary:match(Output, <<"batch_removed_gone">>)),
+  ok = instrument_meter:unregister_callback(Ref).
+
+batch_callback_rejects_bad_instruments(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_reject_test">>),
+  Sync = instrument_meter:create_counter(Meter, <<"batch_reject_sync">>),
+  G = instrument_meter:create_observable_gauge(Meter, <<"batch_reject_gauge">>, #{}),
+  Cb = fun(_) -> ok end,
+  ?assertEqual({error, no_instruments}, instrument_meter:register_callback([], Cb)),
+  ?assertEqual({error, {not_observable, <<"batch_reject_sync">>}},
+               instrument_meter:register_callback([G, Sync], Cb)),
+  ?assertEqual({error, {not_an_instrument, <<"batch_reject_gauge">>}},
+               instrument_meter:register_callback([<<"batch_reject_gauge">>], Cb)),
+  ?assertEqual({error, badarg}, instrument_meter:register_callback([G], fun() -> ok end)),
+  ok.
+
+%% Created with an options map: no callback of its own, description kept,
+%% nothing exported until a registered callback observes it.
+observable_with_opts_has_no_own_callback(_Config) ->
+  Meter = instrument_meter:get_meter(<<"batch_opts_test">>),
+  G = instrument_meter:create_observable_gauge(Meter, <<"batch_opts_gauge">>,
+        #{description => <<"Queue depth">>, unit => <<"1">>}),
+  ?assertEqual(observable_gauge, G#otel_instrument.kind),
+  ?assertEqual(<<"Queue depth">>, G#otel_instrument.description),
+  ?assertEqual(<<"1">>, G#otel_instrument.unit),
+  ok = instrument_meter:collect_observables(),
+  ?assertEqual(nomatch, binary:match(instrument_prometheus:format(), <<"batch_opts_gauge ">>)),
+  {ok, Ref} = instrument_meter:register_callback([G], fun(Observe) -> Observe(G, 8, #{}) end),
+  ?assertNotEqual(nomatch,
+                  binary:match(instrument_prometheus:format(), <<"batch_opts_gauge 8.0">>)),
+  ok = instrument_meter:unregister_callback(Ref).
