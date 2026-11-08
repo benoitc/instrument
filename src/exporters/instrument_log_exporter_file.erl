@@ -42,6 +42,8 @@
 -include("instrument_otel.hrl").
 -include_lib("kernel/include/file.hrl").
 
+-define(COMPRESS_CHUNK_SIZE, 65536).
+
 -record(state, {
   path :: binary(),
   format = text :: text | json,
@@ -96,13 +98,12 @@ exporter_init(Config) ->
 
 %% @doc Exports log records to the file.
 -spec exporter_export([#log_record{}], #state{}) -> {ok, #state{}} | {error, term(), #state{}}.
-exporter_export(_LogRecords, #state{fd = undefined} = State) ->
-  %% File handle is undefined (e.g., after rotation failure), try to reopen
+exporter_export(LogRecords, #state{fd = undefined} = State) ->
+  %% File handle is undefined (e.g., after rotation failure): reopen, then
+  %% write this batch instead of dropping it.
   case open_file(State) of
     {ok, NewState} ->
-      %% Retry would require re-calling export, but we'd lose the records.
-      %% Return success with reopened state; next batch will work.
-      {ok, NewState};
+      exporter_export(LogRecords, NewState);
     {error, Reason} ->
       {error, {reopen_failed, Reason}, State}
   end;
@@ -228,19 +229,51 @@ numbered_path(BasePath, N, true) ->
 numbered_path(BasePath, N, false) ->
   BasePath ++ "." ++ integer_to_list(N).
 
+%% Gzip the rotated file in fixed-size chunks so memory use does not grow with
+%% the configured rotation size. The original is deleted only when the
+%% compressed copy is complete.
 compress_file(Path) ->
-  case file:read_file(Path) of
-    {ok, Data} ->
-      Compressed = zlib:gzip(Data),
-      GzPath = Path ++ ".gz",
-      case file:write_file(GzPath, Compressed) of
-        ok ->
-          file:delete(Path);
+  GzPath = Path ++ ".gz",
+  case file:open(Path, [read, raw, binary]) of
+    {ok, In} ->
+      Result = case file:open(GzPath, [write, raw, binary]) of
+        {ok, Out} ->
+          Z = zlib:open(),
+          try
+            ok = zlib:deflateInit(Z, default, deflated, 31, 8, default),
+            R = gzip_chunks(Z, In, Out),
+            ok = zlib:deflateEnd(Z),
+            R
+          catch
+            _:_ -> error
+          after
+            zlib:close(Z),
+            file:close(Out)
+          end;
         _ ->
-          ok
+          error
+      end,
+      file:close(In),
+      case Result of
+        ok -> file:delete(Path);
+        error -> file:delete(GzPath)
       end;
     _ ->
       ok
+  end.
+
+gzip_chunks(Z, In, Out) ->
+  case file:read(In, ?COMPRESS_CHUNK_SIZE) of
+    {ok, Data} ->
+      ok = file:write(Out, zlib:deflate(Z, Data)),
+      gzip_chunks(Z, In, Out);
+    eof ->
+      case file:write(Out, zlib:deflate(Z, <<>>, finish)) of
+        ok -> ok;
+        {error, _} -> error
+      end;
+    {error, _} ->
+      error
   end.
 
 format_log_record(LogRecord, text) ->
