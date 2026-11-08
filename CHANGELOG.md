@@ -20,6 +20,9 @@ All notable changes to this project will be documented in this file.
   internal metric record.
 - Observable callbacks must not call the Prometheus formatter or the OTLP
   exporter: both now run the callbacks themselves, so doing so recurses.
+- The flight recorder is now disabled by default. Set
+  `flight_recorder_auto_enable` to `true` or call
+  `instrument_flight_recorder:enable/0` to turn it on.
 
 ### Changed
 - Creating an instrument or writing a new label set no longer goes through the
@@ -46,6 +49,19 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - Label key sets such as `[a_b]` and `[a, b]` no longer collide. The second
   one's writes used to be lost silently.
+- The span and log exporter managers now drop spans and log records once 2048
+  are waiting, instead of letting their mailbox grow without limit while an
+  export is slow. Drops are reported by `stats/0`, and the limit is
+  configurable. OTLP exports run outside the manager process so retries no
+  longer block it.
+- The batch span processor drops spans past its queue size before they reach
+  its mailbox, sends at most `max_export_batch_size` spans per export, and
+  reports drops through `dropped_spans/0`.
+- `force_flush/0` and `shutdown/0` on the batch processor no longer time out
+  on the caller while an export is still allowed to run.
+- The simple and tail-sampling span processors no longer call their exporter
+  from many processes at once or rewrite its state in `persistent_term` on
+  every span; each exporter now runs in its own process.
 - The flight recorder's memory is now bounded. It used to copy every traced
   message, at full size, into worker mailboxes with no limit, so a busy
   traced process could grow memory quickly. Each worker now holds at most
