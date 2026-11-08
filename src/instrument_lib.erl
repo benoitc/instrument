@@ -12,6 +12,7 @@
   safe_call/1,
   safe_call/2,
   safe_apply/4,
+  bounded_env/4,
   table/0,
   tables/0
 ]).
@@ -110,3 +111,18 @@ table(63) -> instrument_registry_63;
 table(64) -> instrument_registry_64;
 table(N) when is_integer(N), N > 20 ->
   list_to_atom("instrument_registry_" ++ integer_to_list(N)).
+
+%% @doc Reads an integer from the `instrument' application env, accepting
+%% values in `[Min, Max]'. Returns `Default' when the key is unset; logs a
+%% warning and returns `Default' when the value is out of range or not an
+%% integer.
+-spec bounded_env(atom(), integer(), integer(), integer()) -> integer().
+bounded_env(Key, Default, Min, Max) ->
+  case application:get_env(instrument, Key) of
+    undefined -> Default;
+    {ok, V} when is_integer(V), V >= Min, V =< Max -> V;
+    {ok, Bad} ->
+      logger:warning("instrument: ignoring invalid ~p value ~p, using ~p",
+                     [Key, Bad, Default]),
+      Default
+  end.

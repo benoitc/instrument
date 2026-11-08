@@ -13,7 +13,8 @@
 %%
 %% TracerState is a map containing:
 %% - pool_size: number of workers
-%% - workers: map of index to worker pid (#{0 => Pid1, 1 => Pid2, ...})
+%% - workers: tuple of registered worker names, indexed by hash
+%% - counters: per-worker queue bound (see new_pool_counters/2)
 %% - label: trace label (usually trace_id as integer)
 -module(instrument_tracer_nif).
 -author("benoitc").
@@ -28,6 +29,14 @@
 -export([
   create_session_resource/0,
   deactivate_session_resource/1
+]).
+
+%% Per-worker queue bound
+-export([
+  new_pool_counters/2,
+  ack/3,
+  reset_worker/2,
+  pool_counters/1
 ]).
 
 %% Optional specialized enabled callbacks
@@ -98,6 +107,28 @@ create_session_resource() ->
 %% on their next trace event and return 'remove' to stop tracing.
 -spec deactivate_session_resource(reference()) -> ok.
 deactivate_session_resource(_SessionRef) ->
+  erlang:nif_error({error, not_loaded}).
+
+%% @doc Creates queue counters for `N' workers, each allowed `Max' queued
+%% events. Events past the limit are dropped and counted.
+-spec new_pool_counters(pos_integer(), pos_integer()) -> reference().
+new_pool_counters(_N, _Max) ->
+  erlang:nif_error({error, not_loaded}).
+
+%% @doc Acknowledges `N' events handled by worker `Idx'.
+-spec ack(reference(), non_neg_integer(), non_neg_integer()) -> ok.
+ack(_Counters, _Idx, _N) ->
+  erlang:nif_error({error, not_loaded}).
+
+%% @doc Clears worker `Idx''s queue count, used when the worker (re)starts.
+-spec reset_worker(reference(), non_neg_integer()) -> ok.
+reset_worker(_Counters, _Idx) ->
+  erlang:nif_error({error, not_loaded}).
+
+%% @doc Returns the dropped count, the current queued total and the limit.
+-spec pool_counters(reference()) ->
+  #{dropped := non_neg_integer(), queued := non_neg_integer(), max := pos_integer()}.
+pool_counters(_Counters) ->
   erlang:nif_error({error, not_loaded}).
 
 %% ============================================================================

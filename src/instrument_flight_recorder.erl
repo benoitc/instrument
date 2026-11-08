@@ -11,9 +11,16 @@
 %% Uses erlang:trace with a custom erl_tracer NIF that distributes events
 %% across a pool of workers, avoiding the single-process bottleneck of seq_trace.
 %%
+%% Memory is bounded: each worker queues at most `flight_recorder_max_queue'
+%% events (extra events are dropped and counted in stats/0), message payloads
+%% larger than `flight_recorder_max_payload_bytes' are stored as
+%% `{truncated, Size}', and the buffer is trimmed to
+%% `flight_recorder_buffer_size' events as soon as a worker sees it over.
+%%
 %% == Example Usage ==
 %% ```
-%% %% Flight recorder starts enabled by default
+%% %% Disabled by default: enable it, or set flight_recorder_auto_enable
+%% ok = instrument_flight_recorder:enable(),
 %% instrument_tracer:with_span(<<"request">>, fun() ->
 %%   %% All message passing captured with trace_id label
 %%   gen_server:call(some_server, request),
@@ -44,7 +51,8 @@
   mark/1,
   mark/2,
   stats/0,
-  set_buffer_size/1
+  set_buffer_size/1,
+  maybe_evict/0
 ]).
 
 %% gen_server callbacks
@@ -62,10 +70,11 @@
 -define(DEFAULT_BUFFER_SIZE, 65536).  %% 64K events
 -define(ENABLED_KEY, '$instrument_flight_recorder_enabled').
 -define(LABEL_KEY, '$instrument_flight_label').
+-define(BUFFER_LIMIT_KEY, '$instrument_flight_buffer_limit').
+-define(EVICT_PENDING_KEY, '$instrument_flight_evict_pending').
 
 -record(state, {
-  buffer_size :: pos_integer(),
-  pool_sup :: pid() | undefined
+  buffer_size :: pos_integer()
 }).
 
 %% ============================================================================
@@ -173,7 +182,8 @@ mark(Name, Meta) when is_binary(Name), is_map(Meta) ->
         _ ->
           Timestamp = erlang:monotonic_time(),
           Key = {Timestamp, erlang:unique_integer([monotonic])},
-          Event = {marker, Name, Meta},
+          Event = {marker, Name,
+                   instrument_flight_tracer:truncate(Meta, instrument_flight_tracer:max_payload())},
           try
             ets:insert(?BUFFER_TABLE, {Key, Label, Event})
           catch
@@ -188,6 +198,26 @@ mark(Name, Meta) when is_binary(Name), is_map(Meta) ->
 stats() ->
   gen_server:call(?SERVER, stats).
 
+%% @doc Called by tracer workers after inserting events: asks the recorder to
+%% evict when the buffer is over its limit. Concurrent requests coalesce into
+%% one eviction.
+-spec maybe_evict() -> ok.
+maybe_evict() ->
+  Limit = persistent_term:get(?BUFFER_LIMIT_KEY, ?DEFAULT_BUFFER_SIZE),
+  case instrument_lib:safe_apply(ets, info, [?BUFFER_TABLE, size], 0) of
+    Size when is_integer(Size), Size > Limit ->
+      case persistent_term:get(?EVICT_PENDING_KEY, undefined) of
+        undefined -> ok;
+        Pending ->
+          case atomics:compare_exchange(Pending, 1, 0, 1) of
+            ok -> gen_server:cast(?SERVER, evict_now);
+            _ -> ok
+          end
+      end;
+    _ ->
+      ok
+  end.
+
 %% @doc Sets the buffer size (for testing). Takes effect immediately.
 -spec set_buffer_size(pos_integer()) -> ok.
 set_buffer_size(Size) when is_integer(Size), Size > 0 ->
@@ -198,8 +228,14 @@ set_buffer_size(Size) when is_integer(Size), Size > 0 ->
 %% ============================================================================
 
 init(_Args) ->
-  BufferSize = application:get_env(instrument, flight_recorder_buffer_size, ?DEFAULT_BUFFER_SIZE),
-  AutoEnable = application:get_env(instrument, flight_recorder_auto_enable, true),
+  BufferSize = instrument_lib:bounded_env(flight_recorder_buffer_size,
+                                          ?DEFAULT_BUFFER_SIZE, 1, 1 bsl 30),
+  AutoEnable = application:get_env(instrument, flight_recorder_auto_enable, false),
+  persistent_term:put(?BUFFER_LIMIT_KEY, BufferSize),
+  case persistent_term:get(?EVICT_PENDING_KEY, undefined) of
+    undefined -> persistent_term:put(?EVICT_PENDING_KEY, atomics:new(1, []));
+    Pending -> atomics:put(Pending, 1, 0)
+  end,
 
   %% Create ETS table for ring buffer
   ets:new(?BUFFER_TABLE, [
@@ -209,14 +245,10 @@ init(_Args) ->
     {write_concurrency, true}
   ]),
 
-  %% Start the tracer pool supervisor
-  {ok, PoolSup} = instrument_tracer_pool:start_link(),
+  %% The tracer pool supervisor is started before us by instrument_sup.
+  State = #state{buffer_size = BufferSize},
 
-  %% Initialize state
-  State = #state{buffer_size = BufferSize, pool_sup = PoolSup},
-
-  %% Enable by default for production use
-  case AutoEnable of
+  case AutoEnable =:= true of
     true ->
       instrument_tracer_pool:start_pool(),
       persistent_term:put(?ENABLED_KEY, true);
@@ -245,32 +277,41 @@ handle_call(clear, _From, State) ->
 
 handle_call(stats, _From, #state{buffer_size = BufferSize} = State) ->
   TableSize = instrument_lib:safe_apply(ets, info, [?BUFFER_TABLE, size], 0),
+  #{dropped := Dropped, queued := Queued, max := MaxQueue} =
+    instrument_tracer_pool:stats(),
   Stats = #{
     enabled => is_enabled(),
     buffer_size => BufferSize,
     table_size => TableSize,
-    pool_size => instrument_tracer_pool:pool_size()
+    pool_size => instrument_tracer_pool:pool_size(),
+    dropped_events => Dropped,
+    queued_events => Queued,
+    max_queue => MaxQueue,
+    max_payload_bytes => instrument_flight_tracer:max_payload()
   },
   {reply, Stats, State};
 
 handle_call({set_buffer_size, Size}, _From, State) ->
+  persistent_term:put(?BUFFER_LIMIT_KEY, Size),
   {reply, ok, State#state{buffer_size = Size}};
 
 handle_call(_Request, _From, State) ->
   {reply, {error, unknown_call}, State}.
 
+handle_cast(evict_now, State) ->
+  trim(State),
+  case persistent_term:get(?EVICT_PENDING_KEY, undefined) of
+    undefined -> ok;
+    Pending -> atomics:put(Pending, 1, 0)
+  end,
+  {noreply, State};
+
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
 %% Periodic eviction check
-handle_info(check_eviction, #state{buffer_size = Max} = State) ->
-  TableSize = instrument_lib:safe_apply(ets, info, [?BUFFER_TABLE, size], 0),
-  case TableSize > Max of
-    true ->
-      evict_oldest(TableSize - Max);
-    false ->
-      ok
-  end,
+handle_info(check_eviction, State) ->
+  trim(State),
   erlang:send_after(1000, self(), check_eviction),
   {noreply, State};
 
@@ -319,6 +360,14 @@ extract_label_from_tracer() ->
       logger:debug("Failed to extract label from tracer: ~p:~p~n~p",
                    [Class, Reason, Stack]),
       undefined
+  end.
+
+%% @private Trim the buffer back to its limit.
+trim(#state{buffer_size = Max}) ->
+  TableSize = instrument_lib:safe_apply(ets, info, [?BUFFER_TABLE, size], 0),
+  case is_integer(TableSize) andalso TableSize > Max of
+    true -> evict_oldest(TableSize - Max);
+    false -> ok
   end.
 
 %% @private Evicts N oldest entries from the buffer.

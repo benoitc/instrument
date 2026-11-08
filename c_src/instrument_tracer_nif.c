@@ -24,11 +24,25 @@ typedef struct {
 
 static ErlNifResourceType* session_resource_type = NULL;
 
+/* Pool counters - bound the number of events queued per worker.
+ * trace/5 increments inflight[idx] before sending to worker idx and drops
+ * the event (counting it in `dropped`) once the worker has `max` events
+ * outstanding. Workers acknowledge handled events with ack/3.
+ */
+typedef struct {
+    unsigned int n;
+    long max;
+    _Atomic long dropped;
+    _Atomic long inflight[];
+} pool_counters_t;
+
+static ErlNifResourceType* pool_counters_type = NULL;
+
 /*
  * enabled/3 - Check if tracing is enabled for the given tracee.
  *
  * TraceTag: atom() - the type of trace event (or trace_status for validation)
- * TracerState: #{pool_size => N, workers => #{0 => Pid1, ...}, label => Label}
+ * TracerState: #{pool_size => N, workers => {Name0, ...}, counters => Res, label => Label}
  * Tracee: pid() | port() | undefined (for seq_trace)
  *
  * Returns: trace | discard | remove
@@ -218,10 +232,64 @@ enabled_garbage_collection(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 }
 
 /*
+ * payload_size - Approximate size in bytes of `term`, walking at most until
+ * the running total passes `budget`. Returns the size when it fits, or a
+ * value greater than `budget` (a lower bound) as soon as it does not, so the
+ * cost is bounded by the budget rather than by the size of the term.
+ * Binaries count their exact byte size.
+ */
+static long
+payload_size(ErlNifEnv* env, ERL_NIF_TERM term, long budget, long acc)
+{
+    if (acc > budget) {
+        return acc;
+    }
+    ErlNifBinary bin;
+    if (enif_is_binary(env, term) && enif_inspect_binary(env, term, &bin)) {
+        return acc + 8 + (long)bin.size;
+    }
+    int arity;
+    const ERL_NIF_TERM* elems;
+    if (enif_get_tuple(env, term, &arity, &elems)) {
+        acc += 8;
+        for (int i = 0; i < arity && acc <= budget; i++) {
+            acc = payload_size(env, elems[i], budget, acc);
+        }
+        return acc;
+    }
+    if (enif_is_list(env, term)) {
+        ERL_NIF_TERM head, tail = term;
+        while (acc <= budget && enif_get_list_cell(env, tail, &head, &tail)) {
+            acc = payload_size(env, head, budget, acc + 8);
+        }
+        if (acc <= budget && !enif_is_empty_list(env, tail)) {
+            acc = payload_size(env, tail, budget, acc);  /* improper tail */
+        }
+        return acc;
+    }
+    if (enif_is_map(env, term)) {
+        ErlNifMapIterator it;
+        ERL_NIF_TERM k, v;
+        acc += 8;
+        if (enif_map_iterator_create(env, term, &it, ERL_NIF_MAP_ITERATOR_FIRST)) {
+            while (acc <= budget && enif_map_iterator_get_pair(env, &it, &k, &v)) {
+                acc = payload_size(env, k, budget, acc);
+                acc = payload_size(env, v, budget, acc);
+                enif_map_iterator_next(env, &it);
+            }
+            enif_map_iterator_destroy(env, &it);
+        }
+        return acc;
+    }
+    /* atoms, numbers, pids, ports, references, funs */
+    return acc + 8;
+}
+
+/*
  * trace/5 - Handle a trace event by distributing to worker pool.
  *
  * TraceTag: atom() - send | 'receive' | spawn | exit | etc.
- * TracerState: #{pool_size => N, workers => #{0 => Pid1, ...}, label => Label}
+ * TracerState: #{pool_size => N, workers => {Name0, ...}, counters => Res, label => Label}
  * Tracee: pid() - the traced process
  * TraceTerm: term() - the trace data (e.g., message for send/receive)
  * Opts: map() - #{extra => Extra, timestamp => TS, ...}
@@ -270,16 +338,51 @@ trace(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     ErlNifUInt64 hash = enif_hash(ERL_NIF_INTERNAL_HASH, tracee, 0);
     unsigned int worker_idx = hash % pool_size;
 
-    /* Get worker pid from workers map */
-    ERL_NIF_TERM worker_idx_term = enif_make_uint(env, worker_idx);
-    ERL_NIF_TERM worker_pid_term;
-    if (!enif_get_map_value(env, workers_term, worker_idx_term, &worker_pid_term)) {
+    /* Resolve the worker by its registered name, so a restarted worker
+     * keeps receiving events from processes traced before the restart. */
+    int arity;
+    const ERL_NIF_TERM* names;
+    if (!enif_get_tuple(env, workers_term, &arity, &names)
+            || (unsigned int)arity != pool_size) {
         return enif_make_atom(env, "ok");
     }
 
     ErlNifPid worker_pid;
-    if (!enif_get_local_pid(env, worker_pid_term, &worker_pid)) {
+    if (!enif_whereis_pid(env, names[worker_idx], &worker_pid)) {
         return enif_make_atom(env, "ok");
+    }
+
+    /* Admission control: drop once this worker has `max` events queued. */
+    pool_counters_t* counters = NULL;
+    ERL_NIF_TERM counters_term;
+    if (enif_get_map_value(env, tracer_state,
+            enif_make_atom(env, "counters"), &counters_term)
+            && enif_get_resource(env, counters_term, pool_counters_type,
+                                 (void**)&counters)
+            && worker_idx < counters->n) {
+        if (atomic_load(&counters->inflight[worker_idx]) >= counters->max) {
+            atomic_fetch_add(&counters->dropped, 1);
+            return enif_make_atom(env, "ok");
+        }
+        atomic_fetch_add(&counters->inflight[worker_idx], 1);
+    } else {
+        counters = NULL;
+    }
+
+    /* Payload limit: replace an oversized payload by {truncated, Size} before
+     * it is copied into the worker's mailbox. Size is exact for binaries and
+     * a lower bound for large nested terms. */
+    ERL_NIF_TERM max_payload_term;
+    long max_payload;
+    if (enif_get_map_value(env, tracer_state,
+            enif_make_atom(env, "max_payload"), &max_payload_term)
+            && enif_get_long(env, max_payload_term, &max_payload)
+            && max_payload >= 0) {
+        long size = payload_size(env, trace_term, max_payload, 0);
+        if (size > max_payload) {
+            trace_term = enif_make_tuple2(env, enif_make_atom(env, "truncated"),
+                                          enif_make_long(env, size));
+        }
     }
 
     /* Get current timestamp */
@@ -301,7 +404,10 @@ trace(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     /* Send to worker - do not send to tracee to avoid infinite recursion! */
     ErlNifEnv* msg_env = enif_alloc_env();
     ERL_NIF_TERM copied_msg = enif_make_copy(msg_env, trace_msg);
-    enif_send(env, &worker_pid, msg_env, copied_msg);
+    if (!enif_send(env, &worker_pid, msg_env, copied_msg) && counters != NULL) {
+        /* Worker died between lookup and send: the event is not queued. */
+        atomic_fetch_sub(&counters->inflight[worker_idx], 1);
+    }
     enif_free_env(msg_env);
 
     return enif_make_atom(env, "ok");
@@ -375,6 +481,114 @@ trace_procs(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     return trace(env, argc, argv);
 }
 
+/*
+ * new_pool_counters/2 - Create counters for N workers with a per-worker
+ * limit of Max queued events.
+ */
+static ERL_NIF_TERM
+new_pool_counters(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    unsigned int n;
+    long max;
+    if (!enif_get_uint(env, argv[0], &n) || n == 0 || n > 65536
+            || !enif_get_long(env, argv[1], &max) || max <= 0) {
+        return enif_make_badarg(env);
+    }
+    pool_counters_t* res = enif_alloc_resource(pool_counters_type,
+        sizeof(pool_counters_t) + n * sizeof(_Atomic long));
+    if (res == NULL) {
+        return enif_make_badarg(env);
+    }
+    res->n = n;
+    res->max = max;
+    atomic_store(&res->dropped, 0);
+    for (unsigned int i = 0; i < n; i++) {
+        atomic_store(&res->inflight[i], 0);
+    }
+    ERL_NIF_TERM term = enif_make_resource(env, res);
+    enif_release_resource(res);
+    return term;
+}
+
+static int
+get_counters_idx(ErlNifEnv* env, const ERL_NIF_TERM argv[],
+                 pool_counters_t** res, unsigned int* idx)
+{
+    return enif_get_resource(env, argv[0], pool_counters_type, (void**)res)
+        && enif_get_uint(env, argv[1], idx)
+        && *idx < (*res)->n;
+}
+
+/*
+ * ack/3 - A worker acknowledges N handled events.
+ */
+static ERL_NIF_TERM
+ack(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    pool_counters_t* res;
+    unsigned int idx;
+    long n;
+    if (!get_counters_idx(env, argv, &res, &idx)
+            || !enif_get_long(env, argv[2], &n) || n < 0) {
+        return enif_make_badarg(env);
+    }
+    long prev = atomic_fetch_sub(&res->inflight[idx], n);
+    if (prev < n) {
+        /* Never go negative, e.g. after reset_worker/2 raced an ack. */
+        atomic_store(&res->inflight[idx], 0);
+    }
+    return enif_make_atom(env, "ok");
+}
+
+/*
+ * reset_worker/2 - Clear a worker's queue count. Called when a worker
+ * (re)starts: events queued to a previous incarnation are gone.
+ */
+static ERL_NIF_TERM
+reset_worker(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    pool_counters_t* res;
+    unsigned int idx;
+    if (!get_counters_idx(env, argv, &res, &idx)) {
+        return enif_make_badarg(env);
+    }
+    atomic_store(&res->inflight[idx], 0);
+    return enif_make_atom(env, "ok");
+}
+
+/*
+ * pool_counters/1 - Returns #{dropped => D, queued => Q, max => M}.
+ */
+static ERL_NIF_TERM
+pool_counters(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    (void)argc;
+    pool_counters_t* res;
+    if (!enif_get_resource(env, argv[0], pool_counters_type, (void**)&res)) {
+        return enif_make_badarg(env);
+    }
+    long queued = 0;
+    for (unsigned int i = 0; i < res->n; i++) {
+        queued += atomic_load(&res->inflight[i]);
+    }
+    ERL_NIF_TERM keys[3] = {
+        enif_make_atom(env, "dropped"),
+        enif_make_atom(env, "queued"),
+        enif_make_atom(env, "max")
+    };
+    ERL_NIF_TERM vals[3] = {
+        enif_make_long(env, atomic_load(&res->dropped)),
+        enif_make_long(env, queued),
+        enif_make_long(env, res->max)
+    };
+    ERL_NIF_TERM map;
+    enif_make_map_from_arrays(env, keys, vals, 3, &map);
+    return map;
+}
+
 static ErlNifFunc nif_funcs[] = {
     /* erl_tracer behavior callbacks - required */
     {"enabled", 3, enabled, 0},
@@ -383,6 +597,12 @@ static ErlNifFunc nif_funcs[] = {
     /* Session resource management for child process cleanup */
     {"create_session_resource", 0, create_session_resource, 0},
     {"deactivate_session_resource", 1, deactivate_session_resource, 0},
+
+    /* Per-worker queue bound */
+    {"new_pool_counters", 2, new_pool_counters, 0},
+    {"ack", 3, ack, 0},
+    {"reset_worker", 2, reset_worker, 0},
+    {"pool_counters", 1, pool_counters, 0},
 
     /* Specialized enabled callbacks - optional, improves performance */
     {"enabled_send", 3, enabled_send, 0},
@@ -415,6 +635,12 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     session_resource_type = enif_open_resource_type(env, NULL, "flight_session",
         NULL, ERL_NIF_RT_CREATE, NULL);
     if (session_resource_type == NULL) {
+        return -1;
+    }
+
+    pool_counters_type = enif_open_resource_type(env, NULL, "flight_pool_counters",
+        NULL, ERL_NIF_RT_CREATE, NULL);
+    if (pool_counters_type == NULL) {
         return -1;
     }
     return 0;
