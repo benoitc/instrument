@@ -127,9 +127,9 @@ start_link(Config) ->
 init(Config) ->
   Exporter = maps:get(exporter, Config),
   ExporterConfig = maps:get(exporter_config, Config, #{}),
-  MaxQueueSize = maps:get(max_queue_size, Config, ?DEFAULT_MAX_QUEUE_SIZE),
-  ConfiguredBatchSize = maps:get(max_export_batch_size, Config,
-                                 ?DEFAULT_MAX_EXPORT_BATCH_SIZE),
+  MaxQueueSize = pos_int(max_queue_size, Config, ?DEFAULT_MAX_QUEUE_SIZE),
+  ConfiguredBatchSize = pos_int(max_export_batch_size, Config,
+                                ?DEFAULT_MAX_EXPORT_BATCH_SIZE),
   %% OTel spec: max_export_batch_size must not exceed max_queue_size.
   MaxExportBatchSize = case ConfiguredBatchSize > MaxQueueSize of
                          true ->
@@ -140,8 +140,8 @@ init(Config) ->
                            MaxQueueSize;
                          false -> ConfiguredBatchSize
                        end,
-  ScheduleDelay = maps:get(schedule_delay_millis, Config, ?DEFAULT_SCHEDULE_DELAY_MILLIS),
-  ExportTimeout = maps:get(export_timeout_millis, Config, ?DEFAULT_EXPORT_TIMEOUT_MILLIS),
+  ScheduleDelay = pos_int(schedule_delay_millis, Config, ?DEFAULT_SCHEDULE_DELAY_MILLIS),
+  ExportTimeout = pos_int(export_timeout_millis, Config, ?DEFAULT_EXPORT_TIMEOUT_MILLIS),
   MaxBatchRetries = maps:get(max_batch_retries, Config, ?DEFAULT_MAX_BATCH_RETRIES),
 
   case Exporter:init(ExporterConfig) of
@@ -165,6 +165,18 @@ init(Config) ->
       {ok, State#state{timer_ref = TimerRef}};
     {error, Reason} ->
       {error, Reason}
+  end.
+
+%% Reads a positive integer option. A missing key gives the default; an invalid
+%% value (zero, negative, not an integer) logs a warning and gives the default,
+%% so a bad setting cannot turn the export timer into a busy loop.
+pos_int(Key, Config, Default) ->
+  case maps:get(Key, Config, Default) of
+    Int when is_integer(Int), Int > 0 -> Int;
+    Bad ->
+      logger:warning("batch span processor: ignoring invalid ~p value ~p, using ~p",
+                     [Key, Bad, Default]),
+      Default
   end.
 
 %% @doc Called when a span starts. Returns the span unchanged.

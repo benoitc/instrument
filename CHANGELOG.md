@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [2.0.0] - Unreleased
 
+### Breaking
+- The flight recorder is now disabled by default. Set
+  `flight_recorder_auto_enable` to `true` or call
+  `instrument_flight_recorder:enable/0` to turn it on.
+
 ### Changed
 - Setting `OTEL_TRACES_EXPORTER` (or the `span_exporter` application setting)
   now sends spans through the batch span processor, as other OpenTelemetry
@@ -28,6 +33,32 @@ All notable changes to this project will be documented in this file.
 - The simple and tail-sampling span processors no longer call their exporter
   from many processes at once or rewrite its state in `persistent_term` on
   every span; each exporter now runs in its own process.
+- The flight recorder's memory is now bounded. It used to copy every traced
+  message, at full size, into worker mailboxes with no limit, so a busy
+  traced process could grow memory quickly. Each worker now holds at most
+  `flight_recorder_max_queue` events (extra events are dropped and counted in
+  `stats/0`), large payloads are stored as their size, and the buffer is
+  trimmed as soon as it goes over its limit instead of once per second.
+- A nested span ending no longer turns flight tracing off for its parent.
+- A dropped (unsampled) span no longer leaves flight tracing on in its
+  process after it ends.
+- A flight recorder worker that crashes is restarted and keeps receiving
+  events; it used to stay dead and its events were lost.
+- Out-of-range flight recorder settings (pool size, buffer size) are ignored
+  with a warning.
+- `OTEL_BSP_SCHEDULE_DELAY` is now applied to the batch span processor. It
+  was stored under the wrong name and silently ignored.
+- `OTEL_BSP_EXPORT_TIMEOUT` and `OTEL_METRIC_EXPORT_INTERVAL` are now read.
+- A zero, negative or non-integer metrics export interval or batch processor
+  setting is ignored with a warning. A zero interval used to make the exporter
+  loop without pause.
+- Stopping the metrics exporter shuts exporters down with their latest state,
+  so resources opened during the final export are released.
+- Compressed log rotation works in small chunks instead of loading the whole
+  file into memory.
+- The file log exporter no longer drops the batch it receives right after
+  reopening its file.
+
 
 ## [1.1.5] - 2026-07-18
 

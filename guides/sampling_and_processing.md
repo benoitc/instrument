@@ -232,6 +232,9 @@ Configure sampling and processing via environment variables:
 | `OTEL_BSP_SCHEDULE_DELAY` | Export interval in ms | `5000` |
 | `OTEL_BSP_MAX_QUEUE_SIZE` | Max queue size | `2048` |
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Max batch size | `512` |
+| `OTEL_BSP_EXPORT_TIMEOUT` | Max time for one export in ms | `30000` |
+
+Values must be positive integers; anything else is ignored and the default applies.
 
 The batch processor is registered automatically when `OTEL_TRACES_EXPORTER` (or the `span_exporter` application setting) names an exporter. Spans past the queue size are dropped in the process that ends them, before they reach the processor; read the count with `instrument_span_processor_batch:dropped_spans()`. Each export sends at most the batch size, and `force_flush/0` waits up to the export timeout.
 
