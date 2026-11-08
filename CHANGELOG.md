@@ -34,6 +34,14 @@ All notable changes to this project will be documented in this file.
 - OTLP labeled counters and histograms now carry their start time.
 - Upgrading in place from 1.1.x cleans up the old internal state on first
   start.
+- Setting `OTEL_TRACES_EXPORTER` (or the `span_exporter` application setting)
+  now sends spans through the batch span processor, as other OpenTelemetry
+  SDKs do. It used to go through the older exporter manager, which exported
+  inside its own process and queued without limit while a collector was slow
+  or down. `OTEL_BSP_*` settings apply without having to be set explicitly.
+- The span exporter manager is only called by the tracer while it has an
+  exporter registered, which makes span creation cheaper when it is idle and
+  avoids exporting spans twice when a processor is also configured.
 
 ### Fixed
 - Label key sets such as `[a_b]` and `[a, b]` no longer collide. The second
@@ -70,7 +78,6 @@ All notable changes to this project will be documented in this file.
 - `instrument_lib:table/0` and `tables/0`, along with the per-scheduler
   registry tables.
 - `instrument_vector:collect/1`.
-
 
 ## [1.1.5] - 2026-07-18
 

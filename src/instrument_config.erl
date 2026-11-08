@@ -229,17 +229,14 @@ set_verbose_tracing(Enabled) when is_boolean(Enabled) ->
 %% Supported values: otlp, console, none.
 -spec auto_register_exporters() -> ok.
 auto_register_exporters() ->
-  %% Register trace exporters (OTEL_TRACES_EXPORTER or OTEL_EXPORTERS)
-  TracesExporter = case os:getenv("OTEL_TRACES_EXPORTER") of
-    false -> os:getenv("OTEL_EXPORTERS");
-    V1 -> V1
-  end,
-  case TracesExporter of
-    false -> ok;
-    "none" -> ok;
-    TraceValue ->
-      Names = string:tokens(TraceValue, ","),
-      lists:foreach(fun register_exporter_by_name/1, Names)
+  %% Traces: the first exporter named in OTEL_TRACES_EXPORTER (or
+  %% OTEL_EXPORTERS) goes through the batch span processor, registered by
+  %% auto_register_span_processor/0. Any further names are registered here
+  %% with the span exporter. Nothing is registered here when a span processor
+  %% or span exporter is set in the application environment.
+  case extra_trace_exporter_names() of
+    [] -> ok;
+    Extra -> lists:foreach(fun register_exporter_by_name/1, Extra)
   end,
   %% Register metrics exporters (OTEL_METRICS_EXPORTER)
   case os:getenv("OTEL_METRICS_EXPORTER") of
@@ -268,35 +265,50 @@ auto_register_span_processor() ->
     {ok, {Module, Config}} ->
       instrument_span_processor:register(Module, Config);
     _ ->
-      %% Check for batch processor env vars
-      BatchConfig = get_batch_processor_config(),
-      case map_size(BatchConfig) > 0 of
-        true ->
-          %% Get exporter from config or env
-          case get_default_exporter() of
-            undefined -> ok;
-            {ExporterMod, ExporterCfg} ->
-              FullConfig = BatchConfig#{
-                exporter => ExporterMod,
-                exporter_config => ExporterCfg
-              },
-              instrument_span_processor:register(instrument_span_processor_batch, FullConfig)
-          end;
-        false -> ok
+      %% Any configured trace exporter goes through the batch processor,
+      %% tuned by OTEL_BSP_* when set.
+      case get_default_exporter() of
+        undefined -> ok;
+        {ExporterMod, ExporterCfg} ->
+          FullConfig = (get_batch_processor_config())#{
+            exporter => ExporterMod,
+            exporter_config => ExporterCfg
+          },
+          instrument_span_processor:register(instrument_span_processor_batch, FullConfig)
       end
   end,
   ok.
 
-%% @doc Checks if a span processor will be registered.
-%% Returns true if either span_processor app config is set, or
-%% batch processor env vars are set with an available exporter.
+%% Trace exporter names after the first, when the first comes from the OS env.
+extra_trace_exporter_names() ->
+  case {application:get_env(instrument, span_processor),
+        application:get_env(instrument, span_exporter)} of
+    {undefined, undefined} ->
+      case os:getenv("OTEL_TRACES_EXPORTER") of
+        false -> trace_names(os:getenv("OTEL_EXPORTERS"));
+        V -> trace_names(V)
+      end;
+    _ ->
+      []
+  end.
+
+trace_names(false) -> [];
+trace_names("none") -> [];
+trace_names(Value) ->
+  case [string:trim(N) || N <- string:tokens(Value, ",")] of
+    [_First | Rest] -> Rest;
+    [] -> []
+  end.
+
+%% @doc Checks if a span processor will be registered at startup.
+%% Returns true if the span_processor app config is set, or a trace exporter
+%% is configured (it is registered with the batch processor).
 -spec has_span_processor_config() -> boolean().
 has_span_processor_config() ->
   case application:get_env(instrument, span_processor) of
     {ok, _} -> true;
     _ ->
-      BatchConfig = get_batch_processor_config(),
-      map_size(BatchConfig) > 0 andalso get_default_exporter() =/= undefined
+      get_default_exporter() =/= undefined
   end.
 
 %% @doc Enables a specific exporter.

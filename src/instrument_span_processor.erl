@@ -103,8 +103,10 @@ register(ProcessorModule, Config) when is_atom(ProcessorModule), is_map(Config) 
 %% @doc Unregisters a span processor.
 -spec unregister(module()) -> ok.
 unregister(ProcessorModule) when is_atom(ProcessorModule) ->
-  %% Use a long timeout to accommodate export_timeout_millis
-  gen_server:call(?SERVER, {unregister, ProcessorModule}, 60000).
+  %% Covers the batch processor's own shutdown (an in-flight export plus a
+  %% final one)
+  gen_server:call(?SERVER, {unregister, ProcessorModule},
+                  instrument_span_processor_batch:shutdown_timeout() + 5000).
 
 %% @doc Lists all registered processors.
 -spec list() -> [module()].
@@ -165,12 +167,14 @@ on_end_inline(Span) ->
 %% @doc Shuts down all processors.
 -spec shutdown() -> ok.
 shutdown() ->
-  gen_server:call(?SERVER, shutdown).
+  gen_server:call(?SERVER, shutdown,
+                  instrument_span_processor_batch:shutdown_timeout() + 5000).
 
 %% @doc Forces all processors to flush.
 -spec force_flush() -> ok.
 force_flush() ->
-  gen_server:call(?SERVER, force_flush).
+  gen_server:call(?SERVER, force_flush,
+                  instrument_span_processor_batch:flush_timeout() + 5000).
 
 %% ============================================================================
 %% gen_server callbacks

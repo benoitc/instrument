@@ -67,13 +67,17 @@
 ]).
 
 -define(STATE_KEY, {?MODULE, state}).
+-define(SERVER, instrument_span_processor_tail_sampler_exporter).
+-define(DEFAULT_EXPORT_TIMEOUT, 30000).
 
+%% Written once at init. The exporter state lives in an
+%% instrument_export_server registered as ?SERVER, which serializes exports.
 -record(state, {
   always_keep = [] :: [rule()],
   always_drop = [] :: [rule()],
   default_ratio = 0.01 :: float(),
   exporter :: module() | undefined,
-  exporter_state :: term()
+  export_timeout = ?DEFAULT_EXPORT_TIMEOUT :: pos_integer()
 }).
 
 -type comparison_op() :: '>' | '<' | '>=' | '<='.
@@ -104,13 +108,13 @@ init(Config) ->
     ok ->
       %% Initialize exporter if configured
       case init_exporter(Config) of
-        {ok, Exporter, ExporterState} ->
+        {ok, Exporter, Timeout} ->
           State = #state{
             always_keep = AlwaysKeep,
             always_drop = AlwaysDrop,
             default_ratio = clamp_ratio(DefaultRatio),
             exporter = Exporter,
-            exporter_state = ExporterState
+            export_timeout = Timeout
           },
           persistent_term:put(?STATE_KEY, State),
           {ok, State};
@@ -151,16 +155,16 @@ shutdown() ->
   case persistent_term:get(?STATE_KEY, undefined) of
     undefined ->
       ok;
-    #state{exporter = Exporter, exporter_state = ExporterState} ->
-      instrument_lib:safe_call(fun() -> shutdown_exporter(Exporter, ExporterState) end, ok),
+    #state{exporter = Exporter} ->
+      shutdown_exporter(Exporter),
       persistent_term:erase(?STATE_KEY)
   end,
   ok.
 
 %% @doc Shuts down the processor with state.
 -spec shutdown(#state{}) -> ok.
-shutdown(#state{exporter = Exporter, exporter_state = ExporterState}) ->
-  instrument_lib:safe_call(fun() -> shutdown_exporter(Exporter, ExporterState) end, ok),
+shutdown(#state{exporter = Exporter}) ->
+  shutdown_exporter(Exporter),
   persistent_term:erase(?STATE_KEY),
   ok.
 
@@ -172,18 +176,14 @@ force_flush() ->
       ok;
     #state{exporter = undefined} ->
       ok;
-    #state{exporter = Exporter, exporter_state = ExporterState} ->
-      instrument_lib:safe_apply(Exporter, force_flush, [ExporterState], ok),
-      ok
+    #state{export_timeout = Timeout} ->
+      instrument_export_server:force_flush(?SERVER, Timeout)
   end.
 
 %% @doc Forces a flush with state.
 -spec force_flush(#state{}) -> ok.
-force_flush(#state{exporter = undefined}) ->
-  ok;
-force_flush(#state{exporter = Exporter, exporter_state = ExporterState}) ->
-  instrument_lib:safe_apply(Exporter, force_flush, [ExporterState], ok),
-  ok.
+force_flush(_State) ->
+  force_flush().
 
 %% ============================================================================
 %% Sampling Logic
@@ -290,53 +290,37 @@ apply_probability(_Span, Ratio) ->
 %% Internal Functions
 %% ============================================================================
 
-%% @private Initialize exporter if configured.
--spec init_exporter(map()) -> {ok, module() | undefined, term()} | {error, term()}.
+%% @private Start the exporter's server if an exporter is configured.
+-spec init_exporter(map()) -> {ok, module() | undefined, pos_integer()} | {error, term()}.
 init_exporter(Config) ->
+  Timeout = case maps:get(export_timeout_millis, Config, ?DEFAULT_EXPORT_TIMEOUT) of
+              T when is_integer(T), T > 0 -> T;
+              _ -> ?DEFAULT_EXPORT_TIMEOUT
+            end,
   case maps:get(exporter, Config, undefined) of
     undefined ->
-      {ok, undefined, undefined};
+      {ok, undefined, Timeout};
     Exporter ->
       ExporterConfig = maps:get(exporter_config, Config, #{}),
-      case Exporter:init(ExporterConfig) of
-        {ok, ExporterState} ->
-          {ok, Exporter, ExporterState};
-        {error, Reason} ->
-          {error, {exporter_init_failed, Reason}}
+      case instrument_export_server:start(?SERVER, Exporter, ExporterConfig, Timeout) of
+        ok -> {ok, Exporter, Timeout};
+        {error, Reason} -> {error, {exporter_init_failed, Reason}}
       end
   end.
 
-%% @private Export a span to the configured exporter.
+%% @private Export a kept span through the exporter's server.
 -spec export_span(#span{}, #state{}) -> ok.
 export_span(_Span, #state{exporter = undefined}) ->
   ok;
-export_span(Span, #state{exporter = Exporter, exporter_state = ExporterState} = State) ->
-  NewExporterState = try
-    case Exporter:export([Span], ExporterState) of
-      {ok, NewState} -> NewState;
-      {error, _Reason, NewState} -> NewState;
-      _ -> ExporterState
-    end
-  catch
-    Class:Reason:Stacktrace ->
-      logger:warning("Tail sampler export to ~p failed: ~p:~p",
-                    [Exporter, Class, Reason],
-                    #{error_logger => #{tag => warning_msg},
-                      mfa => {Exporter, export, 2},
-                      stacktrace => Stacktrace}),
-      ExporterState
-  end,
-  %% Update persistent state with new exporter state
-  persistent_term:put(?STATE_KEY, State#state{exporter_state = NewExporterState}),
-  ok.
+export_span(Span, #state{export_timeout = Timeout}) ->
+  instrument_export_server:export(?SERVER, [Span], Timeout).
 
 %% @private Shutdown exporter.
--spec shutdown_exporter(module() | undefined, term()) -> ok.
-shutdown_exporter(undefined, _) ->
+-spec shutdown_exporter(module() | undefined) -> ok.
+shutdown_exporter(undefined) ->
   ok;
-shutdown_exporter(Exporter, ExporterState) ->
-  instrument_lib:safe_apply(Exporter, shutdown, [ExporterState], ok),
-  ok.
+shutdown_exporter(_Exporter) ->
+  instrument_export_server:stop(?SERVER).
 
 %% @private Validate all rules.
 -spec validate_rules([rule()]) -> ok | {error, term()}.
