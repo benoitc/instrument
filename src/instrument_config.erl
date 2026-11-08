@@ -69,7 +69,11 @@
   %% OTLP retry settings
   get_otlp_max_retries/0,
   get_otlp_retry_initial_delay_ms/0,
-  get_otlp_retry_max_delay_ms/0
+  get_otlp_retry_max_delay_ms/0,
+  %% Metrics export interval
+  get_metric_export_interval/0,
+  %% Validated application env
+  positive_int_env/2
 ]).
 
 -define(CONFIG_KEY, '$instrument_config').
@@ -419,6 +423,31 @@ get_otlp_retry_initial_delay_ms() ->
 get_otlp_retry_max_delay_ms() ->
   read_span_limit("OTEL_EXPORTER_OTLP_RETRY_MAX_DELAY_MS", 30000).
 
+%% @doc Metrics export interval in milliseconds.
+%% Reads the `metrics_export_interval' application env, then the
+%% OTEL_METRIC_EXPORT_INTERVAL env var, and defaults to 60000. A value that is
+%% not a positive integer is ignored with a warning.
+-spec get_metric_export_interval() -> pos_integer().
+get_metric_export_interval() ->
+  case application:get_env(instrument, metrics_export_interval) of
+    {ok, _} -> positive_int_env(metrics_export_interval, 60000);
+    undefined -> read_span_limit("OTEL_METRIC_EXPORT_INTERVAL", 60000)
+  end.
+
+%% @doc Reads an `instrument' application env value that must be a positive
+%% integer. Returns `Default' when the key is unset, and logs a warning and
+%% returns `Default' when the value is invalid.
+-spec positive_int_env(atom(), pos_integer()) -> pos_integer().
+positive_int_env(Key, Default) ->
+  case application:get_env(instrument, Key) of
+    undefined -> Default;
+    {ok, Int} when is_integer(Int), Int > 0 -> Int;
+    {ok, Bad} ->
+      logger:warning("instrument: ignoring invalid ~p value ~p, using ~p",
+                     [Key, Bad, Default]),
+      Default
+  end.
+
 %% ============================================================================
 %% Internal Functions
 %% ============================================================================
@@ -494,16 +523,20 @@ parse_propagator(_) -> false.
 
 read_batch_processor_config() ->
   Config = #{},
-  Config1 = maybe_add_int("OTEL_BSP_SCHEDULE_DELAY", schedule_delay, Config),
+  %% Keys match the batch processor's config keys.
+  Config1 = maybe_add_int("OTEL_BSP_SCHEDULE_DELAY", schedule_delay_millis, Config),
   Config2 = maybe_add_int("OTEL_BSP_MAX_QUEUE_SIZE", max_queue_size, Config1),
-  maybe_add_int("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", max_export_batch_size, Config2).
+  Config3 = maybe_add_int("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", max_export_batch_size, Config2),
+  maybe_add_int("OTEL_BSP_EXPORT_TIMEOUT", export_timeout_millis, Config3).
 
+%% Adds a positive integer env var to Config; other values are ignored.
 maybe_add_int(EnvVar, Key, Config) ->
   case os:getenv(EnvVar) of
     false -> Config;
     Value ->
       try list_to_integer(Value) of
-        Int when is_integer(Int) -> maps:put(Key, Int, Config)
+        Int when is_integer(Int), Int > 0 -> maps:put(Key, Int, Config);
+        _ -> Config
       catch _:_ -> Config
       end
   end.

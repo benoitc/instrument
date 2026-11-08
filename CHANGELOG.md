@@ -38,6 +38,31 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - Label key sets such as `[a_b]` and `[a, b]` no longer collide. The second
   one's writes used to be lost silently.
+- The flight recorder's memory is now bounded. It used to copy every traced
+  message, at full size, into worker mailboxes with no limit, so a busy
+  traced process could grow memory quickly. Each worker now holds at most
+  `flight_recorder_max_queue` events (extra events are dropped and counted in
+  `stats/0`), large payloads are stored as their size, and the buffer is
+  trimmed as soon as it goes over its limit instead of once per second.
+- A nested span ending no longer turns flight tracing off for its parent.
+- A dropped (unsampled) span no longer leaves flight tracing on in its
+  process after it ends.
+- A flight recorder worker that crashes is restarted and keeps receiving
+  events; it used to stay dead and its events were lost.
+- Out-of-range flight recorder settings (pool size, buffer size) are ignored
+  with a warning.
+- `OTEL_BSP_SCHEDULE_DELAY` is now applied to the batch span processor. It
+  was stored under the wrong name and silently ignored.
+- `OTEL_BSP_EXPORT_TIMEOUT` and `OTEL_METRIC_EXPORT_INTERVAL` are now read.
+- A zero, negative or non-integer metrics export interval or batch processor
+  setting is ignored with a warning. A zero interval used to make the exporter
+  loop without pause.
+- Stopping the metrics exporter shuts exporters down with their latest state,
+  so resources opened during the final export are released.
+- Compressed log rotation works in small chunks instead of loading the whole
+  file into memory.
+- The file log exporter no longer drops the batch it receives right after
+  reopening its file.
 
 ### Removed
 - `instrument_registry:lookup_label/2`, `cache_label/3`,
@@ -45,6 +70,7 @@ All notable changes to this project will be documented in this file.
 - `instrument_lib:table/0` and `tables/0`, along with the per-scheduler
   registry tables.
 - `instrument_vector:collect/1`.
+
 
 ## [1.1.5] - 2026-07-18
 

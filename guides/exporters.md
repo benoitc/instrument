@@ -297,7 +297,7 @@ instrument_metrics_exporter:register(instrument_metrics_exporter_otlp:new(#{
 
 ### Metrics Export Configuration
 
-Configure the export interval via application environment:
+Set the export interval in milliseconds in the application environment:
 
 ```erlang
 %% In sys.config
@@ -306,11 +306,13 @@ Configure the export interval via application environment:
 ]}
 ```
 
-Or at runtime:
+Or with the standard environment variable, used when the application setting is absent:
 
-```erlang
-application:set_env(instrument, metrics_export_interval, 30000).
+```sh
+export OTEL_METRIC_EXPORT_INTERVAL=30000
 ```
+
+The interval is read when the metrics exporter starts, and defaults to 60000. A value that is not a positive integer is ignored with a warning.
 
 ### Manual Metrics Flush
 

@@ -47,7 +47,8 @@
   %% Task 5: labeled start_time, empty data skip, otel_vec unit
   labeled_counter_start_time_test/1,
   labeled_histogram_start_time_test/1,
-  never_written_meter_emits_nothing_test/1
+  never_written_meter_emits_nothing_test/1,
+  terminate_shuts_down_final_state/1
 ]).
 
 -include_lib("stdlib/include/assert.hrl").
@@ -87,7 +88,8 @@ all() ->
     %% Task 5: labeled start_time, empty data skip, otel_vec unit
     labeled_counter_start_time_test,
     labeled_histogram_start_time_test,
-    never_written_meter_emits_nothing_test
+    never_written_meter_emits_nothing_test,
+    terminate_shuts_down_final_state
   ].
 
 init_per_suite(Config) ->
@@ -766,3 +768,30 @@ never_written_meter_emits_nothing_test(_Config) ->
   ?assertEqual([], Phantom,
     "created-but-never-written instrument must not appear in exported metrics"),
   ok = instrument_meter:unregister_instrument(<<"never_written_phantom">>).
+
+%% terminate/2 must shut exporters down with the state returned by the final
+%% export, not the state from before it.
+terminate_shuts_down_final_state(_Config) ->
+  Parent = self(),
+  ok = meck:new(stateful_metrics_exporter, [non_strict]),
+  try
+    ok = meck:expect(stateful_metrics_exporter, exporter_init, fun(_) -> {ok, 0} end),
+    ok = meck:expect(stateful_metrics_exporter, exporter_export,
+                     fun(_Metrics, N) -> {ok, N + 1} end),
+    ok = meck:expect(stateful_metrics_exporter, exporter_shutdown,
+                     fun(N) -> Parent ! {shutdown_state, N}, ok end),
+    ok = instrument_metrics_exporter:register(#{module => stateful_metrics_exporter}),
+    Counter = instrument_metric:new_counter(terminate_state_counter, [{help, "t"}]),
+    ok = instrument_metric:inc_counter(Counter),
+    State = sys:get_state(instrument_metrics_exporter),
+    %% Run the callback on a copy of the live state; the server keeps running.
+    ok = instrument_metrics_exporter:terminate(shutdown, State),
+    receive
+      {shutdown_state, N} -> ?assertEqual(1, N)
+    after 1000 ->
+      ct:fail(no_shutdown)
+    end,
+    ok = instrument_metrics_exporter:unregister(stateful_metrics_exporter)
+  after
+    meck:unload(stateful_metrics_exporter)
+  end.
