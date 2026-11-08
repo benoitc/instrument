@@ -46,7 +46,8 @@ The supervisor (`instrument_sup`) starts these children with `one_for_all` strat
 | 3 | metrics_exporter | instrument_metrics_exporter | Metrics export |
 | 4 | log_exporter | instrument_log_exporter | Log export |
 | 5 | span_processor | instrument_span_processor | Span processing chain |
-| 6 | flight_recorder | instrument_flight_recorder | Message tracing |
+| 6 | tracer_pool | instrument_tracer_pool | Flight recorder worker supervisor |
+| 7 | flight_recorder | instrument_flight_recorder | Message tracing |
 
 ### Design Principles
 
@@ -351,13 +352,20 @@ Inbound (extract):
     +---> [NIF hashes tracee PID to select worker]
     |         |
     |         v
-    |     [Send {trace, ...} to worker]
+    |     [Worker has max_queue events waiting? drop and count]
     |         |
     |         v
-    |     [Worker inserts into ETS ring buffer]
+    |     [Payload over max_payload_bytes? replace by {truncated, Size}]
+    |         |
+    |         v
+    |     [Send {trace, ...} to the worker, resolved by registered name]
+    |         |
+    |         v
+    |     [Worker inserts into ETS ring buffer, acks the NIF counter,
+    |      asks the recorder to evict if the buffer is over its limit]
     |
     v
-[On span end: erlang:trace(self(), false, ...)]
+[On the owning span's end: erlang:trace(self(), false, ...)]
 ```
 
 ## Extension Points
@@ -619,7 +627,7 @@ ErlNifUInt64 hash = enif_hash(ERL_NIF_INTERNAL_HASH, tracee, 0);
 unsigned int worker_idx = hash % pool_size;
 ```
 
-This avoids the single-process bottleneck that would occur if all trace events went to one handler.
+This avoids the single-process bottleneck that would occur if all trace events went to one handler. Each worker has a counter in a NIF resource: the NIF increments it before sending and drops the event once `flight_recorder_max_queue` events are outstanding, and the worker decrements it after each batch. This bounds mailbox memory to about pool size times `max_queue` times `max_payload_bytes`.
 
 ### Batched Export
 

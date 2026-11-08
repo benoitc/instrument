@@ -24,6 +24,8 @@
   file_exporter_json/1,
   file_exporter_rotation/1,
   file_exporter_recovery_after_failure/1,
+  file_exporter_compressed_rotation/1,
+  file_exporter_reopen_keeps_batch/1,
   otlp_exporter_init/1,
   batch_export/1,
   flush/1,
@@ -46,6 +48,8 @@ all() ->
     file_exporter_json,
     file_exporter_rotation,
     file_exporter_recovery_after_failure,
+    file_exporter_compressed_rotation,
+    file_exporter_reopen_keeps_batch,
     otlp_exporter_init,
     batch_export,
     flush,
@@ -541,3 +545,50 @@ collect_log_bodies(Deadline, Acc) ->
 body_to_binary(B) when is_binary(B) -> B;
 body_to_binary(B) ->
   iolist_to_binary(io_lib:format("~ts", [B])).
+
+file_log_record(Body) ->
+  #log_record{
+    timestamp = erlang:system_time(nanosecond),
+    observed_timestamp = erlang:system_time(nanosecond),
+    severity_number = ?SEVERITY_INFO,
+    severity_text = <<"INFO">>,
+    body = Body,
+    attributes = #{}
+  }.
+
+%% Rotation with compress => true writes a valid gzip of the rotated file and
+%% removes the uncompressed copy.
+file_exporter_compressed_rotation(Config) ->
+  Dir = proplists:get_value(priv_dir, Config),
+  Path = filename:join(Dir, "compressed_rotation.log"),
+  {ok, S0} = instrument_log_exporter_file:exporter_init(
+               #{path => list_to_binary(Path), format => text,
+                 max_size => 2000, max_files => 3, compress => true}),
+  Records = [file_log_record(list_to_binary("compressed line " ++ integer_to_list(N)))
+             || N <- lists:seq(1, 100)],
+  {ok, S1} = instrument_log_exporter_file:exporter_export(Records, S0),
+  ok = instrument_log_exporter_file:exporter_shutdown(S1),
+  GzPath = Path ++ ".1.gz",
+  ?assert(filelib:is_regular(GzPath)),
+  ?assertNot(filelib:is_regular(Path ++ ".1")),
+  {ok, Gz} = file:read_file(GzPath),
+  Plain = zlib:gunzip(Gz),
+  ?assertNotEqual(nomatch, binary:match(Plain, <<"compressed line">>)),
+  ok.
+
+%% A batch exported while the file handle is closed is written after the
+%% reopen instead of being dropped.
+file_exporter_reopen_keeps_batch(Config) ->
+  Dir = proplists:get_value(priv_dir, Config),
+  Path = filename:join(Dir, "reopen_keeps_batch.log"),
+  {ok, S0} = instrument_log_exporter_file:exporter_init(
+               #{path => list_to_binary(Path), format => text}),
+  ok = instrument_log_exporter_file:exporter_shutdown(S0),
+  %% fd is the 7th element of the exporter state record
+  Closed = setelement(7, S0, undefined),
+  {ok, S1} = instrument_log_exporter_file:exporter_export(
+               [file_log_record(<<"kept after reopen">>)], Closed),
+  ok = instrument_log_exporter_file:exporter_shutdown(S1),
+  {ok, Data} = file:read_file(Path),
+  ?assertNotEqual(nomatch, binary:match(Data, <<"kept after reopen">>)),
+  ok.

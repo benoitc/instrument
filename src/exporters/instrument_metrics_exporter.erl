@@ -150,7 +150,7 @@ shutdown() ->
 %% ============================================================================
 
 init([]) ->
-  Interval = application:get_env(instrument, metrics_export_interval, 60000),
+  Interval = instrument_config:get_metric_export_interval(),
   State = #state{interval = Interval},
   {ok, schedule_export(State)}.
 
@@ -208,10 +208,13 @@ handle_info(_Info, State) ->
   {noreply, State}.
 
 terminate(_Reason, State) ->
-  do_export(State),
+  cancel_timer(State),
+  %% Shut exporters down with the state the final export returned, so
+  %% resources it opened or replaced are released.
+  State2 = do_export(State),
   lists:foreach(fun(#{module := M, state := S}) ->
     instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
-  end, State#state.exporters),
+  end, State2#state.exporters),
   ok.
 
 code_change(_OldVsn, State, _Extra) ->

@@ -32,7 +32,14 @@
   async_parent_span_traced/1,
   marker_in_spawned_child/1,
   tracer_bootstrap_filtered/1,
-  spawned_child_cleanup_after_parent/1
+  spawned_child_cleanup_after_parent/1,
+  %% Memory bounds and ownership
+  nested_span_keeps_tracing/1,
+  large_payload_truncated/1,
+  queue_bound_drops_events/1,
+  worker_restart_keeps_capturing/1,
+  invalid_config_falls_back/1,
+  disabled_by_default/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -56,7 +63,14 @@ all() ->
     async_parent_span_traced,
     marker_in_spawned_child,
     tracer_bootstrap_filtered,
-    spawned_child_cleanup_after_parent
+    spawned_child_cleanup_after_parent,
+    %% Memory bounds and ownership
+    nested_span_keeps_tracing,
+    large_payload_truncated,
+    queue_bound_drops_events,
+    worker_restart_keeps_capturing,
+    invalid_config_falls_back,
+    disabled_by_default
   ].
 
 init_per_suite(Config) ->
@@ -697,4 +711,142 @@ wait_until(Producer, Pred, TimeoutMs) ->
     false ->
       timer:sleep(50),
       wait_until(Producer, Pred, TimeoutMs - 50)
+  end.
+
+%% ============================================================================
+%% Memory bounds and ownership
+%% ============================================================================
+
+%% Restart the application with extra env, for settings read at startup.
+restart_with(Env) ->
+  ok = application:stop(instrument),
+  [application:set_env(instrument, K, V) || {K, V} <- Env],
+  ok = application:start(instrument).
+
+restore(Keys) ->
+  ok = application:stop(instrument),
+  [application:unset_env(instrument, K) || K <- Keys],
+  application:set_env(instrument, flight_recorder_auto_enable, false),
+  ok = application:start(instrument).
+
+raw_trace_id() ->
+  instrument_id:hex_to_trace_id(instrument_tracer:trace_id()).
+
+workers() ->
+  [Pid || {_, Pid, _, _} <- supervisor:which_children(instrument_tracer_pool),
+          is_pid(Pid)].
+
+%% A nested span ending must not turn off tracing for its still-open parent.
+nested_span_keeps_tracing(_Config) ->
+  ok = instrument_flight_recorder:enable(),
+  TraceId = instrument_tracer:with_span(<<"outer">>, fun() ->
+    instrument_tracer:with_span(<<"inner">>, fun() ->
+      self() ! inside_inner,
+      receive inside_inner -> ok end
+    end),
+    self() ! after_inner,
+    receive after_inner -> ok end,
+    raw_trace_id()
+  end),
+  Events = wait_until(fun() -> instrument_flight_recorder:get_trace(TraceId) end,
+                      fun(Es) -> has_message(Es, after_inner) end),
+  true = has_message(Events, after_inner),
+  ok.
+
+has_message(Events, Msg) ->
+  lists:any(fun({_, {'receive', _, M}}) -> M =:= Msg;
+               ({_, {send, _, M, _}}) -> M =:= Msg;
+               (_) -> false
+            end, Events).
+
+%% Payloads over flight_recorder_max_payload_bytes are stored as their size.
+large_payload_truncated(_Config) ->
+  ok = instrument_flight_recorder:enable(),
+  Big = binary:copy(<<"x">>, 100000),
+  TraceId = instrument_tracer:with_span(<<"big">>, fun() ->
+    self() ! {big, Big},
+    receive {big, _} -> ok end,
+    self() ! small,
+    receive small -> ok end,
+    raw_trace_id()
+  end),
+  Events = wait_until(fun() -> instrument_flight_recorder:get_trace(TraceId) end,
+                      fun(Es) -> has_message(Es, small) end),
+  Truncated = [Size || {_, {'receive', _, {truncated, Size}}} <- Events],
+  [Size | _] = Truncated,
+  true = Size >= 100000,
+  true = has_message(Events, small),
+  false = has_message(Events, {big, Big}),
+  ok.
+
+%% While workers cannot keep up, each queues at most flight_recorder_max_queue
+%% events and the rest are dropped and counted.
+queue_bound_drops_events(_Config) ->
+  restart_with([{flight_recorder_max_queue, 10}, {flight_recorder_pool_size, 1}]),
+  try
+    ok = instrument_flight_recorder:enable(),
+    [Worker] = workers(),
+    erlang:suspend_process(Worker),
+    try
+      instrument_tracer:with_span(<<"burst">>, fun() ->
+        [self() ! {n, N} || N <- lists:seq(1, 500)],
+        [receive {n, N} -> ok end || N <- lists:seq(1, 500)]
+      end),
+      {message_queue_len, Len} = erlang:process_info(Worker, message_queue_len),
+      true = Len =< 10,
+      #{dropped_events := Dropped, max_queue := 10} = instrument_flight_recorder:stats(),
+      true = Dropped >= 900
+    after
+      erlang:resume_process(Worker)
+    end,
+    %% Once the worker catches up, its slot drains and capture resumes.
+    true = wait_until(fun() -> maps:get(queued_events, instrument_flight_recorder:stats()) end,
+                      fun(Q) -> Q =:= 0 end) =:= 0
+  after
+    restore([flight_recorder_max_queue, flight_recorder_pool_size])
+  end.
+
+%% A restarted worker keeps receiving events from newly traced spans.
+worker_restart_keeps_capturing(_Config) ->
+  ok = instrument_flight_recorder:enable(),
+  Old = workers(),
+  Victim = whereis(instrument_tracer_pool:worker_name(0)),
+  exit(Victim, kill),
+  New = wait_until(fun workers/0,
+                   fun(Ws) -> length(Ws) =:= length(Old)
+                              andalso not lists:member(Victim, Ws)
+                   end),
+  true = length(New) =:= length(Old),
+  true = is_pid(whereis(instrument_tracer_pool:worker_name(0))),
+  TraceId = instrument_tracer:with_span(<<"after_restart">>, fun() ->
+    self() ! restarted,
+    receive restarted -> ok end,
+    raw_trace_id()
+  end),
+  Events = wait_until(fun() -> instrument_flight_recorder:get_trace(TraceId) end,
+                      fun(Es) -> has_message(Es, restarted) end),
+  true = has_message(Events, restarted),
+  ok.
+
+%% Out-of-range settings fall back to the defaults instead of being used.
+invalid_config_falls_back(_Config) ->
+  restart_with([{flight_recorder_pool_size, 0}, {flight_recorder_buffer_size, -1},
+                {flight_recorder_max_queue, nope}]),
+  try
+    Stats = instrument_flight_recorder:stats(),
+    Schedulers = erlang:system_info(schedulers),
+    #{pool_size := Schedulers, buffer_size := 65536, max_queue := 1000} = Stats
+  after
+    restore([flight_recorder_pool_size, flight_recorder_buffer_size,
+             flight_recorder_max_queue])
+  end.
+
+disabled_by_default(_Config) ->
+  ok = application:stop(instrument),
+  application:unset_env(instrument, flight_recorder_auto_enable),
+  ok = application:start(instrument),
+  try
+    false = instrument_flight_recorder:is_enabled()
+  after
+    restore([])
   end.

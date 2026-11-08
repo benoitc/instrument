@@ -223,6 +223,49 @@ check_cardinality() ->
     end.
 ```
 
+## Flight Recorder
+
+The flight recorder captures the messages sent and received while a span is open, so you can replay what a slow or failed request did. It is disabled by default because it traces message passing on every process that runs a span.
+
+Enable it at runtime:
+
+```erlang
+ok = instrument_flight_recorder:enable().
+```
+
+Or at startup:
+
+```erlang
+{instrument, [
+    {flight_recorder_auto_enable, true}
+]}
+```
+
+Read what a trace captured:
+
+```erlang
+Events = instrument_flight_recorder:get_trace(TraceId).
+```
+
+### Memory Limits
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `flight_recorder_buffer_size` | `65536` | Events kept in the buffer; the oldest are evicted |
+| `flight_recorder_max_queue` | `1000` | Events each worker may have waiting; extra events are dropped |
+| `flight_recorder_max_payload_bytes` | `1024` | Larger message payloads are stored as `{truncated, Size}`; `0` keeps only the size |
+| `flight_recorder_pool_size` | schedulers | Worker processes, from 1 to 1024 |
+
+These are read at startup. Values out of range are ignored with a warning and the default applies.
+
+All events from one process go to the same worker, so a single process sending messages in a tight loop fills that worker's queue quickly and further events are dropped. Check how much is lost:
+
+```erlang
+#{dropped_events := Dropped, table_size := Size} = instrument_flight_recorder:stats().
+```
+
+For large nested terms, `Size` in `{truncated, Size}` is a lower bound; for binaries it is exact.
+
 ## Graceful Shutdown
 
 ### Flushing Telemetry

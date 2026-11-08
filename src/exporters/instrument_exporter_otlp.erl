@@ -40,6 +40,12 @@
 
 %% Exporter callbacks
 -export([init/1, export/2, shutdown/1, force_flush/1]).
+-export([export_async/0]).
+
+%% @doc Exports run outside the exporter server process: the OTLP exporter
+%% only holds connection settings, and network retries must not block it.
+-spec export_async() -> true.
+export_async() -> true.
 
 -include("instrument_otel.hrl").
 

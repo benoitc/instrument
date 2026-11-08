@@ -27,6 +27,9 @@ All notable changes to this project will be documented in this file.
   internal metric record.
 - Observable callbacks must not call the Prometheus formatter or the OTLP
   exporter: both now run the callbacks themselves, so doing so recurses.
+- The flight recorder is now disabled by default. Set
+  `flight_recorder_auto_enable` to `true` or call
+  `instrument_flight_recorder:enable/0` to turn it on.
 
 ### Changed
 - Creating an instrument or writing a new label set no longer goes through the
@@ -41,10 +44,56 @@ All notable changes to this project will be documented in this file.
 - OTLP labeled counters and histograms now carry their start time.
 - Upgrading in place from 1.1.x cleans up the old internal state on first
   start.
+- Setting `OTEL_TRACES_EXPORTER` (or the `span_exporter` application setting)
+  now sends spans through the batch span processor, as other OpenTelemetry
+  SDKs do. It used to go through the older exporter manager, which exported
+  inside its own process and queued without limit while a collector was slow
+  or down. `OTEL_BSP_*` settings apply without having to be set explicitly.
+- The span exporter manager is only called by the tracer while it has an
+  exporter registered, which makes span creation cheaper when it is idle and
+  avoids exporting spans twice when a processor is also configured.
 
 ### Fixed
 - Label key sets such as `[a_b]` and `[a, b]` no longer collide. The second
   one's writes used to be lost silently.
+- The span and log exporter managers now drop spans and log records once 2048
+  are waiting, instead of letting their mailbox grow without limit while an
+  export is slow. Drops are reported by `stats/0`, and the limit is
+  configurable. OTLP exports run outside the manager process so retries no
+  longer block it.
+- The batch span processor drops spans past its queue size before they reach
+  its mailbox, sends at most `max_export_batch_size` spans per export, and
+  reports drops through `dropped_spans/0`.
+- `force_flush/0` and `shutdown/0` on the batch processor no longer time out
+  on the caller while an export is still allowed to run.
+- The simple and tail-sampling span processors no longer call their exporter
+  from many processes at once or rewrite its state in `persistent_term` on
+  every span; each exporter now runs in its own process.
+- The flight recorder's memory is now bounded. It used to copy every traced
+  message, at full size, into worker mailboxes with no limit, so a busy
+  traced process could grow memory quickly. Each worker now holds at most
+  `flight_recorder_max_queue` events (extra events are dropped and counted in
+  `stats/0`), large payloads are stored as their size, and the buffer is
+  trimmed as soon as it goes over its limit instead of once per second.
+- A nested span ending no longer turns flight tracing off for its parent.
+- A dropped (unsampled) span no longer leaves flight tracing on in its
+  process after it ends.
+- A flight recorder worker that crashes is restarted and keeps receiving
+  events; it used to stay dead and its events were lost.
+- Out-of-range flight recorder settings (pool size, buffer size) are ignored
+  with a warning.
+- `OTEL_BSP_SCHEDULE_DELAY` is now applied to the batch span processor. It
+  was stored under the wrong name and silently ignored.
+- `OTEL_BSP_EXPORT_TIMEOUT` and `OTEL_METRIC_EXPORT_INTERVAL` are now read.
+- A zero, negative or non-integer metrics export interval or batch processor
+  setting is ignored with a warning. A zero interval used to make the exporter
+  loop without pause.
+- Stopping the metrics exporter shuts exporters down with their latest state,
+  so resources opened during the final export are released.
+- Compressed log rotation works in small chunks instead of loading the whole
+  file into memory.
+- The file log exporter no longer drops the batch it receives right after
+  reopening its file.
 
 ### Removed
 - `instrument_registry:lookup_label/2`, `cache_label/3`,
