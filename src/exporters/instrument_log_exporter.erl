@@ -34,7 +34,8 @@
   export/1,
   export_batch/1,
   flush/0,
-  shutdown/0
+  shutdown/0,
+  stats/0
 ]).
 
 %% Exporter behaviour callbacks
@@ -54,12 +55,10 @@
 
 -include("instrument_otel.hrl").
 
+-define(ADMISSION, '$instrument_log_exporter_admission').
+
 -record(state, {
-  exporters = [] :: [exporter()],
-  batch = [] :: [#log_record{}],
-  batch_size = 512 :: pos_integer(),
-  batch_timeout = 5000 :: pos_integer(),
-  timer_ref :: reference() | undefined
+  batcher :: instrument_export_batcher:batcher()
 }).
 
 -type exporter() :: #{
@@ -79,6 +78,9 @@ behaviour_info(callbacks) ->
     {exporter_export, 2},      %% exporter_export(LogRecords, State) -> {ok, NewState} | {error, Reason, NewState}
     {exporter_shutdown, 1},    %% exporter_shutdown(State) -> ok
     {exporter_force_flush, 1}  %% exporter_force_flush(State) -> {ok, NewState}
+    %% Optional: export_async() -> true runs exports in a separate process,
+    %% so a slow exporter does not block the server. Only for exporters whose
+    %% state is not tied to the process that called init (no raw files).
   ];
 behaviour_info(_) ->
   undefined.
@@ -108,101 +110,103 @@ unregister(Module) ->
 list() ->
   gen_server:call(?MODULE, list).
 
-%% @doc Exports a single log record (adds to batch).
+%% @doc Exports a single log record (adds to batch). Dropped when the queue
+%% is full (`log_exporter_max_queue_size' or OTEL_BLRP_MAX_QUEUE_SIZE,
+%% default 2048).
 -spec export(#log_record{}) -> ok.
 export(LogRecord) ->
-  gen_server:cast(?MODULE, {export, LogRecord}).
+  case instrument_admission:admit(?ADMISSION, 1) of
+    true -> gen_server:cast(?MODULE, {export, [LogRecord], 1});
+    false -> ok
+  end.
 
-%% @doc Exports multiple log records immediately.
+%% @doc Exports multiple log records. Dropped when they do not fit in the
+%% queue.
 -spec export_batch([#log_record{}]) -> ok.
+export_batch([]) ->
+  ok;
 export_batch(LogRecords) ->
-  gen_server:cast(?MODULE, {export_batch, LogRecords}).
+  N = length(LogRecords),
+  case instrument_admission:admit(?ADMISSION, N) of
+    true -> gen_server:cast(?MODULE, {export, LogRecords, N});
+    false -> ok
+  end.
 
-%% @doc Forces a flush of all pending log records.
+%% @doc Exports all pending log records and flushes the exporters.
 -spec flush() -> ok.
 flush() ->
-  gen_server:call(?MODULE, flush, 30000).
+  gen_server:call(?MODULE, flush, export_timeout() + 5000).
 
-%% @doc Shuts down all exporters.
+%% @doc Exports pending log records and shuts down all exporters.
 -spec shutdown() -> ok.
 shutdown() ->
-  gen_server:call(?MODULE, shutdown, 30000).
+  gen_server:call(?MODULE, shutdown, 2 * export_timeout() + 5000).
+
+%% @doc Returns `#{queued, dropped, max_queue}'.
+-spec stats() -> #{queued := non_neg_integer(), dropped := non_neg_integer(),
+                   max_queue := pos_integer()}.
+stats() ->
+  #{queued => instrument_admission:queued(?ADMISSION),
+    dropped => instrument_admission:dropped(?ADMISSION),
+    max_queue => max_queue()}.
 
 %% ============================================================================
 %% gen_server callbacks
 %% ============================================================================
 
 init([]) ->
-  {ok, #state{}}.
+  Batcher = instrument_export_batcher:new(#{
+    admission => ?ADMISSION,
+    callbacks => callbacks(),
+    max_queue => max_queue(),
+    export_timeout => export_timeout()
+  }),
+  {ok, #state{batcher = Batcher}}.
 
-handle_call({register, Module, Config}, _From, State) ->
+handle_call({register, Module, Config}, _From, #state{batcher = B} = State) ->
   case Module:exporter_init(Config) of
     {ok, ExporterState} ->
       Exporter = #{module => Module, config => Config, state => ExporterState},
-      NewExporters = [Exporter | State#state.exporters],
-      {reply, ok, State#state{exporters = NewExporters}};
+      {reply, ok, State#state{batcher = instrument_export_batcher:add_exporter(Exporter, B)}};
     {error, Reason} ->
       {reply, {error, Reason}, State}
   end;
 
-handle_call({unregister, Module}, _From, State) ->
-  {Removed, Remaining} = lists:partition(
-    fun(#{module := M}) -> M =:= Module end,
-    State#state.exporters
-  ),
-  %% Shutdown removed exporters
+handle_call({unregister, Module}, _From, #state{batcher = B} = State) ->
+  {Removed, B1} = instrument_export_batcher:remove_exporter(Module, B),
   lists:foreach(fun(#{module := M, state := S}) ->
     instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
   end, Removed),
-  {reply, ok, State#state{exporters = Remaining}};
+  {reply, ok, State#state{batcher = B1}};
 
-handle_call(list, _From, State) ->
-  Modules = [M || #{module := M} <- State#state.exporters],
+handle_call(list, _From, #state{batcher = B} = State) ->
+  Modules = [M || #{module := M} <- instrument_export_batcher:exporters(B)],
   {reply, Modules, State};
 
-handle_call(flush, _From, State) ->
-  State2 = do_flush(State),
-  State3 = do_force_flush(State2),
-  {reply, ok, State3};
+handle_call(flush, From, #state{batcher = B} = State) ->
+  {noreply, State#state{batcher = instrument_export_batcher:flush(From, B)}};
 
-handle_call(shutdown, _From, State) ->
-  State2 = do_flush(State),
-  lists:foreach(fun(#{module := M, state := S}) ->
-    instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
-  end, State2#state.exporters),
-  {reply, ok, State2#state{exporters = []}};
+handle_call(shutdown, _From, #state{batcher = B} = State) ->
+  B1 = instrument_export_batcher:shutdown_exporters(instrument_export_batcher:drain(B)),
+  {reply, ok, State#state{batcher = B1}};
 
 handle_call(_Request, _From, State) ->
   {reply, {error, unknown_request}, State}.
 
-handle_cast({export, LogRecord}, State) ->
-  NewBatch = [LogRecord | State#state.batch],
-  State2 = maybe_start_timer(State#state{batch = NewBatch}),
-  State3 = maybe_flush_batch(State2),
-  {noreply, State3};
-
-handle_cast({export_batch, LogRecords}, State) ->
-  NewBatch = LogRecords ++ State#state.batch,
-  State2 = State#state{batch = NewBatch},
-  State3 = do_flush(State2),
-  {noreply, State3};
+handle_cast({export, LogRecords, N}, #state{batcher = B} = State) ->
+  {noreply, State#state{batcher = instrument_export_batcher:add(LogRecords, N, B)}};
 
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
-handle_info(batch_timeout, State) ->
-  State2 = do_flush(State#state{timer_ref = undefined}),
-  {noreply, State2};
+handle_info(Info, #state{batcher = B} = State) ->
+  case instrument_export_batcher:handle_info(Info, B) of
+    {ok, B1} -> {noreply, State#state{batcher = B1}};
+    ignore -> {noreply, State}
+  end.
 
-handle_info(_Info, State) ->
-  {noreply, State}.
-
-terminate(_Reason, State) ->
-  %% Final flush and shutdown
-  State2 = do_flush(State),
-  lists:foreach(fun(#{module := M, state := S}) ->
-    instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
-  end, State2#state.exporters),
+terminate(_Reason, #state{batcher = B}) ->
+  _ = instrument_export_batcher:shutdown_exporters(instrument_export_batcher:drain(B)),
   ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -212,58 +216,35 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %% ============================================================================
 
-maybe_start_timer(#state{timer_ref = undefined, batch_timeout = Timeout} = State) ->
-  Ref = erlang:send_after(Timeout, self(), batch_timeout),
-  State#state{timer_ref = Ref};
-maybe_start_timer(State) ->
-  State.
+callbacks() ->
+  #{export => fun(M, Records, S) ->
+                case M:exporter_export(Records, S) of
+                  {ok, NewS} -> NewS;
+                  {error, _Reason, NewS} -> NewS;
+                  _ -> S
+                end
+              end,
+    shutdown => fun(M, S) -> M:exporter_shutdown(S) end,
+    force_flush => fun(M, S) ->
+                     case M:exporter_force_flush(S) of
+                       {ok, NewS} -> NewS;
+                       _ -> S
+                     end
+                   end}.
 
-maybe_flush_batch(#state{batch = Batch, batch_size = MaxSize} = State) when length(Batch) >= MaxSize ->
-  do_flush(State);
-maybe_flush_batch(State) ->
-  State.
+max_queue() ->
+  case application:get_env(instrument, log_exporter_max_queue_size) of
+    {ok, N} when is_integer(N), N > 0 -> N;
+    _ ->
+      case os:getenv("OTEL_BLRP_MAX_QUEUE_SIZE") of
+        false -> 2048;
+        V -> try list_to_integer(V) of
+               I when I > 0 -> I;
+               _ -> 2048
+             catch _:_ -> 2048
+             end
+      end
+  end.
 
-do_flush(#state{batch = []} = State) ->
-  cancel_timer(State);
-do_flush(#state{batch = Batch, exporters = Exporters} = State) ->
-  %% Export to all registered exporters
-  NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    %% Check if exporter is enabled at runtime
-    case instrument_config:is_exporter_enabled(M) of
-      false ->
-        %% Skip disabled exporter
-        Exporter;
-      true ->
-        try M:exporter_export(Batch, S) of
-          {ok, NewState} ->
-            Exporter#{state => NewState};
-          {error, _Reason, NewState} ->
-            Exporter#{state => NewState};
-          _ ->
-            Exporter
-        catch _:_ ->
-          Exporter
-        end
-    end
-  end, Exporters),
-  cancel_timer(State#state{batch = [], exporters = NewExporters}).
-
-do_force_flush(#state{exporters = Exporters} = State) ->
-  %% Force flush all registered exporters
-  NewExporters = lists:map(fun(#{module := M, state := S} = Exporter) ->
-    try M:exporter_force_flush(S) of
-      {ok, NewState} ->
-        Exporter#{state => NewState};
-      _ ->
-        Exporter
-    catch _:_ ->
-      Exporter
-    end
-  end, Exporters),
-  State#state{exporters = NewExporters}.
-
-cancel_timer(#state{timer_ref = undefined} = State) ->
-  State;
-cancel_timer(#state{timer_ref = Ref} = State) ->
-  erlang:cancel_timer(Ref),
-  State#state{timer_ref = undefined}.
+export_timeout() ->
+  30000.
