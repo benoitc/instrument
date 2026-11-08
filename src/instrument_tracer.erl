@@ -250,11 +250,11 @@ start_span_impl(Name, Opts) ->
           ok;
         {undefined, false} ->
           %% New root span - enable tracing
-          enable_flight_tracing(TraceId);
+          enable_flight_tracing(TraceId, SpanId);
         {#span_ctx{}, false} ->
           %% Async parent case: pre-existing process starting span with remote parent
           %% Enable tracing for this process too
-          enable_flight_tracing(TraceId)
+          enable_flight_tracing(TraceId, SpanId)
       end;
     false ->
       ok
@@ -262,8 +262,10 @@ start_span_impl(Name, Opts) ->
 
   FinalSpan.
 
-%% @private Enable flight recorder tracing for this process.
-enable_flight_tracing(TraceId) ->
+%% @private Enable flight recorder tracing for this process. `SpanId' is the
+%% span that owns it: only that span's end turns tracing off, so a nested
+%% span ending first does not cut tracing for the rest of its parent.
+enable_flight_tracing(TraceId, SpanId) ->
   Label = binary:decode_unsigned(TraceId),
   %% Create a session resource - children will inherit this via set_on_spawn
   %% and will be able to detect when the session becomes inactive
@@ -271,8 +273,8 @@ enable_flight_tracing(TraceId) ->
   %% Store label and session in process dictionary
   put('$instrument_flight_label', Label),
   put('$instrument_flight_session_ref', SessionRef),
-  %% Mark that THIS process enabled tracing (for cleanup in end_span)
-  put('$instrument_flight_owner', true),
+  %% Record which span enabled tracing (for cleanup in end_span)
+  put('$instrument_flight_owner', SpanId),
   %% Get tracer state with worker pool info and add session_ref
   TracerState = instrument_flight_recorder:tracer_state(TraceId),
   TracerStateWithSession = TracerState#{session_ref => SessionRef},
@@ -285,6 +287,26 @@ enable_flight_tracing(TraceId) ->
     ])
   catch
     error:badarg -> ok
+  end.
+
+%% @private Turn flight tracing off if span `SpanId' enabled it.
+maybe_disable_flight_tracing(SpanId) ->
+  case get('$instrument_flight_owner') of
+    SpanId when SpanId =/= undefined ->
+      erase('$instrument_flight_owner'),
+      %% Clear label from process dictionary
+      erase('$instrument_flight_label'),
+      %% Deactivate session resource - children will see this on their next
+      %% trace event and return 'remove' to stop being traced
+      case erase('$instrument_flight_session_ref') of
+        undefined -> ok;
+        SessionRef -> instrument_tracer_nif:deactivate_session_resource(SessionRef)
+      end,
+      %% Fully disable tracing for this process (all flags + tracer)
+      try erlang:trace(self(), false, [send, 'receive', set_on_spawn, set_on_link])
+      catch _:_ -> ok end;
+    _ ->
+      ok
   end.
 
 %% @private Creates a minimal no-op span when tracing is disabled.
@@ -342,8 +364,10 @@ end_span() ->
 %% The span parameter is used to identify which span to end via its span_id.
 %% The actual span data is retrieved from context to capture any modifications.
 -spec end_span(span()) -> ok.
-end_span(#span{is_recording = false} = Span) ->
-  %% Non-recording spans still need to be detached from context
+end_span(#span{is_recording = false, ctx = #span_ctx{span_id = SpanId}} = Span) ->
+  %% Non-recording spans still need to be detached from context, and may own
+  %% flight tracing (it is enabled regardless of the sampling decision)
+  maybe_disable_flight_tracing(SpanId),
   detach_span(Span),
   ok;
 end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
@@ -378,24 +402,8 @@ end_span(#span{ctx = #span_ctx{span_id = SpanId}} = OriginalSpan) ->
     #span_ctx{trace_flags = 1} -> export_span(FinalSpan);
     _ -> ok
   end,
-  %% Disable tracing if this process owns the trace (enabled it)
-  %% This handles both root spans and async parent spans
-  case erase('$instrument_flight_owner') of
-    true ->
-      %% Clear label from process dictionary
-      erase('$instrument_flight_label'),
-      %% Deactivate session resource - children will see this on their next
-      %% trace event and return 'remove' to stop being traced
-      case erase('$instrument_flight_session_ref') of
-        undefined -> ok;
-        SessionRef -> instrument_tracer_nif:deactivate_session_resource(SessionRef)
-      end,
-      %% Fully disable tracing for this process (all flags + tracer)
-      try erlang:trace(self(), false, [send, 'receive', set_on_spawn, set_on_link])
-      catch _:_ -> ok end;
-    _ ->
-      ok
-  end,
+  %% Disable tracing if this span enabled it (root or async parent span)
+  maybe_disable_flight_tracing(SpanId),
   %% Detach from context using the span we're ending
   detach_span(SpanToEnd),
   ok.
