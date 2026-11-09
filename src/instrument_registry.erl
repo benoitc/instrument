@@ -86,12 +86,12 @@ unregister_all() ->
 with(#metric{} = M, Fun) ->
   Fun(M);
 with(Name, Fun) ->
-  case persistent_term:get({instrument_label, Name, {[], []}}, undefined) of
-    #metric{} = Row -> Fun(Row#metric{name = Name});
-    undefined ->
-      case instrument_series:family(Name) of
-        {custom, {raw, #metric{} = M}, _Idx} -> Fun(M);
-        _ -> {error, not_found}
+  case instrument_series:family(Name) of
+    {custom, {raw, #metric{} = M}, _Idx} -> Fun(M);
+    _ ->
+      case instrument_series:unlabeled_row(Name) of
+        #metric{} = Row -> Fun(Row#metric{name = Name});
+        Error -> Error
       end
   end.
 
@@ -144,6 +144,16 @@ handle_call({clear_labels, Name}, _From, State) ->
 %% every process started after it).
 handle_call(_Req, _From, State) ->
   {reply, {error, unknown_call}, State}.
+
+%% Create the next chunk of slots ahead of the writers that will need it.
+handle_cast({prepare_chunk, Name, Inc, C}, State) ->
+  _ = instrument_lib:safe_call(fun() ->
+    case instrument_series:family(Name) of
+      #family{inc = Inc} = Fam -> instrument_series:ensure_chunk(Name, Fam, C);
+      _ -> ok
+    end
+  end, ok),
+  {noreply, State};
 
 handle_cast(_Msg, State) ->
   {noreply, State}.
@@ -199,8 +209,12 @@ teardown_all_families() ->
 %% full reset is a clean slate. The NIF/atomics resources held by the erased
 %% records are released by refcount when the entries are erased.
 clear_instrument_persistent_terms() ->
-  _ = [persistent_term:erase(K)
-       || {K, _} <- persistent_term:get(), is_instrument_key(K)],
+  %% Retire the slots of erased families and chunks first, so processes that
+  %% cached them stop writing into cells that are no longer exported.
+  _ = [begin
+         instrument_series:kill_term(V),
+         persistent_term:erase(K)
+       end || {K, V} <- persistent_term:get(), is_instrument_key(K)],
   ok.
 
 %% instrument_row entries are published by the write path (claim_row/5) and must
@@ -226,6 +240,7 @@ is_instrument_key(K) when is_tuple(K), tuple_size(K) >= 2 ->
     instrument_family         -> true;
     instrument_family_idx     -> true;
     instrument_row            -> true;
+    instrument_chunk          -> true;
     _                         -> false
   end;
 is_instrument_key(_) ->
@@ -248,27 +263,13 @@ lookup(Name) ->
 %% @doc Returns the number of distinct label sets currently cached for `Name'.
 -spec label_count(term()) -> non_neg_integer().
 label_count(Name) ->
-  case ets:info(?LABEL_COUNTS_TABLE, name) of
-    undefined -> 0;
-    _ ->
-      case ets:lookup(?LABEL_COUNTS_TABLE, {count, Name}) of
-        [{_, N}] -> N;
-        [] -> 0
-      end
-  end.
+  instrument_series:live_count(Name).
 
 %% @doc Returns the number of label sets dropped into the overflow bucket
 %% for `Name' since the registry started (or the metric was last registered).
 -spec cardinality_dropped(term()) -> non_neg_integer().
 cardinality_dropped(Name) ->
-  case ets:info(?LABEL_COUNTS_TABLE, name) of
-    undefined -> 0;
-    _ ->
-      case ets:lookup(?LABEL_COUNTS_TABLE, {dropped, Name}) of
-        [{_, N}] -> N;
-        [] -> 0
-      end
-  end.
+  instrument_series:dropped(Name).
 
 %% @doc Returns the overflow row #metric{} for `Name' if the cardinality cap
 %% has been hit (and the overflow series therefore created), `undefined'
@@ -279,13 +280,7 @@ cardinality_dropped(Name) ->
 %% row carries the accumulated dropped writes, so callers can read its value.
 -spec overflow_sentinel(term()) -> #metric{} | undefined.
 overflow_sentinel(Name) ->
-  case instrument_series:family(Name) of
-    #family{declared_labels = Declared} ->
-      OverflowCanon = instrument_series:overflow_canon(Declared),
-      persistent_term:get({instrument_label, Name, OverflowCanon}, undefined);
-    _ ->
-      undefined
-  end.
+  instrument_series:overflow_row(Name).
 
 -spec collect_all() -> [map()].
 collect_all() ->

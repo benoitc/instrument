@@ -82,28 +82,15 @@ apply_label_fun(Metric, Mod, Fun, Args) ->
   erlang:apply(Mod, Fun, [Metric | Args]).
 
 %% Fold every live label set of a family, applying the getter to each row.
-%% Returns [{LabelValues, Result}] in insertion (chain) order, where
-%% LabelValues is the declared-order values list the caller originally passed
-%% (the stored CacheKey).
+%% Returns [{LabelValues, Result}] in slot order (creation order until a
+%% removed slot is reused), where LabelValues is the values list the caller
+%% originally passed.
 with(VectorMetric, Fun) ->
   Name = vec_name(VectorMetric),
   Mod = module(Fun),
-  case instrument_series:family(Name) of
-    #family{row_seq = Seq} ->
-      N = atomics:get(Seq, 1),
-      %% foldl prepends, so reverse to yield insertion (chain) order — the
-      %% legacy suite pins the order label sets were first written in.
-      lists:reverse(lists:foldl(fun(S, Acc) ->
-        case persistent_term:get({instrument_row, Name, S}, undefined) of
-          {_Canon, CacheKey, Row} ->
-            [{CacheKey, apply_label_fun(Row, Mod, Fun, [])} | Acc];
-          undefined ->
-            Acc
-        end
-      end, [], lists:seq(1, N)));
-    _ ->
-      []
-  end.
+  lists:reverse(instrument_series:fold_rows(Name, fun(CacheKey, _Canon, Row, Acc) ->
+    [{CacheKey, apply_label_fun(Row, Mod, Fun, [])} | Acc]
+  end)).
 
 remove_label(Name, Label) when is_map(Label) ->
   %% A map addresses the row by declared label names; resolve it to the
@@ -124,16 +111,11 @@ clear_labels(Name) ->
 -spec get_or_create_label(metric_name(), label_values()) -> {ok, #metric{}} | {error, term()}.
 get_or_create_label(Name0, LabelValues) ->
   Name = vec_name(Name0),
-  case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
-    #metric{} = Row ->
-      {ok, Row};
-    undefined ->
-      case instrument_series:write(Name, LabelValues,
-                                   fun() -> canon(Name, LabelValues) end,
-                                   fun(_R) -> ok end) of
-        ok -> {ok, row(Name, LabelValues)};
-        Error -> Error
-      end
+  %% The returned cell is held by the caller: its slot is pinned.
+  case instrument_series:resolve_row(Name, LabelValues,
+                                     fun() -> canon(Name, LabelValues) end) of
+    #metric{} = Row -> {ok, Row};
+    Error -> Error
   end.
 
 validate_metric_type(counter)            -> ok;
@@ -181,18 +163,6 @@ declared(Name) ->
 %% sentinel on arity mismatch / undefined declared labels).
 canon(Name, LabelValues) ->
   instrument_series:vec_canon(declared(Name), LabelValues).
-
-%% Resolve a written row by its values-list cache key, with the arbiter-row
-%% fallback for the brief publication race.
-row(Name, LabelValues) ->
-  case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
-    #metric{} = R -> R;
-    undefined ->
-      case ets:lookup_element(instrument_series, {Name, canon(Name, LabelValues)}, 2, undefined) of
-        #metric{} = R -> R;
-        undefined -> {error, not_found}
-      end
-  end.
 
 to_help(Help) when is_binary(Help) -> Help;
 to_help(Help) when is_list(Help) ->

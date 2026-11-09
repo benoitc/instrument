@@ -19,12 +19,15 @@
   help
 }).
 
-%% Series-store family metadata. Stored once in persistent_term
-%% {instrument_family, Name} and (as the recoverable copy) in the
-%% instrument_series arbiter row {{Name, family}, Meta}. Never replaced on any
-%% designed path; clear_labels erases rows but deliberately keeps the meta and
-%% its row_seq (re-minting would collide with in-flight writers on the shared
-%% chain keyspace).
+%% Series-store family metadata, published once in persistent_term
+%% {instrument_family, Name} and kept in the instrument_series arbiter row
+%% {{Name, family}, Meta}. Never replaced on a designed path.
+%%
+%% Series live in pre-created slots. Slot 1 is reserved for the unlabeled
+%% series. Slots come in chunks of growing size (16, 32, ... 1024): chunk 0 is
+%% stored here, later chunks under {instrument_chunk, Name, Inc, C}. A chunk
+%% is {Epochs, Rows}: one epoch per slot in an atomics array (odd = live) and
+%% a tuple of pre-minted #metric{} cells.
 -record(family, {
   kind            :: counter | up_down_counter | gauge | histogram
                    | observable_counter | observable_gauge
@@ -34,5 +37,7 @@
   boundaries      :: [number()] | undefined, %% histograms only
   start_time      :: integer(),              %% creation ns
   idx             :: pos_integer(),          %% slot in the family chain
-  row_seq         :: atomics:atomics_ref()   %% mints row slot numbers
+  inc             :: pos_integer(),          %% unique per incarnation
+  counters        :: atomics:atomics_ref(),  %% high-water, live, dropped, aliases
+  chunk0          :: {atomics:atomics_ref(), tuple()}
 }).

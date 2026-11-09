@@ -99,17 +99,29 @@ repeated_create_does_not_grow_family_chain(_Config) ->
 vec_aliases_are_bounded_and_removed(_Config) ->
   ok = instrument_metric:new_counter_vec(alias_vec, <<"h">>, [v]),
   ok = instrument_metric:inc_counter_vec(alias_vec, [1.0]),
+  PtBefore = length(persistent_term:get()),
   [ok = instrument_metric:inc_counter_vec(alias_vec, [1.0 + N * 1.0e-12])
    || N <- lists:seq(1, 5000)],
-  Keys = [K || {{instrument_label, alias_vec, _} = K, _} <- persistent_term:get()],
+  %% aliases add no persistent_term keys, and at most Limit ETS keys
+  ?assertEqual(PtBefore, length(persistent_term:get())),
+  Inc = alias_inc(),
   Limit = instrument_config:get_metric_cardinality_limit(),
-  ?assert(length(Keys) =< Limit + 1),
+  ?assert(length(alias_rows(Inc)) =< Limit + 1),
+  Cached = [K || {{'$instrument_series', alias_vec, _} = K, _} <- get()],
+  ?assert(length(Cached) =< Limit + 1),
   ?assertEqual(5001.0, instrument_metric:get_counter_vec(alias_vec, [1.0])),
   ?assertEqual(1, instrument_registry:label_count(alias_vec)),
   ok = instrument_metric:remove_label(alias_vec, [1.0 + 1.0e-12]),
   ?assertEqual(0, instrument_registry:label_count(alias_vec)),
-  ?assertEqual([], [K || {{instrument_label, alias_vec, _} = K, _} <- persistent_term:get()]),
+  ?assertEqual([], alias_rows(Inc)),
   ok.
+
+alias_inc() ->
+  {family, _, _, _, _, _, _, Inc, _, _} = instrument_series:family(alias_vec),
+  Inc.
+
+alias_rows(Inc) ->
+  ets:select(instrument_series, [{{{'$s', Inc, key, '_'}, '_', '_'}, [], ['$_']}]).
 
 invalid_histogram_boundaries_fail_at_create(_Config) ->
   ?assertError(empty_buckets,

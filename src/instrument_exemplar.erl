@@ -14,6 +14,7 @@
 -author("benoitc").
 
 -export([
+  activate_reservoir_ref/1,
   new_reservoir/0,
   new_reservoir/1,
   offer/3,
@@ -159,6 +160,14 @@ new_reservoir_ref(Size) ->
   Reservoir = new_reservoir(Size),
   ets:insert(?EXEMPLAR_TABLE, {Ref, Reservoir}),
   Ref.
+
+%% @doc Creates the reservoir for an existing reference if it has none.
+%% Pre-created histogram cells get their reservoir only when they start
+%% holding a series.
+-spec activate_reservoir_ref(reference()) -> ok.
+activate_reservoir_ref(Ref) when is_reference(Ref) ->
+  _ = ets:insert_new(?EXEMPLAR_TABLE, {Ref, new_reservoir(?DEFAULT_RESERVOIR_SIZE)}),
+  ok.
 
 %% @doc Offers a value to the reservoir identified by reference.
 -spec offer_ref(reference(), number(), map()) -> ok.
