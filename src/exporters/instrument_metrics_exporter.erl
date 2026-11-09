@@ -151,7 +151,14 @@ shutdown() ->
 
 init([]) ->
   Interval = instrument_config:get_metric_export_interval(),
-  State = #state{interval = Interval},
+  %% After a restart, initialize the exporters registered before the crash.
+  Exporters = lists:foldl(fun({Module, Config}, Acc) ->
+        case instrument_lib:safe_apply(Module, exporter_init, [Config], error) of
+          {ok, S} -> [#{module => Module, config => Config, state => S} | Acc];
+          _ -> Acc
+        end
+      end, [], instrument_registrations:list(metrics_exporter)),
+  State = #state{interval = Interval, exporters = Exporters},
   {ok, schedule_export(State)}.
 
 handle_call({register, Module, Config}, _From, State) ->
@@ -159,6 +166,7 @@ handle_call({register, Module, Config}, _From, State) ->
     {ok, ExporterState} ->
       Exporter = #{module => Module, config => Config, state => ExporterState},
       NewExporters = [Exporter | State#state.exporters],
+      ok = instrument_registrations:put(metrics_exporter, Module, Config),
       {reply, ok, State#state{exporters = NewExporters}};
     {error, Reason} ->
       {reply, {error, Reason}, State}
@@ -172,6 +180,7 @@ handle_call({unregister, Module}, _From, State) ->
   lists:foreach(fun(#{module := M, state := S}) ->
     instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
   end, Removed),
+  ok = instrument_registrations:delete(metrics_exporter, Module),
   {reply, ok, State#state{exporters = Remaining}};
 
 handle_call(list, _From, State) ->
@@ -188,6 +197,7 @@ handle_call(shutdown, _From, State) ->
     instrument_lib:safe_apply(M, exporter_shutdown, [S], ok)
   end, State2#state.exporters),
   cancel_timer(State2),
+  ok = instrument_registrations:clear(metrics_exporter),
   {reply, ok, State2#state{exporters = []}};
 
 handle_call(_Request, _From, State) ->

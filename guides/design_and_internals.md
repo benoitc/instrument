@@ -37,17 +37,26 @@ This guide describes the architecture, design decisions, and internal workings o
 2. Creates the `instrument_span_exporters` ETS table for span export hooks
 3. **instrument_sup:start_link/0** - Starts the supervisor tree
 
-The supervisor (`instrument_sup`) starts these children with `one_for_all` strategy:
+The supervisor (`instrument_sup`) starts these children with the `rest_for_one` strategy: a crashed child is restarted together with the children started after it. Ten restarts within a minute stop the application.
 
 | Order | Child ID | Module | Purpose |
 |-------|----------|--------|---------|
-| 1 | registry | instrument_registry | Metric registration and lookup |
-| 2 | exporter | instrument_exporter | Span export batching |
-| 3 | metrics_exporter | instrument_metrics_exporter | Metrics export |
-| 4 | log_exporter | instrument_log_exporter | Log export |
-| 5 | span_processor | instrument_span_processor | Span processing chain |
-| 6 | tracer_pool | instrument_tracer_pool | Flight recorder worker supervisor |
-| 7 | flight_recorder | instrument_flight_recorder | Message tracing |
+| 1 | table_owner | instrument_table_owner | Owns the shared ETS tables; clears leftover state at application start |
+| 2 | registry | instrument_registry | Destructive metric operations (unregister, clear) |
+| 3 | exporter | instrument_exporter | Span export batching |
+| 4 | metrics_exporter | instrument_metrics_exporter | Metrics export |
+| 5 | log_exporter | instrument_log_exporter | Log export |
+| 6 | span_processor | instrument_span_processor | Span processing chain |
+| 7 | tracer_pool | instrument_tracer_pool | Flight recorder worker supervisor |
+| 8 | flight_recorder | instrument_flight_recorder | Message tracing |
+
+The batch span processor and the exporter servers of the simple and tail-sampling processors are added as further children when they are registered.
+
+### Crash Recovery
+
+- The table owner does nothing but hold tables, so a crash of the registry or an exporter keeps every metric series and registration.
+- Registered exporters and processors are recorded in the `instrument_registrations` table. A restarted exporter manager or span processor manager initializes them again, so export keeps working.
+- Stopping and starting the application still starts from a clean slate.
 
 ### Design Principles
 

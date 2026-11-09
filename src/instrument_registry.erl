@@ -39,6 +39,9 @@
 %% exported for test use (sweep-coverage assertions); not a public API
 -export([is_instrument_key/1]).
 
+%% used by instrument_table_owner, which owns the tables; not a public API
+-export([clear_instrument_persistent_terms/0, create_label_counts_table/0]).
+
 %% Cardinality / overflow API
 -export([
   label_count/1,
@@ -105,27 +108,17 @@ clear_labels(Name) ->
 %% gen_server callbacks
 
 init([]) ->
-  _ = create_label_counts_table(),
-  %% Own the exemplar reservoir table here so it lives for the registry's
-  %% lifetime instead of being lazily created (and orphaned) by whatever
-  %% transient process first records a histogram.
-  ok = instrument_exemplar:init_table(),
-  %% Callbacks registered for several observable instruments.
-  ok = instrument_meter:init_callback_table(),
-  %% A registry restart is a clean slate: erase any stale instrument-owned
-  %% persistent_term entries left by a previous incarnation so get_instrument/1
-  %% returns undefined and create_* re-registers. instrument_series:init/0
-  %% re-mints the family-seq ref the sweep just erased.
-  clear_instrument_persistent_terms(),
-  ok = instrument_series:init(),
+  %% The tables and the clean-slate sweep belong to instrument_table_owner,
+  %% started before us, so a registry crash keeps every metric.
   {ok, #{}}.
 
 
 create_label_counts_table() ->
   case ets:info(?LABEL_COUNTS_TABLE, name) of
     undefined ->
-      ets:new(?LABEL_COUNTS_TABLE,
-              [public, named_table, set, {write_concurrency, true}]);
+      _ = ets:new(?LABEL_COUNTS_TABLE,
+                  [public, named_table, set, {write_concurrency, true}]),
+      ok;
     _ ->
       ok
   end.
@@ -204,8 +197,9 @@ teardown_all_families() ->
 %% full reset is a clean slate. The NIF/atomics resources held by the erased
 %% records are released by refcount when the entries are erased.
 clear_instrument_persistent_terms() ->
-  [persistent_term:erase(K)
-   || {K, _} <- persistent_term:get(), is_instrument_key(K)].
+  _ = [persistent_term:erase(K)
+       || {K, _} <- persistent_term:get(), is_instrument_key(K)],
+  ok.
 
 %% instrument_row entries are published by the write path (claim_row/5) and must
 %% be swept here so a registry restart produces a clean slate. The legacy tuple

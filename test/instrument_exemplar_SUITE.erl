@@ -285,13 +285,13 @@ reservoir_ref_concurrent_test(_Config) ->
   ok.
 
 %% Regression: the exemplar reservoir table must be created at startup and owned
-%% by the supervised registry, so a histogram recorded from a short-lived process
+%% by the supervised table owner, so a histogram recorded from a short-lived process
 %% does not orphan it. Pre-fix the table is created lazily by the first recorder
 %% and deleted when that process exits, badarg-ing every later offer_ref/3.
 exemplar_reservoir_survives_transient_creator_test(_Config) ->
   Tid = ets:whereis(instrument_exemplar_reservoirs),
   ?assertNotEqual(undefined, Tid),
-  ?assertEqual(whereis(instrument_registry), ets:info(Tid, owner)),
+  ?assertEqual(whereis(instrument_table_owner), ets:info(Tid, owner)),
 
   Parent = self(),
   {Worker, MRef} = spawn_monitor(fun() ->

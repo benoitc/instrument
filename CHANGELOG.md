@@ -54,6 +54,11 @@ All notable changes to this project will be documented in this file.
   avoids exporting spans twice when a processor is also configured.
 
 ### Fixed
+- A crash in any of instrument's processes no longer stops the whole
+  application. Before, any single crash took it down, which in a release
+  also stops the node. The crashed process is now restarted with the ones
+  that depend on it, metrics and registered exporters and processors are
+  kept, and only repeated crashes (ten in a minute) stop the application.
 - Label key sets such as `[a_b]` and `[a, b]` no longer collide. The second
   one's writes used to be lost silently.
 - The span and log exporter managers now drop spans and log records once 2048
