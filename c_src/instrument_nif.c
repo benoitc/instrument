@@ -21,12 +21,13 @@ gauge_resource_cleanup(ErlNifEnv *env, void *res)
     (void)res;
 }
 
-static void
+static int
 create_gauge_type(ErlNifEnv *env)
 {
     ErlNifResourceFlags flags = ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER;
     gauge_resource_type = enif_open_resource_type(env, NULL, "instrument_gauge",
                                                    gauge_resource_cleanup, flags, NULL);
+    return gauge_resource_type == NULL ? -1 : 0;
 }
 
 static ERL_NIF_TERM
@@ -139,7 +140,9 @@ static int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     (void)priv_data;
     (void)load_info;
 
-    create_gauge_type(env);
+    if (create_gauge_type(env) != 0) {
+        return -1;
+    }
 
 #define ATOM(Id, Value) { Id = enif_make_atom(env, Value); }
     ATOM(ATOM_OK, "ok");

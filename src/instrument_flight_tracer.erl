@@ -66,11 +66,11 @@ start_link(Index, Counters) ->
                         ?MODULE, [Index, Counters], []).
 
 %% @doc Payload size limit in bytes (`flight_recorder_max_payload_bytes',
-%% default 1024, 0 keeps only the size).
+%% default 1024, at most 1 MB, 0 keeps only the size).
 -spec max_payload() -> non_neg_integer().
 max_payload() ->
   instrument_lib:bounded_env(flight_recorder_max_payload_bytes,
-                             ?DEFAULT_MAX_PAYLOAD, 0, 1 bsl 30).
+                             ?DEFAULT_MAX_PAYLOAD, 0, 1 bsl 20).
 
 %% @doc Returns `Term', or `{truncated, Size}' when its external size is over
 %% `Max' bytes.

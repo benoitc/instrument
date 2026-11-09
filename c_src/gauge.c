@@ -5,11 +5,20 @@
  */
 
 #include "gauge.h"
+#include <float.h>
+#include <math.h>
 
+/* Saturate instead of overflowing: an infinite value cannot be returned to
+ * Erlang (enif_make_double rejects it), which would make every read fail. */
 static void instrument_gauge_change(instrument_gauge_t *g, double delta) {
     double current = atomic_load(&g->value);
-    while (!atomic_compare_exchange_weak(&g->value, &current, current + delta))
-        ;
+    double next;
+    do {
+        next = current + delta;
+        if (!isfinite(next)) {
+            next = (next > 0) ? DBL_MAX : -DBL_MAX;
+        }
+    } while (!atomic_compare_exchange_weak(&g->value, &current, next));
 }
 
 void instrument_gauge_init(instrument_gauge_t *g, double value) {

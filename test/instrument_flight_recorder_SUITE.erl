@@ -39,7 +39,9 @@
   queue_bound_drops_events/1,
   worker_restart_keeps_capturing/1,
   invalid_config_falls_back/1,
-  disabled_by_default/1
+  disabled_by_default/1,
+  deeply_nested_payload_is_truncated/1,
+  register_under_procs_trace_does_not_hang/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -70,7 +72,9 @@ all() ->
     queue_bound_drops_events,
     worker_restart_keeps_capturing,
     invalid_config_falls_back,
-    disabled_by_default
+    disabled_by_default,
+    deeply_nested_payload_is_truncated,
+    register_under_procs_trace_does_not_hang
   ].
 
 init_per_suite(Config) ->
@@ -849,4 +853,40 @@ disabled_by_default(_Config) ->
     false = instrument_flight_recorder:is_enabled()
   after
     restore([])
+  end.
+
+%% A deeply nested message is truncated instead of overflowing the stack of
+%% the scheduler running the tracer callback.
+deeply_nested_payload_is_truncated(_Config) ->
+  restart_with([{flight_recorder_max_payload_bytes, 1 bsl 20}]),
+  try
+    ok = instrument_flight_recorder:enable(),
+    Deep = lists:foldl(fun(I, Acc) -> [Acc, <<(I band 255)>>] end, [], lists:seq(1, 200000)),
+    TraceId = instrument_tracer:with_span(<<"deep">>, fun() ->
+      self() ! {deep, Deep},
+      receive {deep, _} -> ok end,
+      raw_trace_id()
+    end),
+    Events = wait_until(fun() -> instrument_flight_recorder:get_trace(TraceId) end,
+                        fun(Es) -> length(Es) >= 2 end),
+    [_ | _] = [S || {_, {'receive', _, {truncated, S}}} <- Events]
+  after
+    restore([flight_recorder_max_payload_bytes])
+  end.
+
+%% Registering a name while traced with procs must not deadlock the node.
+register_under_procs_trace_does_not_hang(_Config) ->
+  ok = instrument_flight_recorder:enable(),
+  State = instrument_flight_recorder:tracer_state(<<1:128>>),
+  Parent = self(),
+  Pid = spawn(fun() ->
+    receive go -> ok end,
+    true = register(flight_register_test, self()),
+    true = unregister(flight_register_test),
+    Parent ! {registered, self()}
+  end),
+  1 = erlang:trace(Pid, true, [procs, {tracer, instrument_tracer_nif, State}]),
+  Pid ! go,
+  receive {registered, Pid} -> ok
+  after 5000 -> ct:fail(register_hung)
   end.
