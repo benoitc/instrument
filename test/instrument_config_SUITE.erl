@@ -82,7 +82,7 @@ end_per_suite(_Config) ->
 init_per_testcase(_TestCase, Config) ->
   %% Clear all OTEL env vars
   clear_otel_env(),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config.
 
 end_per_testcase(_TestCase, _Config) ->
@@ -138,7 +138,7 @@ get_set_test(_Config) ->
 service_name_env_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_SERVICE_NAME", "my-service"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   ?assertEqual(<<"my-service">>, instrument_config:get_service_name()),
   ok.
@@ -146,7 +146,7 @@ service_name_env_test(_Config) ->
 sampler_always_on_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_TRACES_SAMPLER", "always_on"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   ?assertEqual({instrument_sampler_always_on, #{}}, instrument_config:get_sampler()),
   ok.
@@ -154,7 +154,7 @@ sampler_always_on_test(_Config) ->
 sampler_always_off_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_TRACES_SAMPLER", "always_off"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   ?assertEqual({instrument_sampler_always_off, #{}}, instrument_config:get_sampler()),
   ok.
@@ -163,7 +163,7 @@ sampler_traceidratio_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_TRACES_SAMPLER", "traceidratio"),
   os:putenv("OTEL_TRACES_SAMPLER_ARG", "0.5"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   ?assertEqual({instrument_sampler_probability, #{ratio => 0.5}},
                instrument_config:get_sampler()),
@@ -172,7 +172,7 @@ sampler_traceidratio_test(_Config) ->
 sampler_parentbased_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_TRACES_SAMPLER", "parentbased_always_on"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   ?assertEqual({instrument_sampler_parent_based, #{root => instrument_sampler_always_on}},
                instrument_config:get_sampler()),
@@ -181,7 +181,7 @@ sampler_parentbased_test(_Config) ->
 propagators_env_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_PROPAGATORS", "tracecontext,baggage"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   ?assertEqual([instrument_propagator_tracecontext, instrument_propagator_baggage],
                instrument_config:get_propagators()),
@@ -196,7 +196,7 @@ batch_processor_config_test(_Config) ->
   os:putenv("OTEL_BSP_SCHEDULE_DELAY", "1000"),
   os:putenv("OTEL_BSP_MAX_QUEUE_SIZE", "5000"),
   os:putenv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "256"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   Config = instrument_config:get_batch_processor_config(),
   %% Keys match the batch processor's own option names.
@@ -211,7 +211,7 @@ batch_processor_invalid_env_test(_Config) ->
   os:putenv("OTEL_BSP_SCHEDULE_DELAY", "0"),
   os:putenv("OTEL_BSP_MAX_QUEUE_SIZE", "-5"),
   os:putenv("OTEL_BSP_EXPORT_TIMEOUT", "2500"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config = instrument_config:get_batch_processor_config(),
   ?assertNot(maps:is_key(schedule_delay_millis, Config)),
   ?assertNot(maps:is_key(max_queue_size, Config)),
@@ -237,7 +237,7 @@ metric_export_interval_test(_Config) ->
 otlp_endpoint_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   ?assertEqual(<<"http://localhost:4317">>, instrument_config:get_otlp_endpoint()),
 
@@ -252,7 +252,7 @@ otlp_signal_endpoints_test(_Config) ->
   os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
   os:putenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://traces:4317"),
   os:putenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://metrics:4317"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   %% Signal-specific endpoints take precedence
   ?assertEqual(<<"http://traces:4317">>, instrument_config:get_otlp_endpoint(traces)),
@@ -264,17 +264,17 @@ otlp_signal_endpoints_test(_Config) ->
 log_level_test(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_LOG_LEVEL", "debug"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual(debug, instrument_config:get_log_level()),
 
   ok = application:stop(instrument),
   os:putenv("OTEL_LOG_LEVEL", "warning"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual(warning, instrument_config:get_log_level()),
 
   ok = application:stop(instrument),
   os:putenv("OTEL_LOG_LEVEL", "warn"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual(warning, instrument_config:get_log_level()),
   ok.
 
@@ -284,20 +284,20 @@ has_span_processor_config_test(_Config) ->
   clear_otel_env(),
 
   %% No config - should return false
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual(false, instrument_config:has_span_processor_config()),
 
   %% With BSP env vars but no exporter - should return false
   ok = application:stop(instrument),
   os:putenv("OTEL_BSP_SCHEDULE_DELAY", "1000"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual(false, instrument_config:has_span_processor_config()),
 
   %% With BSP env vars and OTLP exporter - should return true
   ok = application:stop(instrument),
   os:putenv("OTEL_EXPORTERS", "otlp"),
   os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual(true, instrument_config:has_span_processor_config()),
   ok.
 
@@ -311,7 +311,7 @@ has_span_processor_config_app_env_test(_Config) ->
   %% not that the processor actually initializes (that's tested elsewhere).
   %% Set env after instrument is stopped so it won't be registered automatically.
   application:set_env(instrument, span_processor, {instrument_span_processor_simple, #{exporter => instrument_exporter_console}}),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual(true, instrument_config:has_span_processor_config()),
   ok.
 

@@ -92,7 +92,7 @@ groups() ->
 
 init_per_suite(Config) ->
     _ = application:ensure_all_started(crypto),
-    ok = application:start(instrument),
+    {ok, _} = application:ensure_all_started(instrument),
     instrument_test:setup(),
     Config.
 

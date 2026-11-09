@@ -81,7 +81,7 @@ init_per_suite(Config) ->
   _ = application:ensure_all_started(crypto),
   %% Set auto_enable to false so we can control it in tests
   application:set_env(instrument, flight_recorder_auto_enable, false),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config.
 
 end_per_suite(Config) ->
@@ -725,13 +725,13 @@ wait_until(Producer, Pred, TimeoutMs) ->
 restart_with(Env) ->
   ok = application:stop(instrument),
   [application:set_env(instrument, K, V) || {K, V} <- Env],
-  ok = application:start(instrument).
+  {ok, _} = application:ensure_all_started(instrument).
 
 restore(Keys) ->
   ok = application:stop(instrument),
   [application:unset_env(instrument, K) || K <- Keys],
   application:set_env(instrument, flight_recorder_auto_enable, false),
-  ok = application:start(instrument).
+  {ok, _} = application:ensure_all_started(instrument).
 
 raw_trace_id() ->
   instrument_id:hex_to_trace_id(instrument_tracer:trace_id()).
@@ -848,7 +848,7 @@ invalid_config_falls_back(_Config) ->
 disabled_by_default(_Config) ->
   ok = application:stop(instrument),
   application:unset_env(instrument, flight_recorder_auto_enable),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   try
     false = instrument_flight_recorder:is_enabled()
   after

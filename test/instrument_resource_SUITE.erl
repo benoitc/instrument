@@ -51,7 +51,7 @@ all() ->
 
 init_per_suite(Config) ->
   _ = application:ensure_all_started(crypto),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config.
 
 end_per_suite(_Config) ->
@@ -261,7 +261,7 @@ service_detector_precedence_test(_Config) ->
   os:putenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=from-resource-attrs,other.key=other-value"),
 
   %% Restart app to pick up env vars
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
 
   %% Detect all resources - service detector should run after env detector
   Resource = instrument_resource_detector:detect_all(),

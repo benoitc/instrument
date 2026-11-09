@@ -8,6 +8,11 @@
 %% Classifies HTTP / network errors as `retryable' or `permanent' per the
 %% OpenTelemetry specification and implements bounded exponential backoff
 %% with optional `Retry-After' header support.
+%%
+%% Collector responses are read with a size limit of 64 KB (hackney's
+%% `max_body_size'), unless the caller sets its own: OTLP responses are a
+%% few hundred bytes, and without a limit a broken or malicious collector
+%% could make the node hold up to hackney's default of 512 MB per request.
 -module(instrument_otlp_retry).
 -author("benoitc").
 
@@ -38,6 +43,9 @@ classify_error(econnrefused) -> retryable;
 classify_error(econnreset) -> retryable;
 classify_error(ehostunreach) -> retryable;
 classify_error(enetunreach) -> retryable;
+%% The collector answered with more than the response size limit: retrying
+%% would send the same data again.
+classify_error(body_too_large) -> permanent;
 classify_error(nxdomain) -> retryable;
 classify_error(_) -> permanent.
 
@@ -71,8 +79,16 @@ send_with_retry(Method, Url, Headers, Body, Options, Opts) ->
   MaxRetries = maps:get(max_retries, Opts, instrument_config:get_otlp_max_retries()),
   InitialDelay = maps:get(initial_delay_ms, Opts, instrument_config:get_otlp_retry_initial_delay_ms()),
   MaxDelay = maps:get(max_delay_ms, Opts, instrument_config:get_otlp_retry_max_delay_ms()),
-  do_send(Method, Url, Headers, Body, Options,
+  do_send(Method, Url, Headers, Body, with_body_limit(Options),
           0, MaxRetries, InitialDelay, MaxDelay).
+
+-define(MAX_RESPONSE_BYTES, 65536).
+
+with_body_limit(Options) ->
+  case lists:keymember(max_body_size, 1, Options) of
+    true -> Options;
+    false -> [{max_body_size, ?MAX_RESPONSE_BYTES} | Options]
+  end.
 
 do_send(Method, Url, Headers, Body, Options,
         Attempt, MaxRetries, InitialDelay, MaxDelay) ->

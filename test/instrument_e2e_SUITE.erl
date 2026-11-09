@@ -83,7 +83,7 @@ init_per_suite(Config) ->
     true ->
       %% Start the application
       _ = application:ensure_all_started(hackney),
-      ok = application:start(instrument),
+      {ok, _} = application:ensure_all_started(instrument),
       %% Generate unique suffix for container names
       Suffix = integer_to_list(erlang:system_time(millisecond)),
       [{suffix, Suffix} | Config]
@@ -201,7 +201,7 @@ end_per_group(prometheus, Config) ->
   end,
   %% Clean up temp directory
   Suffix = proplists:get_value(suffix, Config),
-  _ = os:cmd("rm -rf /tmp/prom_" ++ ?PROM_CONTAINER ++ "_" ++ Suffix),
+  _ = file:del_dir_r("/tmp/prom_" ++ ?PROM_CONTAINER ++ "_" ++ Suffix),
   Config;
 
 end_per_group(jaeger, Config) ->
