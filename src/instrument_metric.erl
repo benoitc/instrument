@@ -116,7 +116,6 @@
 new_counter(Name, Help) ->
   _ = instrument_series:ensure_family(Name, counter, to_help(Help), undefined, undefined),
   Canon = {[], []},
-  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
   Row = unlabeled_row(Name, Canon),
   Row#metric{name = Name}.
 
@@ -140,7 +139,6 @@ get_counter(Counter) ->
 new_gauge(Name, Help) ->
   _ = instrument_series:ensure_family(Name, gauge, to_help(Help), undefined, undefined),
   Canon = {[], []},
-  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
   Row = unlabeled_row(Name, Canon),
   Row#metric{name = Name}.
 
@@ -188,7 +186,6 @@ new_histogram(Name, Help, Buckets) ->
   ok = instrument_histogram:validate_buckets(Buckets),
   _ = instrument_series:ensure_family(Name, histogram, to_help(Help), undefined, Buckets),
   Canon = {[], []},
-  _ = instrument_series:write(Name, Canon, fun() -> Canon end, fun(_R) -> ok end),
   Row = unlabeled_row(Name, Canon),
   Row#metric{name = Name}.
 
@@ -242,26 +239,14 @@ clear_labels(Vector) ->
 register(Metric) ->
   instrument_registry:register(Metric).
 
-%% Resolve the unlabeled row for a simple (no-label) metric after a write/4
-%% call.  The winner publishes to persistent_term itself; a claim loser racing
-%% that publication falls back to the arbiter row in the ETS series table, which
-%% exists from the instant the claim succeeded and carries the row payload.
+%% The unlabeled series of a simple (no-label) metric, created if needed.
+%% Slot 1 is never reused for another label set, so the returned record can
+%% hold its cell.
 -spec unlabeled_row(metric_name(), {[], []}) -> #metric{}.
 unlabeled_row(Name, Canon) ->
-  case persistent_term:get({instrument_label, Name, Canon}, undefined) of
+  case instrument_series:write(Name, Canon, fun() -> Canon end, fun(R) -> R end) of
     #metric{} = R -> R;
-    undefined -> arbiter_row(Name, Canon)
-  end.
-
-%% Read a row's #metric{} from the ETS arbiter table by its canonical key. The
-%% arbiter row is authoritative from the instant the claim landed, so this
-%% covers a claim loser racing the winner's pt publication. Returns {error,
-%% not_found} if no row exists (e.g. the family was never written / torn down).
--spec arbiter_row(metric_name(), {list(), list()}) -> #metric{} | {error, not_found}.
-arbiter_row(Name, Canon) ->
-  case ets:lookup_element(instrument_series, {Name, Canon}, 2, undefined) of
-    #metric{} = R -> R;
-    undefined -> {error, not_found}
+    Error -> erlang:error(Error)
   end.
 
 to_help(Help) when is_binary(Help) -> Help;
@@ -316,10 +301,9 @@ new_histogram_vec(Name, Help, Labels, Buckets) ->
 %% the underlying write returns {error, _}, which we surface unchanged.
 -spec labels(Name :: metric_name(), LabelValues :: list()) -> metric() | {error, term()}.
 labels(Name, LabelValues) ->
-  case vec_write(Name, LabelValues, fun(_R) -> ok end) of
-    ok -> vec_row(Name, LabelValues);
-    Error -> Error
-  end.
+  %% The returned cell is held by the caller: its slot is pinned.
+  instrument_series:resolve_row(Name, LabelValues,
+                                fun() -> vec_canon(Name, LabelValues) end).
 
 %% Vec operations by name + labels
 
@@ -386,13 +370,3 @@ vec_canon(Name, LabelValues) ->
                _ -> undefined
              end,
   instrument_series:vec_canon(Declared, LabelValues).
-
-%% Resolve the row #metric{} for an already-written vec label set (cache-key
-%% fast path, arbiter-row fallback for the publication race — generalized from
-%% the unlabeled_row/2 pattern).
--spec vec_row(metric_name(), list()) -> #metric{} | {error, not_found}.
-vec_row(Name, LabelValues) ->
-  case persistent_term:get({instrument_label, Name, LabelValues}, undefined) of
-    #metric{} = R -> R;
-    undefined -> arbiter_row(Name, vec_canon(Name, LabelValues))
-  end.

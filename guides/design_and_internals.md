@@ -62,7 +62,7 @@ The batch span processor and the exporter servers of the simple and tail-samplin
 
 **Lock-free Operations**: Counters and gauges use NIF-based C11 atomics for updates. Histograms use the OTP `atomics` module, with bucket counts stored as int64 slots and the running sum kept as IEEE-754 bits in a CAS-retry loop. Both paths avoid locks entirely.
 
-**Series Store**: Every metric series (one label set of one metric) is its own entry. Creating one is a single `ets:insert_new` plus `persistent_term` puts under fresh keys, so it never goes through a process and never triggers a VM-wide garbage collection. See [Series Store](#series-store).
+**Series Store**: Every metric series (one label set of one metric) gets a cell created ahead of time, in chunks published once in `persistent_term`. Creating a series claims a slot with `ets:insert_new`: it never goes through a process, never triggers a VM-wide garbage collection, and does not add `persistent_term` keys per series. See [Series Store](#series-store).
 
 **Bounded Queues**: Every process that receives telemetry by message (span and log exporters, batch processor, flight recorder workers) has its intake checked by the sender, which drops instead of queuing past a limit.
 
@@ -99,7 +99,7 @@ instrument_tracer
 
 **instrument_tracer**: Core span lifecycle management. Handles span creation, context attachment, and export hooks. Uses the process dictionary via `instrument_context` to maintain the current span stack.
 
-**instrument_series**: The metric store. Families (one per metric name) and series (one per label set) are created without any process hop; writes and scrapes read `persistent_term` only.
+**instrument_series**: The metric store. Families (one per metric name) and series (one per label set) are created without any process hop. Writes read a per-process cache and an atomics epoch; scrapes walk the chunks in `persistent_term` and read labels from ETS.
 
 **instrument_registry**: Owns the store's tables and runs the rare destructive operations (unregister, remove a label set, clear). It is on no create, write or scrape path.
 
@@ -301,23 +301,28 @@ instrument_meter:add(Counter, 1, #{method => <<"GET">>})
 [Sort attributes into the series key]
     |
     v
-[persistent_term:get({instrument_label, Name, Key})]
+[Process dictionary: cached {Epochs, Index, Epoch, Cell}]
     |
-    +---> found: #metric{} row --> [NIF atomic increment]
+    +---> cached and the slot's epoch is unchanged --> [NIF atomic increment]
     |
-    +---> first write of this label set:
+    +---> otherwise, ETS: label set -> slot
               |
-              v
-          [Check the per-metric cardinality limit]
+              +---> known and live: cache it --> [NIF atomic increment]
               |
-              v
-          [ets:insert_new the row: exactly one writer wins]
-              |
-              v
-          [Winner publishes two fresh persistent_term keys]
-              |
-              v
-          [NIF atomic increment]
+              +---> first write of this label set:
+                        |
+                        v
+                    [Check the per-metric cardinality limit]
+                        |
+                        v
+                    [Take a free slot, or the next one]
+                    [ets:insert_new the label set: exactly one writer wins]
+                        |
+                        v
+                    [Mark the slot live (epoch odd), cache it]
+                        |
+                        v
+                    [NIF atomic increment]
 ```
 
 Record-held simple-API metrics skip the lookup: the record holds the cell.
@@ -586,21 +591,30 @@ Both paths give:
 
 ### Series Store
 
-`instrument_series` keeps every series as its own entry:
+`instrument_series` gives every series a cell created ahead of time.
+
+**Chunks.** A family's cells come in chunks of 16, 32, 64 ... up to 1024 slots. Chunk 0 is created with the family and stored in its meta; each later chunk is one `persistent_term` key, created when the previous chunk is half used. A chunk is `{Epochs, Cells}`: one epoch per slot in an atomics array (odd means live) and a tuple of cells. Cells are mutable, so a chunk is written once and never replaced. A family uses `2 + chunks` keys: about 9 for 2000 series.
 
 | Where | Key | Value |
 |-------|-----|-------|
-| ETS `instrument_series` | `{Name, family}`, `{Name, SeriesKey}` | family meta, series row (the creation arbiter) |
-| `persistent_term` | `{instrument_family, Name}` | `#family{}` |
-| `persistent_term` | `{instrument_label, Name, CacheKey}` | series row, the write hot path |
-| `persistent_term` | `{instrument_row, Name, N}` | series N of a family, walked by scrapes |
+| `persistent_term` | `{instrument_family, Name}` | `#family{}`, with chunk 0 and the counters |
 | `persistent_term` | `{instrument_family_idx, K}` | family K, walked by scrapes |
+| `persistent_term` | `{instrument_chunk, Name, Inc, C}` | chunk C of incarnation `Inc` |
+| ETS `instrument_series` | `{'$s', Inc, canon, LabelSet}` | slot, the creation arbiter |
+| ETS `instrument_series` | `{'$s', Inc, key, CacheKey}` | slot, for each way a caller names the label set |
+| ETS `instrument_series` | `{'$s', Inc, slot, S}` | labels of slot S, read by scrapes |
+| ETS `instrument_series_free` | `{Inc, RemovedAt, S}` | removed slots waiting for reuse |
+
+**Writes.** Each process caches, per label set, the slot's epoch and cell in its process dictionary. A write checks the epoch is unchanged and updates the cell. A miss resolves the label set in ETS, or claims a slot for it.
+
+**Removal and reuse.** Removing a label set changes its slot's epoch, so cached entries stop matching, and puts the slot on a free list. The slot is reused after `series_reuse_quarantine_ms` (default 5000), with its cell reset. Cells handed out as handles (`instrument_metric:labels/2`) are never reused.
+
+**Incarnations.** Every family incarnation has its own `Inc`, so a metric removed and created again never meets keys or cached entries of the old one.
 
 Rules that keep it cheap:
-- Creation is decided by `ets:insert_new`: one writer wins, the others reuse its row.
-- Only the winner writes that series' `persistent_term` keys, and only fresh ones. Replacing a `persistent_term` value makes every process scan its heap; adding a new key does not.
-- Scrapes count up the family and series counters and read `persistent_term`; they touch no ETS table.
-- Erasing keys (unregister, clear) does trigger the VM-wide scan. That only happens on administrative operations.
+- No `persistent_term` value is replaced on a create or write path. Replacing makes every process scan its heap; adding a key does not, but each put copies the key table, which is why keys are per chunk, not per series.
+- A chunk needed by several writers at once is created by each of them; `ets:insert_new` keeps one, the others are dropped. Nobody waits on another process.
+- Erasing keys (unregister) triggers the VM-wide scan; that only happens on administrative operations.
 
 Labeled series export under the metric's own name. A family mixing attribute key sets renders the union of label names, with absent labels empty.
 
@@ -656,8 +670,8 @@ Each export sends at most `max_export_batch_size` spans. `force_flush/0` waits u
 | Operation | Mechanism | Typical Latency | Concurrency |
 |-----------|-----------|-----------------|-------------|
 | Metric increment | NIF atomic CAS | <100ns | Lock-free |
-| Labeled metric write | persistent_term + NIF | ~200ns | Lock-free |
-| New label set | ets:insert_new + fresh persistent_term keys | grows with the number of persistent_term keys in the VM | No process hop, no global GC |
+| Labeled metric write | process dictionary + atomics + NIF | ~200ns | Lock-free |
+| New label set | ets:insert_new on a pre-created slot | constant; a new chunk every 16..1024 series | No process hop, no global GC |
 | Context read | Process dictionary | <10ns | Process-local |
 | Span start | Erlang + sampling | ~1-5us | Per-process |
 | Span end | Async cast | <1us | Non-blocking |

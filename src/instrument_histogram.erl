@@ -59,6 +59,9 @@
   linear_buckets/3,
   exponential_buckets/3,
   validate_buckets/1,
+  mint_cell/1,
+  reset_cell/1,
+  activate_exemplars/1,
   with_histogram/2, with_histogram/3,
   cleanup/1
 ]).
@@ -87,6 +90,34 @@ new_histogram(Name, Help, Buckets) ->
     handle = Hist,
     collect = {?MODULE, collect, [Info, Hist]}
   }.
+
+%% @doc A histogram cell for the series store, without its exemplar
+%% reservoir: pre-created cells get one through activate_exemplars/1 when they
+%% start holding a series.
+-spec mint_cell([number()]) -> #histogram{}.
+mint_cell(Buckets) ->
+  ok = validate_buckets(Buckets),
+  Arity = length(Buckets) + 2,
+  #histogram{
+    bucket_boundaries = Buckets,
+    atomics_ref = instrument_atomics:new(Arity),
+    inf_slot = Arity,
+    start_time = erlang:system_time(nanosecond),
+    exemplar_key = make_ref()
+  }.
+
+%% @doc Zeroes every bucket and the sum of a series-store histogram cell.
+-spec reset_cell(#metric{}) -> ok.
+reset_cell(#metric{handle = #histogram{atomics_ref = Ref, inf_slot = InfSlot}}) ->
+  lists:foreach(fun(I) -> atomics:put(Ref, I, 0) end, lists:seq(1, InfSlot)),
+  ok.
+
+%% @doc Creates the exemplar reservoir of a series-store histogram cell.
+-spec activate_exemplars(#metric{}) -> ok.
+activate_exemplars(#metric{handle = #histogram{exemplar_key = Key}}) when is_reference(Key) ->
+  instrument_exemplar:activate_reservoir_ref(Key);
+activate_exemplars(_) ->
+  ok.
 
 mk_histogram(Buckets) ->
   ok = validate_buckets(Buckets),

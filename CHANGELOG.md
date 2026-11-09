@@ -54,6 +54,14 @@ All notable changes to this project will be documented in this file.
   avoids exporting spans twice when a processor is also configured.
 
 ### Fixed
+- Creating new label sets no longer slows down as a node accumulates series.
+  Each new series used to add two `persistent_term` keys, and every key
+  added copies the VM's whole key table; cells are now created ahead of time
+  in chunks, so a metric uses a handful of keys whatever its cardinality.
+- Removing label sets (`remove_label`, `clear_labels`) frees them for reuse,
+  so label churn no longer grows memory and scrape time without bound.
+- Removing and re-creating a metric while it is being written no longer
+  sends later writes to a cell that is never exported.
 - A flight recorder message nested deeply enough (a long left-nested iolist)
   could crash the whole VM when the payload limit was 64 KB or more; and
   tracing a process that registers a name with `procs` hung the node. Both

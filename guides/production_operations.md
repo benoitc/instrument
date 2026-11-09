@@ -204,6 +204,18 @@ check_memory() ->
     end.
 ```
 
+### Label Set Reuse
+
+Removing label sets (`remove_label`, `clear_labels`) frees their slots for new label sets after a quarantine, so label churn does not grow memory or scrape time:
+
+```erlang
+{instrument, [
+    {series_reuse_quarantine_ms, 5000}   %% default
+]}
+```
+
+A process that wrote a label set keeps a small cache entry for it in its process dictionary. Entries for removed label sets are dropped as the process writes others; call `instrument_series:purge_cache()` to drop them at once in a long-lived process that stops writing metrics.
+
 ### Cardinality Control
 
 Monitor and limit metric cardinality:

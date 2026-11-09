@@ -3,12 +3,31 @@
 %% This file is part of instrument released under the MIT license.
 %% See the NOTICE for more information.
 
-%% @doc The series store: one family per logical metric name, one row per
-%% live label set. Families and rows are claimed with ets:insert_new (the
-%% arbiter row carries the payload) and published to persistent_term under
-%% fresh keys only — no key is ever replaced on a designed path, so creation
-%% never schedules a literal-GC sweep. Enumeration uses atomics-minted
-%% sequence chains.
+%% @doc The series store: one family per logical metric name, one slot per
+%% live label set.
+%%
+%% == Layout ==
+%%
+%% Cells are created ahead of use, in chunks of growing size (16, 32, ...,
+%% capped at 1024 slots). Chunk 0 lives in the family meta; each later chunk
+%% is one persistent_term key `{instrument_chunk, Name, Inc, C}' holding
+%% `{Epochs, Rows}': an atomics array with one epoch per slot (odd = live)
+%% and a tuple of pre-created `#metric{}' cells. Cells are mutable (NIF or
+%% atomics), so a chunk is published once and never replaced. A family
+%% therefore uses `2 + chunks' persistent_term keys whatever its cardinality,
+%% and no create or write path replaces a key (a replace makes every process
+%% scan its heap).
+%%
+%% Which label set sits in which slot is kept in ETS (`instrument_series',
+%% keys prefixed `{'$s', Inc, ...}'), the source of truth for first writes and
+%% scrapes. Writers cache `{Epochs, Ix, Epoch, Row}' per label set in their
+%% process dictionary; a write checks that the slot's epoch is unchanged, so a
+%% removed or reused slot is never written through a stale entry.
+%%
+%% Removed slots go to a free list and are reused after a quarantine
+%% (`series_reuse_quarantine_ms', default 5000), with their cell reset. Slots
+%% whose cell escaped as a handle (`labels/2', `get_or_create_label/2') are
+%% pinned and never reused.
 -module(instrument_series).
 
 -include("instrument.hrl").
@@ -21,50 +40,68 @@
   family/1,
   write/4,
   write_unlabeled/3,
+  resolve_row/3,
+  unlabeled_row/1,
+  overflow_row/1,
+  fold_rows/2,
+  live_count/1,
+  dropped/1,
+  ensure_chunk/3,
+  kill_term/1,
+  purge_cache/0,
   collect_all/0,
   remove_row/2,
   clear_family_rows/1,
   teardown_family/1,
   to_label_value/1,
   vec_canon/2,
-  %% exported for the registry's overflow_sentinel resolution
   overflow_canon/1
 ]).
 
+%% Test helpers
+-export([slot_of/2, high_water/1]).
+
 -define(TAB, instrument_series).
--define(COUNTS, instrument_label_counts).
+-define(FREE, instrument_series_free).
 -define(OVERFLOW_VALUE, <<"otel.metric.overflow">>).
 -define(UNLABELED, {[], []}).
+-define(PD, '$instrument_series').
+-define(PD_COUNT, '$instrument_series_n').
+-define(PD_LIMIT, '$instrument_series_limit').
+-define(PD_SWEEP, 8192).
 
-%% Called from instrument_registry:init/1 (the registry owns the tables).
+%% counters slots
+-define(HW, 1).
+-define(LIVE, 2).
+-define(DROPPED, 3).
+-define(ALIASES, 4).
+
+-define(FIRST_CHUNK, 16).
+-define(MAX_CHUNK, 1024).
+
+%% Called from instrument_table_owner:init/1, which owns the tables.
 init() ->
-  _ = ets:new(?TAB, [set, public, named_table, {write_concurrency, auto}]),
-  FamSeq = atomics:new(1, []),
-  persistent_term:put(instrument_family_seq, FamSeq),
-  ok.
-
-%% Reset the series store to a clean-but-initialized state. Called from the
-%% registry's full-reset path (unregister_all / do_delete_all), which sweeps
-%% every instrument-owned persistent_term key — including instrument_family_seq
-%% — so the seq counter must be re-minted here or the next ensure_family/write
-%% would fail on the missing ref. Clears the arbiter rows too so a re-created
-%% same-named family wins its insert_new claim cleanly. The per-family chain pt
-%% keys (instrument_row/instrument_label/instrument_family*) are erased by the
-%% registry's own sweep; this only owns the ETS state and the seq ref.
--spec reset() -> ok.
-reset() ->
-  case ets:info(?TAB, name) of
-    undefined -> ok;
-    _ -> ets:delete_all_objects(?TAB)
-  end,
+  _ = ets:new(?TAB, [set, public, named_table, {write_concurrency, auto},
+                     {read_concurrency, true}]),
+  _ = ets:new(?FREE, [ordered_set, public, named_table, {write_concurrency, true}]),
   persistent_term:put(instrument_family_seq, atomics:new(1, [])),
   ok.
 
-%% Read the live family-sequence atomics ref. During unregister_all the registry
-%% sweeps instrument_family_seq out of persistent_term and reset/0 re-mints a
-%% fresh ref — there is a brief window where the key is absent. Rather than
-%% crashing with badarg, spin with erlang:yield() up to 50 times waiting for
-%% reset/0 to complete, then raise a clear error if it never arrives.
+%% Reset to a clean-but-initialized state. Called from the registry's full
+%% reset, which sweeps every instrument-owned persistent_term key, including
+%% instrument_family_seq, so the seq counter is re-minted here.
+-spec reset() -> ok.
+reset() ->
+  lists:foreach(fun(T) ->
+    case ets:info(T, name) of
+      undefined -> ok;
+      _ -> ets:delete_all_objects(T)
+    end
+  end, [?TAB, ?FREE]),
+  persistent_term:put(instrument_family_seq, atomics:new(1, [])),
+  ok.
+
+%% During unregister_all the seq key is briefly absent; wait for reset/0.
 family_seq() ->
   family_seq(50).
 
@@ -79,15 +116,17 @@ family_seq(N) ->
       Ref
   end.
 
+%% ============================================================================
+%% Families
+%% ============================================================================
+
 %% Create-or-get a family. Duplicate create returns the existing meta without
-%% a kind check (master parity).
+%% a kind check.
 -spec ensure_family(term(), atom(), binary(), [term()] | undefined,
                     [number()] | undefined) -> #family{}.
 ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
-  %% Repeated creates are common (new_counter/2 called per request). Return
-  %% the existing family before taking a slot in the family chain, so they do
-  %% not grow the chain that every scrape walks.
-  %% Only a fully published family takes the shortcut; otherwise
+  %% Repeated creates are common (new_counter/2 per request): a fully
+  %% published family returns before taking a family index. Otherwise
   %% create_family/5 also repairs a creator that died before publishing.
   case persistent_term:get({instrument_family, Name}, undefined) of
     #family{} = Existing -> Existing;
@@ -96,6 +135,9 @@ ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
 
 create_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
   FamSeq = family_seq(),
+  Counters = atomics:new(4, [{signed, true}]),
+  %% slot 1 is reserved for the unlabeled series
+  atomics:put(Counters, ?HW, 1),
   Meta = #family{
     kind = Kind,
     help = Help,
@@ -103,7 +145,9 @@ create_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
     boundaries = Boundaries,
     start_time = erlang:system_time(nanosecond),
     idx = atomics:add_get(FamSeq, 1, 1),
-    row_seq = atomics:new(1, [])
+    inc = erlang:unique_integer([positive]),
+    counters = Counters,
+    chunk0 = mint_chunk(Kind, Boundaries, 0)
   },
   case ets:insert_new(?TAB, {{Name, family}, Meta}) of
     true ->
@@ -115,9 +159,7 @@ create_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
           %% concurrent teardown deleted the arbiter row; the claim is free again
           create_family(Name, Kind, Help, DeclaredLabels, Boundaries);
         Existing ->
-          %% dead-creator repair: complete missing pt publications (two racing
-          %% repairers can produce one redundant replacing put — recovery path
-          %% only, vanishingly rare)
+          %% dead-creator repair: complete a missing publication
           case persistent_term:get({instrument_family, Name}, undefined) of
             undefined -> publish_family(Name, Existing);
             _ -> ok
@@ -126,12 +168,8 @@ create_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
       end
   end.
 
-%% Custom family (instrument_metric:register/1 compat). The payload is either a
-%% collect MFA {M,F,A} (scraped by collect_all) or {raw, #metric{}} — a record
-%% registered with no collector, stored verbatim so lookup/1 round-trips it and
-%% collect_all skips it (master case_clause-crashed on collectorless records; a
-%% silent skip is strictly better). Returns {error, already_exists} when the
-%% name is taken, so register/1 reports duplicate registrations.
+%% Custom family (instrument_metric:register/1 compat). The payload is a
+%% collect MFA or {raw, #metric{}} (a record registered with no collector).
 -spec ensure_custom(term(), {module(), atom(), list()} | {raw, #metric{}}) ->
         ok | {error, already_exists}.
 ensure_custom(Name, Payload) ->
@@ -142,7 +180,6 @@ ensure_custom(Name, Payload) ->
       publish_family(Name, Meta),
       ok;
     false ->
-      %% no dead-creator repair: custom families are registered at startup by a single caller; first_write never reads them
       {error, already_exists}
   end.
 
@@ -170,78 +207,253 @@ family(Name) ->
       Meta
   end.
 
+%% The family currently registered under Name is still incarnation Inc.
+same_incarnation(Name, Inc) ->
+  case ets:lookup_element(?TAB, {Name, family}, 2, undefined) of
+    #family{inc = Inc} -> true;
+    _ -> false
+  end.
+
+%% ============================================================================
+%% Chunks and slots
+%% ============================================================================
+
+chunk_size(C) -> min(?FIRST_CHUNK bsl C, ?MAX_CHUNK).
+
+%% Slots before chunk C: 16 * (2^C - 1) while chunks double, then 1024 each.
+-define(DOUBLING_CHUNKS, 7).                %% chunks 0..6 double: 16..1024
+-define(SLOTS_BEFORE_FLAT, 2032).           %% 16 * (2^7 - 1)
+
+%% Slot S -> {Chunk, Index in chunk}.
+slot_loc(S) when S =< ?SLOTS_BEFORE_FLAT ->
+  C = doubling_chunk(S, 0),
+  {C, S - ?FIRST_CHUNK * ((1 bsl C) - 1)};
+slot_loc(S) ->
+  Off = S - ?SLOTS_BEFORE_FLAT - 1,
+  {?DOUBLING_CHUNKS + Off div ?MAX_CHUNK, Off rem ?MAX_CHUNK + 1}.
+
+doubling_chunk(S, C) ->
+  case S =< ?FIRST_CHUNK * ((2 bsl C) - 1) of
+    true -> C;
+    false -> doubling_chunk(S, C + 1)
+  end.
+
+mint_chunk(Kind, Bounds, C) ->
+  Size = chunk_size(C),
+  {atomics:new(Size, []), list_to_tuple([mint_cell(Kind, Bounds) || _ <- lists:seq(1, Size)])}.
+
+mint_cell(counter, _Bounds) ->
+  {ok, Ref} = instrument_nif:new_gauge(),
+  #metric{name = series, handle = {Ref, erlang:system_time(nanosecond)}};
+mint_cell(histogram, Bounds0) ->
+  Bounds = case Bounds0 of
+             undefined -> instrument_histogram:default_buckets();
+             _ -> Bounds0
+           end,
+  #metric{name = series, handle = instrument_histogram:mint_cell(Bounds)};
+mint_cell(_GaugeLike, _Bounds) ->
+  {ok, Ref} = instrument_nif:new_gauge(),
+  #metric{name = series, handle = Ref}.
+
+reset_cell(histogram, Row) ->
+  instrument_histogram:reset_cell(Row);
+reset_cell(counter, #metric{handle = {Ref, _}}) ->
+  instrument_nif:set_gauge(Ref, 0.0);
+reset_cell(_GaugeLike, #metric{handle = Ref}) ->
+  instrument_nif:set_gauge(Ref, 0.0).
+
+%% The chunk if it is published (pt) or at least claimed (ETS), else undefined.
+chunk(_Name, #family{chunk0 = Chunk0}, 0) ->
+  Chunk0;
+chunk(Name, #family{inc = Inc}, C) ->
+  case persistent_term:get({instrument_chunk, Name, Inc, C}, undefined) of
+    undefined ->
+      case ets:lookup(?TAB, {'$s', Inc, chunk, C}) of
+        [{_, Chunk, Publisher}] ->
+          repair_chunk(Name, Inc, C, Chunk, Publisher),
+          Chunk;
+        [] ->
+          undefined
+      end;
+    Chunk ->
+      Chunk
+  end.
+
+%% A publisher that died between claiming a chunk and publishing it leaves it
+%% in ETS only. One repairer publishes it; the key is still fresh.
+repair_chunk(Name, Inc, C, Chunk, Publisher) ->
+  case Publisher =/= self() andalso not is_process_alive(Publisher)
+       andalso ets:insert_new(?TAB, {{'$s', Inc, repair, C}, true, nil}) of
+    true -> persistent_term:put({instrument_chunk, Name, Inc, C}, Chunk);
+    false -> ok
+  end.
+
+%% @doc Makes sure chunk C of the family exists. Any writer that needs a
+%% missing chunk creates one; ets:insert_new picks the single one that is
+%% published, the others are dropped. Nobody waits for another process.
+-spec ensure_chunk(term(), #family{}, non_neg_integer()) ->
+        {atomics:atomics_ref(), tuple()} | undefined.
+ensure_chunk(Name, #family{} = Fam, C) ->
+  case chunk(Name, Fam, C) of
+    undefined -> publish_chunk(Name, Fam, C);
+    Chunk -> Chunk
+  end.
+
+publish_chunk(Name, #family{inc = Inc, kind = Kind, boundaries = Bounds}, C) ->
+  Chunk = mint_chunk(Kind, Bounds, C),
+  case ets:insert_new(?TAB, {{'$s', Inc, chunk, C}, Chunk, self()}) of
+    true ->
+      persistent_term:put({instrument_chunk, Name, Inc, C}, Chunk),
+      %% A teardown that ran meanwhile cannot have seen this key.
+      case same_incarnation(Name, Inc) of
+        true -> Chunk;
+        false ->
+          persistent_term:erase({instrument_chunk, Name, Inc, C}),
+          ets:delete(?TAB, {'$s', Inc, chunk, C}),
+          undefined
+      end;
+    false ->
+      case ets:lookup(?TAB, {'$s', Inc, chunk, C}) of
+        [{_, Winner, _}] -> Winner;
+        [] -> undefined
+      end
+  end.
+
+%% {Epochs, Ix, Row} for slot S, creating its chunk if needed.
+slot_ref(Name, Fam, S) ->
+  {C, Ix} = slot_loc(S),
+  case ensure_chunk(Name, Fam, C) of
+    {Epochs, Rows} -> {Epochs, Ix, element(Ix, Rows)};
+    undefined -> undefined
+  end.
+
+%% Retire a slot: odd (live) -> even; even (pending) -> +2, which makes an
+%% in-flight claim's compare-exchange fail. Returns the previous epoch.
+retire(Epochs, Ix) ->
+  E = atomics:get(Epochs, Ix),
+  New = case E band 1 of 1 -> E + 1; 0 -> E + 2 end,
+  case atomics:compare_exchange(Epochs, Ix, E, New) of
+    ok -> E;
+    _ -> retire(Epochs, Ix)
+  end.
+
+%% ============================================================================
+%% Writes
+%% ============================================================================
+
 %% The unified write path. CacheKey is the API's natural input shape (meter:
 %% Canon; vec API: raw values list). CanonFun computes the canonical
-%% {SortedNames, Values} only on first touch.
+%% {SortedNames, Values} only on a miss.
 -spec write(term(), term(), fun(() -> {list(), list()}),
             fun((#metric{}) -> any())) -> any().
 write(Name, CacheKey, CanonFun, WriteFun) ->
-  case persistent_term:get({instrument_label, Name, CacheKey}, undefined) of
-    #metric{} = Row -> WriteFun(Row);
-    undefined -> first_write(Name, CacheKey, CanonFun, WriteFun)
+  case erlang:get({?PD, Name, CacheKey}) of
+    {Epochs, Ix, E, Row} ->
+      case atomics:get(Epochs, Ix) of
+        E -> WriteFun(Row);
+        _ -> miss(Name, CacheKey, CanonFun, WriteFun)
+      end;
+    _ ->
+      miss(Name, CacheKey, CanonFun, WriteFun)
   end.
 
-%% Unlabeled (no-attribute) write. Same persistent_term state as write/4 with a
-%% {[],[]} canon, but the hot (cache-hit) path allocates nothing: Kind is a bare
-%% atom and the per-kind op is dispatched by function head, so there is no
-%% CanonFun/WriteFun closure and no runtime canon build. The miss path delegates
-%% to the unchanged first_write/4 arbiter, so it publishes the identical
-%% {instrument_label, Name, {[],[]}} key, chain slot, and count.
+%% Unlabeled (no-attribute) write: slot 1 of chunk 0, read from the family
+%% meta, so the hot path is one persistent_term get and one atomics read.
 -spec write_unlabeled(term(), atom(), number()) -> any().
 write_unlabeled(Name, Kind, Value) ->
-  case persistent_term:get({instrument_label, Name, ?UNLABELED}, undefined) of
-    #metric{} = Row -> apply_unlabeled(Kind, Row, Value);
-    undefined ->
-      first_write(Name, ?UNLABELED,
-                  fun() -> ?UNLABELED end,
+  case persistent_term:get({instrument_family, Name}, undefined) of
+    #family{chunk0 = {Epochs, Rows}} ->
+      case atomics:get(Epochs, 1) band 1 of
+        1 -> apply_unlabeled(Kind, element(1, Rows), Value);
+        0 -> miss(Name, ?UNLABELED, fun() -> ?UNLABELED end,
                   fun(R) -> apply_unlabeled(Kind, R, Value) end)
+      end;
+    _ ->
+      miss(Name, ?UNLABELED, fun() -> ?UNLABELED end,
+           fun(R) -> apply_unlabeled(Kind, R, Value) end)
   end.
 
-%% Mirrors the per-kind write funs the meter builds today; compile-time dispatched.
 apply_unlabeled(counter, Row, V)                     -> instrument_counter:inc_counter(Row, V);
 apply_unlabeled(up_down_counter, Row, V) when V >= 0 -> instrument_gauge:inc_gauge(Row, V);
 apply_unlabeled(up_down_counter, Row, V)             -> instrument_gauge:dec_gauge(Row, -V);
 apply_unlabeled(gauge, Row, V)                       -> instrument_gauge:set_gauge(Row, V);
 apply_unlabeled(histogram, Row, V)                   -> instrument_histogram:observe_histogram(Row, V).
 
-first_write(Name, CacheKey, CanonFun, WriteFun) ->
+%% Cache miss: resolve the label set through ETS, else create its series.
+miss(Name, CacheKey, CanonFun, WriteFun) ->
   case family(Name) of
-    undefined -> {error, not_found};
-    {custom, _, _} -> {error, not_found};
-    #family{} = Fam ->
-      Canon = CanonFun(),
-      case valid_arity(Fam, Canon) of
-        false -> {error, invalid_labels};
-        true ->
-          %% Adopt an already-claimed series: an aliased CacheKey (distinct raw
-          %% label values that canonicalize to the same Canon) or a later write to
-          %% a series whose winner died mid-claim finds the arbiter row here,
-          %% publishes its own cache key, and writes the existing cell -- no mint,
-          %% no cardinality consumption, no overflow misroute at the cap.
-          case ets:lookup_element(?TAB, {Name, Canon}, 2, undefined) of
-            #metric{} = Existing ->
-              adopt_cache_key(Name, CacheKey, Canon, Existing),
-              WriteFun(Existing);
-            undefined ->
-              case over_limit(Name, Canon) of
-                true -> overflow_write(Name, Fam, WriteFun);
-                false -> claim_row(Name, Fam, Canon, CacheKey, WriteFun)
-              end
+    #family{inc = Inc} = Fam ->
+      case ets:lookup_element(?TAB, {'$s', Inc, key, CacheKey}, 2, undefined) of
+        S when is_integer(S) ->
+          case live_ref(Name, Fam, S) of
+            {Epochs, Ix, E, Row} ->
+              cache(Name, CacheKey, Epochs, Ix, E, Row),
+              WriteFun(Row);
+            not_live ->
+              by_canon(Name, Fam, CacheKey, CanonFun, WriteFun)
+          end;
+        undefined ->
+          by_canon(Name, Fam, CacheKey, CanonFun, WriteFun)
+      end;
+    _ ->
+      {error, not_found}
+  end.
+
+live_ref(Name, Fam, S) ->
+  case slot_ref(Name, Fam, S) of
+    {Epochs, Ix, Row} ->
+      E = atomics:get(Epochs, Ix),
+      case E band 1 of
+        1 -> {Epochs, Ix, E, Row};
+        0 -> not_live
+      end;
+    undefined ->
+      not_live
+  end.
+
+by_canon(Name, #family{inc = Inc} = Fam, CacheKey, CanonFun, WriteFun) ->
+  Canon = CanonFun(),
+  case valid_canon(Fam, Canon) of
+    false ->
+      {error, invalid_labels};
+    true ->
+      case ets:lookup_element(?TAB, {'$s', Inc, canon, Canon}, 2, undefined) of
+        S when is_integer(S) ->
+          %% Another cache key (or a claim in progress) already holds this
+          %% label set: share its series.
+          Cacheable = adopt_key(Fam, CacheKey, S),
+          case live_ref(Name, Fam, S) of
+            {Epochs, Ix, E, Row} ->
+              _ = Cacheable andalso cache(Name, CacheKey, Epochs, Ix, E, Row),
+              WriteFun(Row);
+            not_live ->
+              complete_claim(Name, Fam, S, Canon, CacheKey, WriteFun)
+          end;
+        undefined ->
+          case over_limit(Fam, Canon) of
+            true -> overflow_write(Name, Fam, WriteFun);
+            false -> claim(Name, Fam, Canon, CacheKey, WriteFun)
           end
       end
   end.
 
-valid_arity(#family{declared_labels = undefined}, _Canon) -> true;
-valid_arity(#family{declared_labels = Declared}, {Names, _Values}) ->
-  length(Names) =:= length(Declared).
+%% A degenerate sentinel {[], [_|_]} comes from a vec arity mismatch; names
+%% must arrive sorted (scrape unions depend on it).
+valid_canon(#family{declared_labels = Declared}, {Names, Values}) ->
+  ArityOk = case Declared of
+              undefined -> true;
+              _ -> length(Names) =:= length(Declared)
+            end,
+  ArityOk andalso not (Names =:= [] andalso Values =/= [])
+    andalso Names =:= lists:sort(Names);
+valid_canon(_Fam, _Canon) ->
+  false.
 
-over_limit(Name, Canon) ->
+over_limit(#family{counters = Counters}, Canon) ->
   overflow_canon_marker(Canon) =:= not_overflow andalso
-    instrument_registry:label_count(Name) >=
-      instrument_config:get_metric_cardinality_limit().
+    atomics:get(Counters, ?LIVE) >= instrument_config:get_metric_cardinality_limit().
 
-%% An overflow canon is exempt from the cap check (it must be creatable AT the
-%% cap). Both per-API shapes carry only ?OVERFLOW_VALUE / <<"true">> values.
+%% An overflow canon is exempt from the cap (it must be creatable at the cap).
 overflow_canon_marker({[?OVERFLOW_VALUE], [<<"true">>]}) ->
   overflow;
 overflow_canon_marker({_Names, Values} = Canon) ->
@@ -252,10 +464,9 @@ overflow_canon_marker({_Names, Values} = Canon) ->
 overflow_canon_marker(_) ->
   not_overflow.
 
-overflow_write(Name, #family{declared_labels = Declared}, WriteFun) ->
-  _ = ets:update_counter(?COUNTS, {dropped, Name}, {2, 1}, {{dropped, Name}, 0}),
+overflow_write(Name, #family{declared_labels = Declared, counters = Counters}, WriteFun) ->
+  atomics:add(Counters, ?DROPPED, 1),
   Canon = overflow_canon(Declared),
-  %% overflow rows resolve through the ordinary path (cache hit when hot)
   write(Name, Canon, fun() -> Canon end, WriteFun).
 
 overflow_canon(undefined) ->
@@ -264,139 +475,346 @@ overflow_canon(Declared) ->
   Sorted = lists:sort(Declared),
   {Sorted, [?OVERFLOW_VALUE || _ <- Sorted]}.
 
-claim_row(Name, #family{} = Fam, Canon, CacheKey, WriteFun) ->
-  %% A degenerate sentinel {[], [_|_]} can only arise from a vec-style
-  %% arity-mismatch reaching a schema-free or []-declared family; reject it
-  %% here so it never mints a cell or occupies a chain slot.
-  case Canon of
-    {[], [_|_]} ->
-      {error, invalid_labels};
+%% Record CacheKey as another key of series S. Distinct raw values that
+%% canonicalize alike (floats past the 6th decimal, strings vs binaries) are
+%% capped at the cardinality limit per family; past it, writes still reach the
+%% right series through this slower path. Returns whether the key may be
+%% cached in the process dictionary.
+adopt_key(#family{inc = Inc, counters = Counters}, CacheKey, S) ->
+  Key = {'$s', Inc, key, CacheKey},
+  case ets:lookup_element(?TAB, Key, 2, undefined) of
+    S -> true;
     _ ->
-      {Names, _Values} = Canon,
-      %% canonical names must arrive sorted: the scrape-time union umerge and the
-      %% ordered chain rendering both depend on it; cheap to assert once per series
-      true = (Names =:= lists:sort(Names)),
-      Row = mint_row(Name, Fam, Canon),
-      case ets:insert_new(?TAB, {{Name, Canon}, Row}) of
-        true ->
-          %% post-claim family re-check (narrows the unregister race): teardown
-          %% deletes the family arbiter row first
-          case ets:member(?TAB, {Name, family}) of
-            false ->
-              ets:delete(?TAB, {Name, Canon}),
-              discard_row(Row),
-              {error, not_found};
-            true ->
-              S = atomics:add_get(Fam#family.row_seq, 1, 1),
-              persistent_term:put({instrument_row, Name, S}, {Canon, CacheKey, Row}),
-              persistent_term:put({instrument_label, Name, CacheKey}, Row),
-              %% The overflow row is a real chain slot but is NOT a live label set:
-              %% it is cap-exempt and tracked by {dropped, Name}, so it must not
-              %% bump the live-series count (which feeds label_count/1 and the cap).
-              case overflow_canon_marker(Canon) of
-                not_overflow ->
-                  _ = ets:update_counter(?COUNTS, {count, Name}, {2, 1}, {{count, Name}, 0});
-                _ ->
-                  ok
-              end,
-              WriteFun(Row)
-          end;
+      Limit = instrument_config:get_metric_cardinality_limit(),
+      case atomics:add_get(Counters, ?ALIASES, 1) =< Limit
+           andalso ets:insert_new(?TAB, {Key, S, alias}) of
+        true -> true;
         false ->
-          discard_row(Row),
-          case ets:lookup_element(?TAB, {Name, Canon}, 2, undefined) of
-            undefined -> {error, not_found};   %% winner undid its claim (family torn down)
-            #metric{} = Existing ->
-              %% Lost the claim to a concurrent winner (possibly an aliased
-              %% CacheKey racing the same Canon): adopt our own cache key so the
-              %% next write with this shape hits the fast path instead of
-              %% re-minting and discarding a cell every time.
-              adopt_cache_key(Name, CacheKey, Canon, Existing),
-              WriteFun(Existing)
+          atomics:sub(Counters, ?ALIASES, 1),
+          false
+      end
+  end.
+
+%% First write of a label set: take a slot, claim the canon, publish.
+claim(Name, #family{inc = Inc} = Fam, Canon, CacheKey, WriteFun) ->
+  case take_slot(Name, Fam, Canon) of
+    {ok, S} ->
+      case ets:insert_new(?TAB, {{'$s', Inc, canon, Canon}, S, nil}) of
+        true ->
+          complete_claim(Name, Fam, S, Canon, CacheKey, WriteFun);
+        false ->
+          %% Lost to a concurrent claim of the same label set.
+          release_unused(Fam, S),
+          by_canon(Name, Fam, CacheKey, fun() -> Canon end, WriteFun)
+      end;
+    error ->
+      {error, not_found}
+  end.
+
+%% Finish a claim (or help one whose claimer died): record the slot's labels
+%% and key, check the family is still this incarnation, then make the slot
+%% live. Only the compare-exchange winner counts the series.
+complete_claim(Name, #family{inc = Inc, counters = Counters} = Fam, S, Canon, CacheKey, WriteFun) ->
+  case slot_ref(Name, Fam, S) of
+    undefined ->
+      {error, not_found};
+    {Epochs, Ix, Row} ->
+      E0 = atomics:get(Epochs, Ix),
+      _ = ets:insert_new(?TAB, {{'$s', Inc, slot, S}, Canon, CacheKey}),
+      _ = ets:insert_new(?TAB, {{'$s', Inc, key, CacheKey}, S, own}),
+      instrument_histogram:activate_exemplars(Row),
+      case same_incarnation(Name, Inc) of
+        false ->
+          undo_claim(Inc, S, Canon, CacheKey, Row),
+          {error, not_found};
+        true when E0 band 1 =:= 1 ->
+          cache_if_keyed(Name, Inc, CacheKey, S, Epochs, Ix, E0, Row),
+          WriteFun(Row);
+        true ->
+          case atomics:compare_exchange(Epochs, Ix, E0, E0 + 1) of
+            ok ->
+              %% A removal that deleted the canon meanwhile wins: retire again.
+              case ets:lookup_element(?TAB, {'$s', Inc, canon, Canon}, 2, undefined) of
+                S ->
+                  case overflow_canon_marker(Canon) of
+                    not_overflow -> atomics:add(Counters, ?LIVE, 1);
+                    _ -> ok
+                  end,
+                  cache_if_keyed(Name, Inc, CacheKey, S, Epochs, Ix, E0 + 1, Row),
+                  WriteFun(Row);
+                _ ->
+                  _ = retire(Epochs, Ix),
+                  ok
+              end;
+            _ ->
+              E1 = atomics:get(Epochs, Ix),
+              case E1 =:= E0 + 1 of
+                true ->
+                  %% A helper completed it.
+                  cache_if_keyed(Name, Inc, CacheKey, S, Epochs, Ix, E1, Row),
+                  WriteFun(Row);
+                false ->
+                  %% Removed or torn down while claiming; the write is dropped.
+                  ok
+              end
           end
       end
   end.
 
-%% Publish this writer's cache key for a series already claimed by another
-%% writer -- an aliased CacheKey, or a winner that died before publishing.
-%% Absent-only, so it never issues a replacing persistent_term:put on the create
-%% path; concurrent adopters of the same key store an identical Row.
-%%
-%% Each alias is recorded as {{Name, alias, CacheKey}, Canon} so removal and
-%% teardown can erase it, and the number of aliases per family is capped at the
-%% cardinality limit: distinct raw values that canonicalize alike (floats
-%% differing past the 6th decimal, strings vs binaries) would otherwise add
-%% persistent_term keys without bound. Past the cap the write still lands on
-%% the right row, through the arbiter lookup instead of the fast path.
-adopt_cache_key(Name, CacheKey, Canon, Row) ->
-  case persistent_term:get({instrument_label, Name, CacheKey}, undefined) of
-    undefined ->
-      case ets:insert_new(?TAB, {{Name, alias, CacheKey}, Canon}) of
-        false ->
-          ok;
-        true ->
-          Limit = instrument_config:get_metric_cardinality_limit(),
-          case ets:update_counter(?COUNTS, {aliases, Name}, {2, 1}, {{aliases, Name}, 0}) of
-            N when N =< Limit ->
-              persistent_term:put({instrument_label, Name, CacheKey}, Row);
-            _ ->
-              ets:delete(?TAB, {Name, alias, CacheKey}),
-              _ = ets:update_counter(?COUNTS, {aliases, Name}, {2, -1, 0, 0}),
-              ok
-          end
-      end;
-    _ ->
-      ok
+undo_claim(Inc, S, Canon, CacheKey, Row) ->
+  ets:delete(?TAB, {'$s', Inc, canon, Canon}),
+  ets:delete(?TAB, {'$s', Inc, slot, S}),
+  ets:delete(?TAB, {'$s', Inc, key, CacheKey}),
+  instrument_histogram:cleanup(Row).
+
+cache_if_keyed(Name, Inc, CacheKey, S, Epochs, Ix, E, Row) ->
+  case ets:lookup_element(?TAB, {'$s', Inc, key, CacheKey}, 2, undefined) of
+    S -> cache(Name, CacheKey, Epochs, Ix, E, Row);
+    _ -> ok
   end.
 
-%% Erase the aliases of one series (Canon) or of the whole family ('_').
-erase_aliases(Name, Canon) ->
-  Aliases = ets:match(?TAB, {{Name, alias, '$1'}, Canon}),
-  lists:foreach(fun([CK]) ->
-    persistent_term:erase({instrument_label, Name, CK}),
-    ets:delete(?TAB, {Name, alias, CK})
-  end, Aliases),
-  case Canon of
-    '_' -> ets:delete(?COUNTS, {aliases, Name});
-    _ -> _ = ets:update_counter(?COUNTS, {aliases, Name},
-                                {2, -length(Aliases), 0, 0}, {{aliases, Name}, 0})
+%% Slot 1 holds the unlabeled series. Others come from the free list (past
+%% quarantine, cell reset) or from the high-water mark.
+take_slot(_Name, _Fam, ?UNLABELED) ->
+  {ok, 1};
+take_slot(Name, #family{inc = Inc, kind = Kind, counters = Counters} = Fam, _Canon) ->
+  case take_free(Inc) of
+    {ok, S} ->
+      case slot_ref(Name, Fam, S) of
+        {_Epochs, _Ix, Row} -> reset_cell(Kind, Row), {ok, S};
+        undefined -> error
+      end;
+    none ->
+      S = atomics:add_get(Counters, ?HW, 1),
+      {C, Ix} = slot_loc(S),
+      case ensure_chunk(Name, Fam, C) of
+        undefined ->
+          error;
+        _ ->
+          %% Halfway through a chunk, have the next one created ahead.
+          case Ix =:= chunk_size(C) div 2 of
+            true -> gen_server:cast(instrument_registry, {prepare_chunk, Name, Inc, C + 1});
+            false -> ok
+          end,
+          {ok, S}
+      end
+  end.
+
+take_free(Inc) ->
+  Cutoff = erlang:monotonic_time(millisecond) - quarantine_ms(),
+  case ets:select(?FREE, [{{{Inc, '$1', '_'}}, [{'=<', '$1', Cutoff}], ['$_']}], 1) of
+    {[{Key}], _} ->
+      case ets:take(?FREE, Key) of
+        [_] ->
+          {Inc, _, S} = Key,
+          case ets:member(?TAB, {'$s', Inc, pin, S}) of
+            true -> take_free(Inc);
+            false -> {ok, S}
+          end;
+        [] ->
+          take_free(Inc)
+      end;
+    _ ->
+      none
+  end.
+
+quarantine_ms() ->
+  case application:get_env(instrument, series_reuse_quarantine_ms) of
+    {ok, Ms} when is_integer(Ms), Ms >= 0 -> Ms;
+    _ -> 5000
+  end.
+
+%% A slot taken but not used (lost claim) can be reused immediately.
+release_unused(_Fam, 1) ->
+  ok;
+release_unused(#family{inc = Inc}, S) ->
+  ets:insert(?FREE, {{Inc, erlang:monotonic_time(millisecond) - quarantine_ms(), S}}),
+  ok.
+
+%% ============================================================================
+%% Process-dictionary cache
+%% ============================================================================
+
+cache(Name, CacheKey, Epochs, Ix, E, Row) ->
+  case put({?PD, Name, CacheKey}, {Epochs, Ix, E, Row}) of
+    undefined -> count_entry();
+    _ -> ok
   end,
   ok.
 
-%% Cells are master's exact storage shapes; rows are the same unregistered
-%% #metric{} wrappers so per-kind ops work unmodified.
-mint_row(Name, #family{kind = Kind, boundaries = Bounds}, Canon) ->
-  RowName = {row, Name, Canon},
-  Handle = mint_handle(Kind, Bounds, RowName),
-  #metric{name = RowName, handle = Handle}.
+%% Bound stale entries: every so often drop entries whose slot moved on, and
+%% raise the threshold when most entries are still valid.
+count_entry() ->
+  N = case get(?PD_COUNT) of undefined -> 1; C -> C + 1 end,
+  Limit = case get(?PD_LIMIT) of undefined -> ?PD_SWEEP; L -> L end,
+  case N >= Limit of
+    true ->
+      Kept = sweep_cache(),
+      put(?PD_COUNT, 0),
+      case Kept * 2 > Limit of
+        true -> put(?PD_LIMIT, Limit * 2);
+        false -> ok
+      end;
+    false ->
+      put(?PD_COUNT, N)
+  end.
 
-mint_handle(counter, _Bounds, _RowName) ->
-  {ok, Ref} = instrument_nif:new_gauge(),
-  {Ref, erlang:system_time(nanosecond)};
-mint_handle(Kind, _Bounds, _RowName)
-    when Kind =:= up_down_counter; Kind =:= gauge;
-         Kind =:= observable_counter; Kind =:= observable_gauge;
-         Kind =:= observable_up_down_counter ->
-  {ok, Ref} = instrument_nif:new_gauge(),
-  Ref;
-mint_handle(histogram, Bounds0, RowName) ->
-  Bounds = case Bounds0 of
-    undefined -> instrument_histogram:default_buckets();
-    _ -> Bounds0
-  end,
-  (instrument_histogram:new_histogram(RowName, <<>>, Bounds))#metric.handle.
+sweep_cache() ->
+  lists:foldl(fun({{?PD, _, _} = K, {Epochs, Ix, E, _}}, Kept) ->
+                    case atomics:get(Epochs, Ix) of
+                      E -> Kept + 1;
+                      _ -> erase(K), Kept
+                    end;
+                 (_, Kept) -> Kept
+              end, 0, get()).
 
-%% A loser's freshly minted cell: NIF/atomics memory is reclaimed by refcount;
-%% a histogram's exemplar reservoir lives in ETS and must be released.
-discard_row(#metric{} = Row) ->
-  instrument_histogram:cleanup(Row).
+%% @doc Drops this process's cached series entries.
+-spec purge_cache() -> ok.
+purge_cache() ->
+  _ = [erase(K) || {{?PD, _, _} = K, _} <- get()],
+  erase(?PD_COUNT),
+  erase(?PD_LIMIT),
+  ok.
 
-%% Pure literal-area reads: regenerate the key space from the counters, get
-%% each slot from pt. No ETS on this path. Holes (unregistered families,
-%% removed labels, in-flight publications) are skipped.
-%% {custom, MFA} collectors must return formatter-compatible maps by convention.
+%% ============================================================================
+%% Handles and lookups
+%% ============================================================================
+
+%% @doc Resolves (creating if needed) the cell of a label set for use as a
+%% handle. The cell escapes the epoch check, so its slot is pinned: it is
+%% never reused for another label set.
+-spec resolve_row(term(), term(), fun(() -> {list(), list()})) -> #metric{} | {error, term()}.
+resolve_row(Name, CacheKey, CanonFun) ->
+  case write(Name, CacheKey, CanonFun, fun(R) -> R end) of
+    #metric{} = Row ->
+      case family(Name) of
+        #family{inc = Inc} ->
+          case ets:lookup_element(?TAB, {'$s', Inc, key, CacheKey}, 2, undefined) of
+            S when is_integer(S) -> ets:insert(?TAB, {{'$s', Inc, pin, S}, true, nil});
+            _ -> ok
+          end,
+          Row;
+        _ ->
+          {error, not_found}
+      end;
+    ok ->
+      {error, not_found};
+    Other ->
+      Other
+  end.
+
+%% @doc The live unlabeled cell of a family, without creating it.
+-spec unlabeled_row(term()) -> #metric{} | {error, not_found}.
+unlabeled_row(Name) ->
+  case family(Name) of
+    #family{chunk0 = {Epochs, Rows}} ->
+      case atomics:get(Epochs, 1) band 1 of
+        1 -> element(1, Rows);
+        0 -> {error, not_found}
+      end;
+    _ ->
+      {error, not_found}
+  end.
+
+%% @doc The overflow series' cell, once the cardinality cap was hit.
+-spec overflow_row(term()) -> #metric{} | undefined.
+overflow_row(Name) ->
+  case family(Name) of
+    #family{inc = Inc, declared_labels = Declared} = Fam ->
+      case ets:lookup_element(?TAB, {'$s', Inc, canon, overflow_canon(Declared)}, 2, undefined) of
+        S when is_integer(S) ->
+          case live_ref(Name, Fam, S) of
+            {_, _, _, Row} -> Row;
+            not_live -> undefined
+          end;
+        undefined ->
+          undefined
+      end;
+    _ ->
+      undefined
+  end.
+
+%% @doc Folds the live series of a family in slot order:
+%% `Fun(CacheKey, Canon, Row, Acc)'.
+-spec fold_rows(term(), fun((term(), {list(), list()}, #metric{}, term()) -> term())) -> term().
+fold_rows(Name, Fun) ->
+  fold_rows(Name, Fun, []).
+
+fold_rows(Name, Fun, Acc0) ->
+  case family(Name) of
+    #family{inc = Inc, counters = Counters} = Fam ->
+      HW = atomics:get(Counters, ?HW),
+      {Acc, _} = lists:foldl(fun(S, {Acc1, Chunks}) ->
+        {C, Ix} = slot_loc(S),
+        {Chunk, Chunks1} = cached_chunk(Name, Fam, C, Chunks),
+        case Chunk of
+          {Epochs, Rows} ->
+            E = atomics:get(Epochs, Ix),
+            case E band 1 of
+              1 ->
+                case ets:lookup(?TAB, {'$s', Inc, slot, S}) of
+                  [{_, Canon, CacheKey}] ->
+                    {Fun(CacheKey, Canon, element(Ix, Rows), Acc1), Chunks1};
+                  [] ->
+                    {Acc1, Chunks1}
+                end;
+              0 ->
+                {Acc1, Chunks1}
+            end;
+          undefined ->
+            {Acc1, Chunks1}
+        end
+      end, {Acc0, #{}}, lists:seq(1, HW)),
+      Acc;
+    _ ->
+      Acc0
+  end.
+
+cached_chunk(Name, Fam, C, Chunks) ->
+  case Chunks of
+    #{C := Chunk} -> {Chunk, Chunks};
+    _ ->
+      Chunk = chunk(Name, Fam, C),
+      {Chunk, Chunks#{C => Chunk}}
+  end.
+
+%% @doc Live label sets of a family (cardinality cap accounting).
+-spec live_count(term()) -> non_neg_integer().
+live_count(Name) ->
+  case family(Name) of
+    #family{counters = Counters} -> max(0, atomics:get(Counters, ?LIVE));
+    _ -> 0
+  end.
+
+%% @doc Writes routed to the overflow series since the family was created.
+-spec dropped(term()) -> non_neg_integer().
+dropped(Name) ->
+  case family(Name) of
+    #family{counters = Counters} -> atomics:get(Counters, ?DROPPED);
+    _ -> 0
+  end.
+
+%% Test helpers.
+slot_of(Name, CacheKey) ->
+  case family(Name) of
+    #family{inc = Inc} -> ets:lookup_element(?TAB, {'$s', Inc, key, CacheKey}, 2, undefined);
+    _ -> undefined
+  end.
+
+high_water(Name) ->
+  case family(Name) of
+    #family{counters = Counters} -> atomics:get(Counters, ?HW);
+    _ -> 0
+  end.
+
+%% ============================================================================
+%% Collection
+%% ============================================================================
+
+%% Families are walked through the family chain in persistent_term; each
+%% family's live slots are read from its chunks, with labels from ETS.
 -spec collect_all() -> [map()].
 collect_all() ->
-  %% defensive: callers can reach collect before the registry supervisor finishes init (early scrape); a missing seq ref means no families exist yet
   case persistent_term:get(instrument_family_seq, undefined) of
     undefined -> [];
     FamSeq -> collect_all(FamSeq)
@@ -411,7 +829,6 @@ collect_all(FamSeq) ->
         case persistent_term:get({instrument_family, Name}, undefined) of
           undefined -> Acc;
           {custom, {raw, _Metric}, _Idx} ->
-            %% a raw record carries no collector — nothing to emit
             Acc;
           {custom, {M, F, A}, _Idx} ->
             try [erlang:apply(M, F, A) | Acc]
@@ -436,18 +853,10 @@ collect_all(FamSeq) ->
   end, [], lists:seq(1, N))).
 
 collect_family(Name, #family{kind = Kind, help = Help, start_time = T0,
-                             declared_labels = Declared, row_seq = Seq}) ->
-  RowN = atomics:get(Seq, 1),
-  {Data, Union0} = lists:foldl(fun(S, {DataAcc, UnionAcc}) ->
-    case persistent_term:get({instrument_row, Name, S}, undefined) of
-      undefined -> {DataAcc, UnionAcc};
-      {{Names, Values}, _CacheKey, Row} ->
-        Val = read_row(Kind, Row),
-        %% Names is sorted by construction (canonical form); UnionAcc stays
-        %% sorted as the umerge accumulator — umerge/2 requires both sorted.
-        {[{Names, Values, Val} | DataAcc], lists:umerge(UnionAcc, Names)}
-    end
-  end, {[], []}, lists:seq(1, RowN)),
+                             declared_labels = Declared}) ->
+  {Data, Union0} = fold_rows(Name, fun(_CacheKey, {Names, Values}, Row, {DataAcc, UnionAcc}) ->
+    {[{Names, Values, read_row(Kind, Row)} | DataAcc], lists:umerge(UnionAcc, Names)}
+  end, {[], []}),
   case Data of
     [] -> empty;
     _ ->
@@ -470,121 +879,93 @@ wire_type(observable_up_down_counter) -> gauge;
 wire_type(K) -> K.
 
 %% ============================================================================
-%% Teardown helpers (admin-time, serialized by the registry gen_server).
-%% Task 8 reuses these for full instrument teardown.
+%% Removal and teardown (admin-time, serialized by the registry)
 %% ============================================================================
 
-%% Remove a single label set's row by its values-list cache key: erase the
-%% cache key and the matching chain slot, drop the arbiter row, release the
-%% row's exemplar reservoir, and decrement the live-series count. The chain
-%% slot becomes a hole (scrapes skip it). Returns ok regardless of whether the
-%% row existed.
--spec remove_row(term(), list()) -> ok.
+%% @doc Removes the series a cache key (own key or alias) belongs to.
+-spec remove_row(term(), term()) -> ok.
 remove_row(Name, CacheKey) ->
   case family(Name) of
-    #family{row_seq = Seq} ->
-      case persistent_term:get({instrument_label, Name, CacheKey}, undefined) of
-        undefined ->
-          ok;
-        Row ->
-          %% The key may be the series' own cache key or an alias of it; either
-          %% way the whole series goes, with every key that points at it.
-          Match = case ets:lookup_element(?TAB, {Name, alias, CacheKey}, 2, undefined) of
-                    undefined -> {cache_key, CacheKey};
-                    Canon -> {canon, Canon}
-                  end,
-          persistent_term:erase({instrument_label, Name, CacheKey}),
-          case erase_matching_slot(Name, Seq, Match) of
-            {ok, SlotCanon} ->
-              erase_aliases(Name, SlotCanon),
-              instrument_histogram:cleanup(Row),
-              _ = ets:update_counter(?COUNTS, {count, Name}, {2, -1, 0, 0}, {{count, Name}, 0}),
-              ok;
-            not_found ->
-              ok
-          end
+    #family{inc = Inc} = Fam ->
+      case ets:lookup_element(?TAB, {'$s', Inc, key, CacheKey}, 2, undefined) of
+        S when is_integer(S) -> remove_slot(Name, Fam, S);
+        undefined -> ok
       end;
     _ ->
       ok
   end.
 
-%% Walk the chain to find the series' slot; erase it, its own cache key and
-%% the arbiter row keyed by its Canon. Returns the Canon, or not_found.
-erase_matching_slot(Name, Seq, Match) ->
-  N = atomics:get(Seq, 1),
-  lists:foldl(fun(S, Acc) ->
-    case persistent_term:get({instrument_row, Name, S}, undefined) of
-      {Canon, CK, _Row} when Match =:= {cache_key, CK}; Match =:= {canon, Canon} ->
-        persistent_term:erase({instrument_row, Name, S}),
-        persistent_term:erase({instrument_label, Name, CK}),
-        ets:delete(?TAB, {Name, Canon}),
-        {ok, Canon};
-      _ ->
-        Acc
-    end
-  end, not_found, lists:seq(1, N)).
-
-%% Clear every live label set of a family: erase all cache keys and chain
-%% slots, drop arbiter rows, release exemplar reservoirs, and delete the
-%% {count, Name} accounting row. The family meta and its row_seq are
-%% intentionally left untouched — re-minting row_seq would allow an in-flight
-%% first-touch writer (which read the old meta before clear) to publish a slot
-%% S on the shared {instrument_row, Name, S} keyspace that the new chain later
-%% also mints, producing a replacing persistent_term:put on a creation path.
-%% The single-writer-per-slot-key invariant must hold unconditionally; compaction
-%% would require generation-keyed chains — rejected as overengineering for an
-%% admin-time operation. New rows continue numbering from the existing high-water
-%% mark; holes in the chain are the documented, accepted churn bound (§10).
+%% @doc Removes every series of a family; the family itself stays.
 -spec clear_family_rows(term()) -> ok.
 clear_family_rows(Name) ->
-  case persistent_term:get({instrument_family, Name}, undefined) of
-    #family{row_seq = Seq} ->
-      N = atomics:get(Seq, 1),
-      lists:foreach(fun(S) ->
-        case persistent_term:get({instrument_row, Name, S}, undefined) of
-          {Canon, CacheKey, Row} ->
-            persistent_term:erase({instrument_label, Name, CacheKey}),
-            persistent_term:erase({instrument_row, Name, S}),
-            ets:delete(?TAB, {Name, Canon}),
-            instrument_histogram:cleanup(Row);
-          undefined ->
-            ok
-        end
-      end, lists:seq(1, N)),
-      erase_aliases(Name, '_'),
-      ets:delete(?COUNTS, {count, Name}),
+  case family(Name) of
+    #family{inc = Inc} = Fam ->
+      Slots = ets:select(?TAB, [{{{'$s', Inc, slot, '$1'}, '_', '_'}, [], ['$1']}]),
+      lists:foreach(fun(S) -> remove_slot(Name, Fam, S) end, Slots),
       ok;
     _ ->
       ok
   end.
 
-%% Full family teardown (§9 unregister ordering): delete the family arbiter row
-%% and erase {instrument_family, Name} first (in-flight first-touches now fail
-%% not_found, and winners' post-claim re-check catches most), then walk the
-%% chain releasing each row, erase the family-idx hole, and delete the
-%% count/dropped accounting. All erases; placement is admin-time.
+%% Delete the canon first (so no helper completes it again), retire the
+%% epoch, drop the keys, then free the slot for reuse after quarantine.
+remove_slot(Name, #family{inc = Inc, kind = Kind, counters = Counters} = Fam, S) ->
+  case ets:lookup(?TAB, {'$s', Inc, slot, S}) of
+    [{_, Canon, _CacheKey}] ->
+      ets:delete(?TAB, {'$s', Inc, canon, Canon}),
+      case slot_ref(Name, Fam, S) of
+        {Epochs, Ix, Row} ->
+          Old = retire(Epochs, Ix),
+          case Old band 1 =:= 1 andalso overflow_canon_marker(Canon) =:= not_overflow of
+            true -> atomics:sub(Counters, ?LIVE, 1);
+            false -> ok
+          end,
+          instrument_histogram:cleanup(Row),
+          %% Slot 1 is never reused for another label set: reset in place.
+          _ = S =:= 1 andalso reset_cell(Kind, Row),
+          ok;
+        undefined ->
+          ok
+      end,
+      Keys = ets:select(?TAB, [{{{'$s', Inc, key, '$1'}, S, '$2'}, [], [{{'$1', '$2'}}]}]),
+      lists:foreach(fun({K, Type}) ->
+        ets:delete(?TAB, {'$s', Inc, key, K}),
+        _ = Type =:= alias andalso atomics:sub(Counters, ?ALIASES, 1),
+        ok
+      end, Keys),
+      ets:delete(?TAB, {'$s', Inc, slot, S}),
+      case S =/= 1 andalso not ets:member(?TAB, {'$s', Inc, pin, S}) of
+        true -> ets:insert(?FREE, {{Inc, erlang:monotonic_time(millisecond), S}});
+        false -> ok
+      end,
+      ok;
+    [] ->
+      ok
+  end.
+
+%% @doc Full family teardown: unpublish the family first (in-flight claims
+%% then fail their incarnation check), retire every slot, drop the chunks and
+%% the family's rows.
 -spec teardown_family(term()) -> ok.
 teardown_family(Name) ->
   case family(Name) of
-    #family{idx = Idx, row_seq = Seq} ->
+    #family{idx = Idx, inc = Inc, counters = Counters} = Fam ->
       ets:delete(?TAB, {Name, family}),
       persistent_term:erase({instrument_family, Name}),
-      N = atomics:get(Seq, 1),
-      lists:foreach(fun(S) ->
-        case persistent_term:get({instrument_row, Name, S}, undefined) of
-          {Canon, CacheKey, Row} ->
-            persistent_term:erase({instrument_label, Name, CacheKey}),
-            persistent_term:erase({instrument_row, Name, S}),
-            ets:delete(?TAB, {Name, Canon}),
-            instrument_histogram:cleanup(Row);
-          undefined ->
-            ok
-        end
-      end, lists:seq(1, N)),
+      Published = ets:select(?TAB, [{{{'$s', Inc, chunk, '$1'}, '_', '_'}, [], ['$1']}]),
+      {LastC, _} = slot_loc(max(1, atomics:get(Counters, ?HW))),
+      Chunks = lists:usort([0 | Published] ++ lists:seq(0, LastC)),
+      lists:foreach(fun(C) ->
+        case chunk(Name, Fam, C) of
+          {_, _} = Chunk -> kill_chunk(Chunk);
+          undefined -> ok
+        end,
+        _ = C > 0 andalso persistent_term:erase({instrument_chunk, Name, Inc, C}),
+        ok
+      end, Chunks),
       persistent_term:erase({instrument_family_idx, Idx}),
-      erase_aliases(Name, '_'),
-      ets:delete(?COUNTS, {count, Name}),
-      ets:delete(?COUNTS, {dropped, Name}),
+      ets:select_delete(?TAB, [{{{'$s', Inc, '_', '_'}, '_', '_'}, [], [true]}]),
+      ets:select_delete(?FREE, [{{{Inc, '_', '_'}}, [], [true]}]),
       ok;
     {custom, _, Idx} ->
       ets:delete(?TAB, {Name, family}),
@@ -594,6 +975,27 @@ teardown_family(Name) ->
     undefined ->
       ok
   end.
+
+%% Retire every slot of a chunk and release histogram reservoirs.
+kill_chunk({Epochs, Rows}) ->
+  lists:foreach(fun(Ix) ->
+    _ = retire(Epochs, Ix),
+    instrument_histogram:cleanup(element(Ix, Rows))
+  end, lists:seq(1, tuple_size(Rows))).
+
+%% @doc Retires the slots held by a family meta or chunk value about to be
+%% erased by the registry's sweep, so processes that cached them stop writing
+%% into cells that are no longer exported.
+-spec kill_term(term()) -> ok.
+kill_term(#family{chunk0 = Chunk0}) ->
+  kill_chunk(Chunk0);
+kill_term({Epochs, Rows} = Chunk) when is_tuple(Rows) ->
+  try atomics:info(Epochs) of
+    _ -> kill_chunk(Chunk)
+  catch _:_ -> ok
+  end;
+kill_term(_) ->
+  ok.
 
 %% ============================================================================
 %% Label canonicalization (shared by the meter, simple-metric, and vec APIs).
@@ -623,10 +1025,7 @@ term_label(V) ->
 %% Canonicalize a positional vec values list against the family's declared
 %% names: sort by name, reorder values to match, stringify. On an arity
 %% mismatch (or undefined declared labels) return the sentinel canon
-%% {[], Values}; its empty names length cannot equal a non-empty declared list,
-%% so valid_arity/2 rejects it as {error, invalid_labels} without a crash
-%% (first_write/4 calls the CanonFun before its own arity check). A wrong-arity
-%% values-list cache key never pre-exists, so this only runs on first touch.
+%% {[], Values}, which valid_canon/2 rejects as {error, invalid_labels}.
 -spec vec_canon([term()] | undefined, list()) -> {list(), list()}.
 vec_canon(Declared, LabelValues)
     when is_list(Declared), length(Declared) =:= length(LabelValues) ->
