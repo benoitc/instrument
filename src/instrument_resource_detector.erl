@@ -125,7 +125,7 @@ detect_process() ->
   %% Add command if available
   Attrs2 = case init:get_argument(progname) of
     {ok, [[ProgName | _] | _]} ->
-      Attrs#{<<"process.executable.name">> => list_to_binary(ProgName)};
+      Attrs#{<<"process.executable.name">> => instrument_lib:chars_to_binary(ProgName)};
     _ ->
       Attrs
   end,
@@ -136,7 +136,7 @@ detect_process() ->
 detect_host() ->
   {ok, Hostname} = inet:gethostname(),
   Attrs = #{
-    <<"host.name">> => list_to_binary(Hostname),
+    <<"host.name">> => instrument_lib:chars_to_binary(Hostname),
     <<"host.arch">> => list_to_binary(erlang:system_info(system_architecture))
   },
   %% Add OS info
@@ -194,16 +194,28 @@ parse_env_attributes(Value) ->
   lists:foldl(fun(Pair, Acc) ->
     case string:split(Pair, "=", leading) of
       [Key, Val] ->
-        K = string:trim(Key),
-        V = string:trim(Val),
-        Acc#{list_to_binary(K) => list_to_binary(V)};
+        %% Values are percent-encoded per the OpenTelemetry specification;
+        %% a malformed pair is skipped instead of dropping every attribute.
+        try
+          K = decode_env_value(string:trim(Key)),
+          V = decode_env_value(string:trim(Val)),
+          Acc#{K => V}
+        catch _:_ ->
+          Acc
+        end;
       _ ->
         Acc
     end
   end, #{}, Pairs).
 
+decode_env_value(S) ->
+  case uri_string:percent_decode(S) of
+    D when is_list(D); is_binary(D) -> instrument_lib:chars_to_binary(D);
+    _ -> erlang:error(badarg)
+  end.
+
 to_binary(V) when is_binary(V) -> V;
-to_binary(V) when is_list(V) -> list_to_binary(V);
+to_binary(V) when is_list(V) -> instrument_lib:chars_to_binary(V);
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_binary(V) when is_integer(V) -> integer_to_binary(V);
 to_binary(V) when is_float(V) -> float_to_binary(V);

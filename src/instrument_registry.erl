@@ -140,11 +140,13 @@ handle_call({clear_labels, Name}, _From, State) ->
   ok = instrument_series:clear_family_rows(Name),
   {reply, ok, State};
 
-handle_call(Req, _From, State) ->
-  {stop, {unhandled_call, Req}, State}.
+%% A stray message must not stop the registry (and, through rest_for_one,
+%% every process started after it).
+handle_call(_Req, _From, State) ->
+  {reply, {error, unknown_call}, State}.
 
-handle_cast(Msg, State) ->
-  {stop, {unhandled_cast, Msg}, State}.
+handle_cast(_Msg, State) ->
+  {noreply, State}.
 
 handle_info(_Info, State) ->
   {noreply, State}.

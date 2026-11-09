@@ -72,6 +72,9 @@
 
 -include("instrument_otel.hrl").
 
+%% Depth limit when printing exception terms into span events.
+-define(EXCEPTION_DEPTH, 20).
+
 -define(SPAN_KEY, '$instrument_span').
 -define(SPAN_STACK_KEY, '$instrument_span_stack').
 -define(TRACER_KEY, '$instrument_tracer').
@@ -266,27 +269,33 @@ start_span_impl(Name, Opts) ->
 %% span that owns it: only that span's end turns tracing off, so a nested
 %% span ending first does not cut tracing for the rest of its parent.
 enable_flight_tracing(TraceId, SpanId) ->
-  Label = binary:decode_unsigned(TraceId),
-  %% Create a session resource - children will inherit this via set_on_spawn
-  %% and will be able to detect when the session becomes inactive
-  SessionRef = instrument_tracer_nif:create_session_resource(),
-  %% Store label and session in process dictionary
-  put('$instrument_flight_label', Label),
-  put('$instrument_flight_session_ref', SessionRef),
-  %% Record which span enabled tracing (for cleanup in end_span)
-  put('$instrument_flight_owner', SpanId),
-  %% Get tracer state with worker pool info and add session_ref
-  TracerState = instrument_flight_recorder:tracer_state(TraceId),
-  TracerStateWithSession = TracerState#{session_ref => SessionRef},
-  %% Enable tracing with NIF-based tracer
-  %% Catch errors if process is already being traced
-  try
-    erlang:trace(self(), true, [
-      send, 'receive', set_on_spawn,
-      {tracer, instrument_tracer_nif, TracerStateWithSession}
-    ])
-  catch
-    error:badarg -> ok
+  %% Only trace a process nobody traces yet. A process traced by another
+  %% tool (dbg, recon_trace) keeps its tracer untouched, and a process that
+  %% inherited flight tracing from its parent stays in the parent's trace.
+  %% Ownership is recorded only once tracing is actually on, so end_span
+  %% never switches off tracing it did not start.
+  case erlang:trace_info(self(), tracer) of
+    {tracer, []} ->
+      Label = binary:decode_unsigned(TraceId),
+      %% Children inherit this session via set_on_spawn and stop being
+      %% traced once it is deactivated
+      SessionRef = instrument_tracer_nif:create_session_resource(),
+      TracerState = (instrument_flight_recorder:tracer_state(TraceId))#{
+                      session_ref => SessionRef},
+      try erlang:trace(self(), true, [send, 'receive', set_on_spawn,
+                                      {tracer, instrument_tracer_nif, TracerState}]) of
+        1 ->
+          put('$instrument_flight_label', Label),
+          put('$instrument_flight_session_ref', SessionRef),
+          put('$instrument_flight_owner', SpanId),
+          ok;
+        _ ->
+          ok
+      catch
+        error:badarg -> ok
+      end;
+    _ ->
+      ok
   end.
 
 %% @private Turn flight tracing off if span `SpanId' enabled it.
@@ -733,11 +742,14 @@ get_exception_type({Exception, _}) when is_atom(Exception) ->
 get_exception_type(_) ->
   <<"unknown">>.
 
+%% Exceptions are printed with a depth limit: a reason can hold a whole
+%% process state, which would otherwise end up in full in a span event.
 format_exception(Exception) ->
-  iolist_to_binary(io_lib:format("~p", [Exception])).
+  unicode:characters_to_binary(io_lib:format("~tP", [Exception, ?EXCEPTION_DEPTH])).
 
 format_error(Class, Reason) ->
-  iolist_to_binary(io_lib:format("~p:~p", [Class, Reason])).
+  unicode:characters_to_binary(
+    io_lib:format("~tP:~tP", [Class, ?EXCEPTION_DEPTH, Reason, ?EXCEPTION_DEPTH])).
 
 format_stacktrace([]) ->
   <<>>;
@@ -747,14 +759,15 @@ format_stacktrace(Stacktrace) when is_list(Stacktrace) ->
 format_stacktrace(_) ->
   <<>>.
 
-format_stack_entry({M, F, A, Loc}) when is_integer(A) ->
+format_stack_entry({M, F, A, Loc}) when is_integer(A), is_list(Loc) ->
   File = proplists:get_value(file, Loc, "unknown"),
   Line = proplists:get_value(line, Loc, 0),
-  iolist_to_binary(io_lib:format("~s:~B in ~s:~s/~B", [File, Line, M, F, A]));
+  unicode:characters_to_binary(
+    io_lib:format("~ts:~tp in ~tp:~tp/~B", [File, Line, M, F, A]));
 format_stack_entry({M, F, A, Loc}) when is_list(A) ->
   format_stack_entry({M, F, length(A), Loc});
 format_stack_entry(Entry) ->
-  iolist_to_binary(io_lib:format("~p", [Entry])).
+  unicode:characters_to_binary(io_lib:format("~tP", [Entry, ?EXCEPTION_DEPTH])).
 
 %% @private Apply attribute count limit to initial attributes.
 apply_attribute_limit(Attrs, Limit) ->

@@ -72,6 +72,8 @@
   get_otlp_retry_max_delay_ms/0,
   %% Metrics export interval
   get_metric_export_interval/0,
+  %% OTLP headers from OTEL_EXPORTER_OTLP_*HEADERS
+  get_otlp_headers/1,
   %% Validated application env
   positive_int_env/2
 ]).
@@ -358,7 +360,7 @@ get_sdk_version() ->
   end.
 
 version_to_binary(V) when is_binary(V) -> V;
-version_to_binary(V) when is_list(V) -> list_to_binary(V);
+version_to_binary(V) when is_list(V) -> instrument_lib:chars_to_binary(V);
 version_to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8).
 
 %% @doc Gets the span attribute count limit.
@@ -478,13 +480,13 @@ read_span_limit(EnvVar, Default) ->
 read_service_name() ->
   case os:getenv("OTEL_SERVICE_NAME") of
     false -> undefined;
-    Value -> list_to_binary(Value)
+    Value -> instrument_lib:chars_to_binary(Value)
   end.
 
 read_service_version() ->
   case os:getenv("OTEL_SERVICE_VERSION") of
     false -> undefined;
-    Value -> list_to_binary(Value)
+    Value -> instrument_lib:chars_to_binary(Value)
   end.
 
 read_sampler() ->
@@ -556,25 +558,25 @@ maybe_add_int(EnvVar, Key, Config) ->
 read_otlp_endpoint() ->
   case os:getenv("OTEL_EXPORTER_OTLP_ENDPOINT") of
     false -> undefined;
-    Value -> list_to_binary(Value)
+    Value -> instrument_lib:chars_to_binary(Value)
   end.
 
 read_otlp_traces_endpoint() ->
   case os:getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") of
     false -> undefined;
-    Value -> list_to_binary(Value)
+    Value -> instrument_lib:chars_to_binary(Value)
   end.
 
 read_otlp_metrics_endpoint() ->
   case os:getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") of
     false -> undefined;
-    Value -> list_to_binary(Value)
+    Value -> instrument_lib:chars_to_binary(Value)
   end.
 
 read_otlp_logs_endpoint() ->
   case os:getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") of
     false -> undefined;
-    Value -> list_to_binary(Value)
+    Value -> instrument_lib:chars_to_binary(Value)
   end.
 
 read_log_level() ->
@@ -619,7 +621,7 @@ register_exporter_by_name("otlp") ->
   case get_otlp_endpoint(traces) of
     undefined -> ok;
     Endpoint ->
-      Exporter = instrument_exporter_otlp:new(#{endpoint => Endpoint}),
+      Exporter = instrument_exporter_otlp:new(otlp_config(traces, Endpoint)),
       instrument_exporter:register(Exporter)
   end;
 register_exporter_by_name("console") ->
@@ -639,7 +641,7 @@ register_metrics_exporter_by_name(Name) ->
         instrument_metrics_exporter_otlp ->
           case get_otlp_endpoint(metrics) of
             undefined -> #{};
-            Endpoint -> #{endpoint => Endpoint}
+            Endpoint -> otlp_config(metrics, Endpoint)
           end;
         _ -> #{}
       end,
@@ -659,7 +661,7 @@ register_log_exporter_by_name(Name) ->
         instrument_log_exporter_otlp ->
           case get_otlp_endpoint(logs) of
             undefined -> #{};
-            Endpoint -> #{endpoint => Endpoint}
+            Endpoint -> otlp_config(logs, Endpoint)
           end;
         _ -> #{}
       end,
@@ -671,6 +673,56 @@ register_log_exporter_by_name(Name) ->
 parse_log_exporter_name("otlp") -> {true, instrument_log_exporter_otlp};
 parse_log_exporter_name("console") -> {true, instrument_log_exporter_console};
 parse_log_exporter_name(_) -> false.
+
+%% Exporter config for an endpoint, with headers from
+%% OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS or OTEL_EXPORTER_OTLP_HEADERS.
+otlp_config(Signal, Endpoint) ->
+  case get_otlp_headers(Signal) of
+    Headers when map_size(Headers) =:= 0 -> #{endpoint => Endpoint};
+    Headers -> #{endpoint => Endpoint, headers => Headers}
+  end.
+
+%% @doc OTLP request headers for a signal, from
+%% OTEL_EXPORTER_OTLP_TRACES_HEADERS (or _METRICS_, _LOGS_) when set, else
+%% OTEL_EXPORTER_OTLP_HEADERS. The format is `key1=value1,key2=value2' with
+%% percent-encoded values, as in the OpenTelemetry specification. Malformed
+%% entries are skipped.
+-spec get_otlp_headers(traces | metrics | logs) -> #{binary() => binary()}.
+get_otlp_headers(Signal) ->
+  Specific = "OTEL_EXPORTER_OTLP_" ++ string:uppercase(atom_to_list(Signal)) ++ "_HEADERS",
+  case os:getenv(Specific) of
+    false ->
+      case os:getenv("OTEL_EXPORTER_OTLP_HEADERS") of
+        false -> #{};
+        Value -> parse_otlp_headers(Value)
+      end;
+    Value ->
+      parse_otlp_headers(Value)
+  end.
+
+percent_decoded(S) ->
+  case uri_string:percent_decode(S) of
+    D when is_list(D); is_binary(D) -> instrument_lib:chars_to_binary(D);
+    _ -> erlang:error(badarg)
+  end.
+
+parse_otlp_headers(Value) ->
+  maps:from_list(lists:filtermap(fun(Entry) ->
+    case string:split(Entry, "=") of
+      [K, V] ->
+        Key = string:trim(K),
+        case Key of
+          "" -> false;
+          _ ->
+            try
+              {true, {percent_decoded(Key), percent_decoded(string:trim(V))}}
+            catch _:_ -> false
+            end
+        end;
+      _ ->
+        false
+    end
+  end, string:tokens(Value, ","))).
 
 get_default_exporter() ->
   %% First check application env
@@ -690,7 +742,7 @@ get_default_exporter() ->
             ["otlp" | _] ->
               case get_otlp_endpoint(traces) of
                 undefined -> undefined;
-                Endpoint -> {instrument_exporter_otlp, #{endpoint => Endpoint}}
+                Endpoint -> {instrument_exporter_otlp, otlp_config(traces, Endpoint)}
               end;
             ["console" | _] ->
               {instrument_exporter_console, #{}};

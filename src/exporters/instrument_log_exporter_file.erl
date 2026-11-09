@@ -77,7 +77,10 @@ exporter_init(Config) ->
       PathBin = to_binary(Path),
       Format = maps:get(format, Config, text),
       MaxSize = maps:get(max_size, Config, 10485760),
-      MaxFiles = maps:get(max_files, Config, 5),
+      MaxFiles = case maps:get(max_files, Config, 5) of
+                   N when is_integer(N), N >= 1 -> N;
+                   _ -> 5
+                 end,
       Compress = maps:get(compress, Config, false),
 
       State = #state{
@@ -319,7 +322,7 @@ format_log_record_json(#log_record{
     <<"attributes">> => format_attributes_json(Attributes)
   },
   LogMap2 = add_trace_context_json(LogMap, TraceId, SpanId, TraceFlags),
-  [json:encode(LogMap2), "\n"].
+  [instrument_lib:json_encode(LogMap2), "\n"].
 
 ensure_timestamp(Ts) when is_integer(Ts) ->
   Ts;
@@ -402,7 +405,7 @@ format_attributes_text(Attrs) when map_size(Attrs) =:= 0 ->
   "";
 format_attributes_text(Attrs) ->
   try
-    [" ", json:encode(Attrs)]
+    [" ", instrument_lib:json_encode(Attrs)]
   catch
     _:_ ->
       io_lib:format(" ~p", [Attrs])

@@ -185,10 +185,23 @@ enabled_spawn(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
  * enabled_procs/3 - Check if process tracing is enabled.
  * Returns 'remove' if session is inactive, triggering cleanup.
  */
+/* The VM raises register/unregister events while holding the name
+ * registry lock; resolving a worker by name in trace/5 would take that lock
+ * again and hang the node. Those events are never recorded. */
+static int
+is_registry_event(ErlNifEnv* env, ERL_NIF_TERM tag)
+{
+    return enif_is_identical(tag, enif_make_atom(env, "register"))
+        || enif_is_identical(tag, enif_make_atom(env, "unregister"));
+}
+
 static ERL_NIF_TERM
 enabled_procs(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     (void)argc;
+    if (is_registry_event(env, argv[0])) {
+        return enif_make_atom(env, "discard");
+    }
     if (!is_session_active(env, argv[1])) {
         return enif_make_atom(env, "remove");
     }
@@ -237,12 +250,23 @@ enabled_garbage_collection(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
  * value greater than `budget` (a lower bound) as soon as it does not, so the
  * cost is bounded by the budget rather than by the size of the term.
  * Binaries count their exact byte size.
+ *
+ * Nesting deeper than PAYLOAD_MAX_DEPTH counts as over budget: recursion
+ * depth would otherwise follow the term's nesting (a left-nested iolist is
+ * common) and could overflow the scheduler stack. Funs and big integers,
+ * whose size is not cheap to know, also count as over budget.
  */
+#define PAYLOAD_MAX_DEPTH 64
+#define PAYLOAD_MAX_BUDGET (1L << 30)
+
 static long
-payload_size(ErlNifEnv* env, ERL_NIF_TERM term, long budget, long acc)
+payload_size(ErlNifEnv* env, ERL_NIF_TERM term, long budget, long acc, int depth)
 {
     if (acc > budget) {
         return acc;
+    }
+    if (depth > PAYLOAD_MAX_DEPTH) {
+        return budget + 1;
     }
     ErlNifBinary bin;
     if (enif_is_binary(env, term) && enif_inspect_binary(env, term, &bin)) {
@@ -253,17 +277,17 @@ payload_size(ErlNifEnv* env, ERL_NIF_TERM term, long budget, long acc)
     if (enif_get_tuple(env, term, &arity, &elems)) {
         acc += 8;
         for (int i = 0; i < arity && acc <= budget; i++) {
-            acc = payload_size(env, elems[i], budget, acc);
+            acc = payload_size(env, elems[i], budget, acc, depth + 1);
         }
         return acc;
     }
     if (enif_is_list(env, term)) {
         ERL_NIF_TERM head, tail = term;
         while (acc <= budget && enif_get_list_cell(env, tail, &head, &tail)) {
-            acc = payload_size(env, head, budget, acc + 8);
+            acc = payload_size(env, head, budget, acc + 8, depth + 1);
         }
         if (acc <= budget && !enif_is_empty_list(env, tail)) {
-            acc = payload_size(env, tail, budget, acc);  /* improper tail */
+            acc = payload_size(env, tail, budget, acc, depth + 1);  /* improper tail */
         }
         return acc;
     }
@@ -273,15 +297,25 @@ payload_size(ErlNifEnv* env, ERL_NIF_TERM term, long budget, long acc)
         acc += 8;
         if (enif_map_iterator_create(env, term, &it, ERL_NIF_MAP_ITERATOR_FIRST)) {
             while (acc <= budget && enif_map_iterator_get_pair(env, &it, &k, &v)) {
-                acc = payload_size(env, k, budget, acc);
-                acc = payload_size(env, v, budget, acc);
+                acc = payload_size(env, k, budget, acc, depth + 1);
+                acc = payload_size(env, v, budget, acc, depth + 1);
                 enif_map_iterator_next(env, &it);
             }
             enif_map_iterator_destroy(env, &it);
         }
         return acc;
     }
-    /* atoms, numbers, pids, ports, references, funs */
+    if (enif_is_fun(env, term)) {
+        return budget + 1;
+    }
+    ErlNifSInt64 small;
+    double dbl;
+    if (enif_is_number(env, term)
+            && !enif_get_int64(env, term, &small)
+            && !enif_get_double(env, term, &dbl)) {
+        return budget + 1;  /* big integer */
+    }
+    /* atoms, small numbers, pids, ports, references */
     return acc + 8;
 }
 
@@ -307,6 +341,10 @@ trace(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     ERL_NIF_TERM tracee = argv[2];
     ERL_NIF_TERM trace_term = argv[3];
     ERL_NIF_TERM opts = argv[4];
+
+    if (is_registry_event(env, trace_tag)) {
+        return enif_make_atom(env, "ok");
+    }
 
     /* Get pool_size from TracerState */
     ERL_NIF_TERM pool_size_term;
@@ -360,11 +398,13 @@ trace(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
             && enif_get_resource(env, counters_term, pool_counters_type,
                                  (void**)&counters)
             && worker_idx < counters->n) {
-        if (atomic_load(&counters->inflight[worker_idx]) >= counters->max) {
+        /* Reserve first, then check, so concurrent schedulers cannot all
+         * pass the check and overshoot the limit. */
+        if (atomic_fetch_add(&counters->inflight[worker_idx], 1) >= counters->max) {
+            atomic_fetch_sub(&counters->inflight[worker_idx], 1);
             atomic_fetch_add(&counters->dropped, 1);
             return enif_make_atom(env, "ok");
         }
-        atomic_fetch_add(&counters->inflight[worker_idx], 1);
     } else {
         counters = NULL;
     }
@@ -378,7 +418,10 @@ trace(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
             enif_make_atom(env, "max_payload"), &max_payload_term)
             && enif_get_long(env, max_payload_term, &max_payload)
             && max_payload >= 0) {
-        long size = payload_size(env, trace_term, max_payload, 0);
+        if (max_payload > PAYLOAD_MAX_BUDGET) {
+            max_payload = PAYLOAD_MAX_BUDGET;
+        }
+        long size = payload_size(env, trace_term, max_payload, 0, 0);
         if (size > max_payload) {
             trace_term = enif_make_tuple2(env, enif_make_atom(env, "truncated"),
                                           enif_make_long(env, size));
@@ -534,11 +577,13 @@ ack(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
             || !enif_get_long(env, argv[2], &n) || n < 0) {
         return enif_make_badarg(env);
     }
-    long prev = atomic_fetch_sub(&res->inflight[idx], n);
-    if (prev < n) {
-        /* Never go negative, e.g. after reset_worker/2 raced an ack. */
-        atomic_store(&res->inflight[idx], 0);
-    }
+    /* Subtract without going below zero (reset_worker/2 may have raced
+     * this ack), and without losing a concurrent increment. */
+    long cur = atomic_load(&res->inflight[idx]);
+    long next;
+    do {
+        next = cur > n ? cur - n : 0;
+    } while (!atomic_compare_exchange_weak(&res->inflight[idx], &cur, next));
     return enif_make_atom(env, "ok");
 }
 

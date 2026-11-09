@@ -186,7 +186,7 @@ start_export(#batcher{batch = Batch, count = Count, exporters = Exporters,
     AsyncExporters ->
       Parent = self(),
       Ref = make_ref(),
-      {Pid, Mon} = erlang:spawn_monitor(fun() ->
+      {Pid, Mon} = spawn_linked_monitor(fun() ->
         States = [{M, export_one(Export, M, Items, S)}
                   || #{module := M, state := S} <- AsyncExporters],
         Parent ! {batcher_done, Ref, States}
@@ -269,3 +269,8 @@ start_timer(B) ->
 %% timer to cancel.
 cancel_timer(B) ->
   B#batcher{timer_ref = undefined}.
+
+%% Export workers are linked so they stop with their owner instead of
+%% retrying after it is gone; the owner traps exits.
+spawn_linked_monitor(Fun) ->
+  erlang:spawn_opt(Fun, [link, monitor]).

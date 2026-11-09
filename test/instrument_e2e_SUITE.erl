@@ -484,16 +484,12 @@ jaeger_receives_span_with_events(_Config) ->
   %% Additional delay for Jaeger indexing
   timer:sleep(1000),
 
-  %% Wait for the span to appear in Jaeger (with retries)
-  %% Note: Events may appear as logs in Jaeger, but this depends on
-  %% OTLP event encoding. For now, just verify the span exists.
-  case instrument_e2e_helpers:wait_for_jaeger_span(
-    ?JAEGER_URL, ?SERVICE_NAME, <<"e2e_span_with_events">>) of
-    {ok, Span} ->
-      ct:pal("Found span with events: ~p", [Span]),
-      ok;
-    {error, not_found} ->
-      %% This test can be flaky due to Jaeger indexing delays
-      ct:pal("Span with events not found - test is flaky, skipping assertion"),
-      ok
-  end.
+  %% Jaeger reports OTLP span events as `logs', each with an `event' field.
+  {ok, Span} = instrument_e2e_helpers:wait_for_jaeger_span(
+    ?JAEGER_URL, ?SERVICE_NAME, <<"e2e_span_with_events">>),
+  ct:pal("Found span with events: ~p", [Span]),
+  EventNames = [V || #{<<"fields">> := Fields} <- maps:get(<<"logs">>, Span, []),
+                     #{<<"key">> := <<"event">>, <<"value">> := V} <- Fields],
+  true = lists:member(<<"processing_started">>, EventNames),
+  true = lists:member(<<"processing_completed">>, EventNames),
+  ok.

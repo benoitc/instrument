@@ -108,9 +108,13 @@ mk_histogram(Buckets) ->
 validate_buckets([]) ->
   error_logger:error_msg("histogram buckets must not be empty", []),
   erlang:error(empty_buckets);
+validate_buckets([Start | _]) when not is_number(Start) ->
+  erlang:error({bad_buckets, Start});
 validate_buckets([Start | Rest]) ->
   validate_buckets(Rest, Start).
 
+validate_buckets([Boundary | _], _Prev) when not is_number(Boundary) ->
+  erlang:error({bad_buckets, Boundary});
 validate_buckets([Boundary | Rest], Prev) when Boundary > Prev ->
   validate_buckets(Rest, Boundary);
 validate_buckets([Boundary | _], Prev) ->
@@ -122,7 +126,10 @@ validate_buckets([Boundary | _], Prev) ->
 validate_buckets([], _) ->
   ok.
 
-observe_histogram(#metric{handle=Hist}, Value) ->
+observe_histogram(#metric{handle=Hist}, Value) when is_number(Value) ->
+  %% Convert first: a value float/1 cannot represent must fail before the
+  %% bucket count moves, or count and sum would disagree.
+  FValue = float(Value),
   #histogram{bucket_boundaries = Boundaries,
     atomics_ref = Ref,
     inf_slot = InfSlot,
@@ -134,12 +141,14 @@ observe_histogram(#metric{handle=Hist}, Value) ->
     S -> S
   end,
   instrument_atomics:inc_int_at(Ref, Slot, 1),
-  instrument_atomics:inc_at(Ref, ?SUM_SLOT, float(Value)),
+  instrument_atomics:inc_at(Ref, ?SUM_SLOT, FValue),
   %% Capture exemplar with trace context
   case ExemplarKey of
     undefined -> ok;
     _ -> instrument_exemplar:offer_ref(ExemplarKey, Value, #{})
-  end.
+  end;
+observe_histogram(_Metric, _Value) ->
+  erlang:error(badarg).
 
 %% Linear search is efficient for typical histogram bucket counts (10-15 buckets).
 %% For the default OTel bucket configuration, linear search outperforms binary

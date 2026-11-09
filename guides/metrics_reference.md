@@ -556,6 +556,8 @@ http_requests_total{method="POST",status="201"} 3.0
 
 When a meter instrument is written with different attribute key sets, all label names appear on every line and missing ones are empty. A meter instrument appears after its first write.
 
+Names are adapted to the Prometheus character set: characters other than letters, digits, `_` (and `:` in metric names) become `_`, so `http.server.duration` is exported as `http_server_duration`. Label values can be any term; values that are not text (IP tuples, pids) are printed. A metric that cannot be rendered is skipped and logged instead of failing the scrape.
+
 ## Best Practices
 
 ### Naming Conventions

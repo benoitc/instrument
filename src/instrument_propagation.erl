@@ -146,18 +146,32 @@ inject_headers(Ctx) ->
 %% @doc Extracts context from HTTP headers.
 -spec extract_headers([{binary() | string(), binary() | string()}]) -> instrument_context:context().
 extract_headers(Headers) ->
-  Carrier = lists:foldl(fun({K, V}, Acc) ->
-    KeyBin = to_lower_binary(K),
-    ValBin = to_binary(V),
-    maps:put(KeyBin, ValBin, Acc)
+  %% Headers come from the network: a header that cannot be read is skipped
+  %% instead of crashing the request handler.
+  Carrier = lists:foldl(fun(Header, Acc) ->
+    try
+      {K, V} = Header,
+      maps:put(ascii_lower(to_binary(K)), to_binary(V), Acc)
+    catch
+      _:_ -> Acc
+    end
   end, #{}, Headers),
   extract(Carrier).
 
 %% Internal functions
 
 to_binary(V) when is_binary(V) -> V;
-to_binary(V) when is_list(V) -> list_to_binary(V);
+to_binary(V) when is_list(V) ->
+  %% Byte lists keep their bytes; lists with code points above 255 are UTF-8.
+  try iolist_to_binary(V)
+  catch error:badarg ->
+    case unicode:characters_to_binary(V) of
+      B when is_binary(B) -> B;
+      _ -> erlang:error(badarg)
+    end
+  end;
 to_binary(V) when is_atom(V) -> atom_to_binary(V, utf8).
 
-to_lower_binary(V) ->
-  string:lowercase(to_binary(V)).
+%% Header names are ASCII; lowercase byte-wise so any byte sequence works.
+ascii_lower(Bin) ->
+  << <<(case C of _ when C >= $A, C =< $Z -> C + 32; _ -> C end)>> || <<C>> <= Bin >>.

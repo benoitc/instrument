@@ -188,8 +188,17 @@ get_log_scope() ->
 
 %% @doc Logger handler callback.
 %% This is called when installed as a handler (not filter).
+%% Any failure on one event drops that event: an exception escaping here
+%% makes logger remove the handler for good.
 -spec log(logger:log_event(), logger:handler_config()) -> ok.
-log(#{level := Level, msg := Msg, meta := Meta}, #{id := ?EXPORTER_HANDLER_ID}) ->
+log(Event, Config) ->
+  try
+    do_log(Event, Config)
+  catch
+    _:_ -> ok
+  end.
+
+do_log(#{level := Level, msg := Msg, meta := Meta}, #{id := ?EXPORTER_HANDLER_ID}) ->
   %% Exporter mode: create log record and send to exporters
   EnrichedMeta = case maps:is_key(trace_id, Meta) of
     true -> Meta;
@@ -199,7 +208,7 @@ log(#{level := Level, msg := Msg, meta := Meta}, #{id := ?EXPORTER_HANDLER_ID}) 
   instrument_log_exporter:export(LogRecord),
   ok;
 
-log(#{level := Level, msg := Msg, meta := Meta}, Config) ->
+do_log(#{level := Level, msg := Msg, meta := Meta}, Config) ->
   %% Standard handler mode: add trace context if not already present
   EnrichedMeta = case maps:is_key(trace_id, Meta) of
     true -> Meta;
@@ -278,7 +287,7 @@ get_trace_context(Meta) ->
     undefined -> undefined;
     TId when is_binary(TId), byte_size(TId) =:= 32 ->
       %% Hex format, convert back to binary
-      instrument_id:hex_to_trace_id(TId);
+      from_hex(fun instrument_id:hex_to_trace_id/1, TId);
     TId when is_binary(TId), byte_size(TId) =:= 16 ->
       TId;
     _ ->
@@ -288,7 +297,7 @@ get_trace_context(Meta) ->
     undefined -> undefined;
     SId when is_binary(SId), byte_size(SId) =:= 16 ->
       %% Hex format, convert back to binary
-      instrument_id:hex_to_span_id(SId);
+      from_hex(fun instrument_id:hex_to_span_id/1, SId);
     SId when is_binary(SId), byte_size(SId) =:= 8 ->
       SId;
     _ ->
@@ -296,6 +305,10 @@ get_trace_context(Meta) ->
   end,
   TraceFlags = maps:get(trace_flags, Meta, undefined),
   {TraceId, SpanId, TraceFlags}.
+
+%% Metadata ids are caller-provided; a non-hex value is ignored.
+from_hex(Decode, Hex) ->
+  try Decode(Hex) catch _:_ -> undefined end.
 
 extract_attributes(Meta) ->
   %% Filter out standard logger metadata fields
@@ -308,35 +321,44 @@ extract_attributes(Meta) ->
     end
   end, #{}, Meta).
 
-format_body({Format, Args}) when is_list(Format) ->
-  iolist_to_binary(io_lib:format(Format, Args));
+%% Bodies may hold any Unicode text (`~ts' arguments, chardata); encode as
+%% UTF-8 rather than with iolist_to_binary/1, which rejects code points
+%% above 255.
+format_body({Format, Args}) when is_list(Format); is_binary(Format) ->
+  to_utf8(io_lib:format(Format, Args));
 format_body({report, Report}) ->
-  iolist_to_binary(io_lib:format("~p", [Report]));
+  to_utf8(io_lib:format("~tp", [Report]));
 format_body({string, String}) ->
-  iolist_to_binary(String);
+  to_utf8(String);
 format_body(Msg) when is_binary(Msg) ->
   Msg;
 format_body(Msg) when is_list(Msg) ->
-  iolist_to_binary(Msg);
+  to_utf8(Msg);
 format_body(Msg) ->
-  iolist_to_binary(io_lib:format("~p", [Msg])).
+  to_utf8(io_lib:format("~tp", [Msg])).
+
+to_utf8(Chars) ->
+  case unicode:characters_to_binary(Chars) of
+    Bin when is_binary(Bin) -> Bin;
+    _ -> unicode:characters_to_binary(io_lib:format("~tp", [Chars]))
+  end.
 
 format_log(Level, {Format, Args}, Meta, _Config) when is_list(Format) ->
   Msg = io_lib:format(Format, Args),
   format_line(Level, Msg, Meta);
 format_log(Level, {report, Report}, Meta, _Config) ->
-  Msg = io_lib:format("~p", [Report]),
+  Msg = io_lib:format("~tp", [Report]),
   format_line(Level, Msg, Meta);
 format_log(Level, {string, String}, Meta, _Config) ->
   format_line(Level, String, Meta);
 format_log(Level, Msg, Meta, _Config) ->
-  format_line(Level, io_lib:format("~p", [Msg]), Meta).
+  format_line(Level, io_lib:format("~tp", [Msg]), Meta).
 
 format_line(Level, Msg, Meta) ->
   Time = format_time(maps:get(time, Meta, erlang:system_time(microsecond))),
   TraceInfo = format_trace_info(Meta),
   LevelStr = string:uppercase(atom_to_list(Level)),
-  io_lib:format("~s [~s]~s ~s~n", [Time, LevelStr, TraceInfo, Msg]).
+  io_lib:format("~s [~s]~s ~ts~n", [Time, LevelStr, TraceInfo, Msg]).
 
 format_time(Time) when is_integer(Time) ->
   Seconds = Time div 1000000,
@@ -350,7 +372,7 @@ format_trace_info(Meta) ->
     {undefined, _} -> "";
     {_, undefined} -> "";
     {TraceId, SpanId} ->
-      io_lib:format(" [trace_id=~s span_id=~s]", [TraceId, SpanId])
+      io_lib:format(" [trace_id=~ts span_id=~ts]", [TraceId, SpanId])
   end.
 
 %% ============================================================================

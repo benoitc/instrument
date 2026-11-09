@@ -58,7 +58,8 @@
   handle_cast/2,
   handle_info/2,
   terminate/2,
-  code_change/3
+  code_change/3,
+  format_status/1
 ]).
 
 -define(DEFAULT_MAX_QUEUE_SIZE, 2048).
@@ -146,6 +147,8 @@ init(Config) ->
 
   case Exporter:init(ExporterConfig) of
     {ok, ExporterState} ->
+      %% Trap exits so terminate/2 exports what is queued on shutdown.
+      process_flag(trap_exit, true),
       ok = instrument_admission:init(?ADMISSION, MaxQueueSize),
       case persistent_term:get(?TIMEOUT_KEY, undefined) of
         ExportTimeout -> ok;
@@ -393,6 +396,11 @@ terminate(_Reason, State) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
+%% Exporter state holds connection settings such as authorization headers;
+%% keep them out of crash reports and sys:get_status/1.
+format_status(Status) ->
+  instrument_lib:redact_status(Status).
+
 %% ============================================================================
 %% Internal Functions
 %% ============================================================================
@@ -420,7 +428,7 @@ start_async_export(Froms, State) ->
   {Combined, State0} = next_chunk(State),
   Parent = self(),
   Ref = make_ref(),
-  {Pid, MonRef} = erlang:spawn_monitor(fun() ->
+  {Pid, MonRef} = spawn_linked_monitor(fun() ->
     Result = export_batch(Combined, Exporter, ExporterState),
     Parent ! {export_done, Ref, Result}
   end),
@@ -525,7 +533,7 @@ drain_inflight(#state{export_inflight = Inflight} = State) ->
 export_batch_sync(Spans, Exporter, ExporterState, Timeout) ->
   Parent = self(),
   Ref = make_ref(),
-  {Pid, MonRef} = erlang:spawn_monitor(fun() ->
+  {Pid, MonRef} = spawn_linked_monitor(fun() ->
     Result = export_batch(Spans, Exporter, ExporterState),
     Parent ! {Ref, Result}
   end),
@@ -570,3 +578,8 @@ drain_ref_messages(Ref) ->
   after 0 ->
     ok
   end.
+
+%% Export workers are linked so they stop with their owner instead of
+%% retrying after it is gone; the owner traps exits.
+spawn_linked_monitor(Fun) ->
+  erlang:spawn_opt(Fun, [link, monitor]).

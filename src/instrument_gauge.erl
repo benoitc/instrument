@@ -50,15 +50,15 @@ new_gauge(Name, Help) ->
 
 inc_gauge(#metric{handle=Ref}) -> instrument_nif:inc_gauge(Ref).
 
-inc_gauge(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
+inc_gauge(#metric{handle=Ref}, Val) when is_number(Val), Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
 inc_gauge(_, _) -> erlang:error(badarg).
 
 dec_gauge(#metric{handle=Ref}) -> instrument_nif:dec_gauge(Ref).
 
-dec_gauge(#metric{handle=Ref}, Val) when Val >= 0 -> instrument_nif:dec_gauge(Ref, float(Val));
+dec_gauge(#metric{handle=Ref}, Val) when is_number(Val), Val >= 0 -> instrument_nif:dec_gauge(Ref, float(Val));
 dec_gauge(_, _) -> erlang:error(badarg).
 
-set_gauge(#metric{handle=Ref}, Val) -> instrument_nif:set_gauge(Ref, float(Val));
+set_gauge(#metric{handle=Ref}, Val) when is_number(Val) -> instrument_nif:set_gauge(Ref, float(Val));
 set_gauge(_, _) -> erlang:error(badarg).
 
 get_gauge(#metric{handle=Ref}) -> instrument_nif:get_gauge(Ref).

@@ -136,7 +136,7 @@ encode_log_records(LogRecords) ->
   %% Group logs by resource and scope
   ResourceLogs = group_logs(LogRecords),
   Payload = #{<<"resourceLogs">> => ResourceLogs},
-  json:encode(Payload).
+  instrument_lib:json_encode(Payload).
 
 group_logs(LogRecords) ->
   %% For simplicity, group all logs under a single resource
@@ -214,15 +214,15 @@ ensure_binary(B, _) when is_binary(B) -> B.
 encode_body(Body) when is_binary(Body) ->
   #{<<"stringValue">> => Body};
 encode_body(Body) when is_list(Body) ->
-  #{<<"stringValue">> => iolist_to_binary(Body)};
+  #{<<"stringValue">> => instrument_lib:chars_to_binary(Body)};
 encode_body({Format, Args}) when is_list(Format) ->
-  #{<<"stringValue">> => iolist_to_binary(io_lib:format(Format, Args))};
+  #{<<"stringValue">> => unicode:characters_to_binary(io_lib:format(Format, Args))};
 encode_body({report, Report}) ->
-  #{<<"stringValue">> => iolist_to_binary(io_lib:format("~p", [Report]))};
+  #{<<"stringValue">> => unicode:characters_to_binary(io_lib:format("~tp", [Report]))};
 encode_body({string, String}) ->
-  #{<<"stringValue">> => iolist_to_binary(String)};
+  #{<<"stringValue">> => instrument_lib:chars_to_binary(String)};
 encode_body(Body) ->
-  #{<<"stringValue">> => iolist_to_binary(io_lib:format("~p", [Body]))}.
+  #{<<"stringValue">> => unicode:characters_to_binary(io_lib:format("~tp", [Body]))}.
 
 add_trace_context(Map, undefined, _, _) ->
   Map;
@@ -263,16 +263,14 @@ encode_attribute(Key, Value) ->
 
 encode_attr_value(V) when is_binary(V) ->
   #{<<"stringValue">> => V};
+encode_attr_value(V) when is_boolean(V) ->
+  #{<<"boolValue">> => V};
 encode_attr_value(V) when is_atom(V) ->
   #{<<"stringValue">> => atom_to_binary(V, utf8)};
 encode_attr_value(V) when is_integer(V) ->
   #{<<"intValue">> => integer_to_binary(V)};
 encode_attr_value(V) when is_float(V) ->
   #{<<"doubleValue">> => V};
-encode_attr_value(true) ->
-  #{<<"boolValue">> => true};
-encode_attr_value(false) ->
-  #{<<"boolValue">> => false};
 encode_attr_value(V) when is_list(V) ->
   #{<<"arrayValue">> => #{<<"values">> => [encode_attr_value(E) || E <- V]}};
 encode_attr_value(V) ->

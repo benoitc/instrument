@@ -47,7 +47,7 @@ new_counter(Name, Help) ->
 
 inc_counter(#metric{handle={Ref, _}}) -> instrument_nif:inc_gauge(Ref).
 
-inc_counter(#metric{handle={Ref, _}}, Val) when Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
+inc_counter(#metric{handle={Ref, _}}, Val) when is_number(Val), Val >= 0 -> instrument_nif:inc_gauge(Ref, float(Val));
 inc_counter(_, _) -> erlang:error(badarg).
 
 get_counter(#metric{handle={Ref, _}}) -> instrument_nif:get_gauge(Ref).

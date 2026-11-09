@@ -12,7 +12,11 @@
   safe_call/1,
   safe_call/2,
   safe_apply/4,
-  bounded_env/4
+  bounded_env/4,
+  json_encode/1,
+  chars_to_binary/1,
+  redact_status/1,
+  redact_message/1
 ]).
 
 -include("instrument.hrl").
@@ -51,3 +55,70 @@ bounded_env(Key, Default, Min, Max) ->
                      [Key, Bad, Default]),
       Default
   end.
+
+%% @doc json:encode/1 for telemetry payloads. Strings come from spans, logs
+%% and metrics, often from the network; one invalid UTF-8 binary made
+%% json:encode/1 raise and the whole export batch was dropped. Invalid bytes
+%% are replaced by U+FFFD before encoding.
+-spec json_encode(term()) -> iodata().
+json_encode(Term) ->
+  json:encode(utf8_safe(Term)).
+
+utf8_safe(B) when is_binary(B) ->
+  case unicode:characters_to_binary(B) of
+    B -> B;
+    _ -> fix_utf8(B, <<>>)
+  end;
+utf8_safe(M) when is_map(M) ->
+  maps:fold(fun(K, V, Acc) -> Acc#{utf8_safe(K) => utf8_safe(V)} end, #{}, M);
+utf8_safe(L) when is_list(L) ->
+  [utf8_safe(E) || E <- L];
+utf8_safe(Other) ->
+  Other.
+
+fix_utf8(<<>>, Acc) ->
+  Acc;
+fix_utf8(Bin, Acc) ->
+  case unicode:characters_to_binary(Bin) of
+    Good when is_binary(Good) ->
+      <<Acc/binary, Good/binary>>;
+    {error, Good, <<_Bad, Rest/binary>>} ->
+      fix_utf8(Rest, <<Acc/binary, Good/binary, 16#EF, 16#BF, 16#BD>>);
+    {incomplete, Good, _Rest} ->
+      <<Acc/binary, Good/binary, 16#EF, 16#BF, 16#BD>>
+  end.
+
+%% @doc Text to a UTF-8 binary. Accepts binaries, byte lists and Unicode
+%% chardata (environment variables under +fnu, `~ts' output); anything that
+%% is not text is printed. Unlike list_to_binary/1 it does not raise on code
+%% points above 255.
+-spec chars_to_binary(term()) -> binary().
+chars_to_binary(B) when is_binary(B) ->
+  B;
+chars_to_binary(L) when is_list(L) ->
+  try unicode:characters_to_binary(L) of
+    B when is_binary(B) -> B;
+    _ -> printed(L)
+  catch _:_ -> printed(L)
+  end;
+chars_to_binary(A) when is_atom(A) ->
+  atom_to_binary(A, utf8);
+chars_to_binary(Other) ->
+  printed(Other).
+
+printed(Term) ->
+  unicode:characters_to_binary(io_lib:format("~0tp", [Term])).
+
+%% @doc format_status/1 helper for processes holding exporter configuration:
+%% drops the state (it carries authorization headers) and the configuration
+%% in a pending register call from crash reports and sys:get_status/1.
+-spec redact_status(map()) -> map().
+redact_status(Status) ->
+  maps:map(fun(state, _) -> redacted;
+              (message, Msg) -> redact_message(Msg);
+              (_, V) -> V
+           end, Status).
+
+-spec redact_message(term()) -> term().
+redact_message({register, Module, _Config}) -> {register, Module, redacted};
+redact_message(Msg) -> Msg.

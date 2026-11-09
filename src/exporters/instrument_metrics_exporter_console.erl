@@ -167,7 +167,7 @@ format_metric_json(#{name := Name, type := Type, data_points := DataPoints} = Me
     <<"type">> => atom_to_binary(Type, utf8),
     <<"dataPoints">> => [format_data_point_json(Type, DP) || DP <- DataPoints]
   },
-  [json:encode(MetricMap), "\n"].
+  [instrument_lib:json_encode(MetricMap), "\n"].
 
 format_data_point_json(histogram, #{attributes := Attrs, value := Value, timestamp := Ts}) ->
   #{count := Count, sum := Sum, buckets := Buckets} = Value,

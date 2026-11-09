@@ -50,7 +50,8 @@
   handle_cast/2,
   handle_info/2,
   terminate/2,
-  code_change/3
+  code_change/3,
+  format_status/1
 ]).
 
 -include("instrument_otel.hrl").
@@ -155,6 +156,8 @@ stats() ->
 %% ============================================================================
 
 init([]) ->
+  %% Trap exits so terminate/2 exports what is queued on shutdown.
+  process_flag(trap_exit, true),
   Batcher = instrument_export_batcher:new(#{
     admission => ?ADMISSION,
     callbacks => callbacks(),
@@ -174,7 +177,7 @@ init([]) ->
   {ok, #state{batcher = B}}.
 
 handle_call({register, Module, Config}, _From, #state{batcher = B} = State) ->
-  case Module:exporter_init(Config) of
+  case instrument_lib:safe_call(fun() -> Module:exporter_init(Config) end, {error, init_failed}) of
     {ok, ExporterState} ->
       Exporter = #{module => Module, config => Config, state => ExporterState},
       ok = instrument_registrations:put(log_exporter, Module, Config),
@@ -224,6 +227,11 @@ terminate(_Reason, #state{batcher = B}) ->
 
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+%% Exporter state holds connection settings such as authorization headers;
+%% keep them out of crash reports and sys:get_status/1.
+format_status(Status) ->
+  instrument_lib:redact_status(Status).
 
 %% ============================================================================
 %% Internal functions
