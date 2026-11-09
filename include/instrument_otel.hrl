@@ -96,7 +96,11 @@
   %% Internal handle to the underlying metric
   handle :: term(),
   %% Aggregation temporality (cumulative or delta)
-  temporality = cumulative :: cumulative | delta
+  temporality = cumulative :: cumulative | delta,
+  %% Synchronous instruments: the unlabeled series' slot in the series store,
+  %% {Epochs, Cell}. Unlabeled writes update the cell directly while the slot
+  %% is live (odd epoch), and go through the store otherwise.
+  unlabeled :: {atomics:atomics_ref(), term()} | undefined
 }).
 
 %% Exemplar record for metrics (captures trace context at measurement time)

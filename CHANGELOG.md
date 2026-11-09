@@ -42,9 +42,9 @@ All notable changes to this project will be documented in this file.
   registry process and no longer triggers a garbage collection pass across the
   whole VM. Bursts of new label values used to queue every writer behind the
   registry and could bring the node down; they now complete quickly.
-- Writes with labels are about twice as fast. Meter writes without labels are
-  slower (tens of nanoseconds); the simple API keeps the fastest path for
-  unlabeled counters.
+- Writes with labels are more than twice as fast (about 120 ns instead of
+  325 ns for two attributes). Meter writes without labels take about 21 ns
+  instead of 15 ns. See the benchmarks guide.
 - The Prometheus formatter runs observable callbacks before each scrape, so
   Prometheus-only setups no longer serve stale observable values.
 - OTLP labeled counters and histograms now carry their start time.

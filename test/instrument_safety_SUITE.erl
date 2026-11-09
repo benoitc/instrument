@@ -30,7 +30,8 @@
   other_tracer_is_left_alone/1,
   otlp_response_size_is_capped/1,
   oversized_propagation_headers_are_ignored/1,
-  text_logs_cannot_forge_lines/1
+  text_logs_cannot_forge_lines/1,
+  unlabeled_fast_path_follows_series_lifecycle/1
 ]).
 
 all() ->
@@ -50,7 +51,8 @@ all() ->
    other_tracer_is_left_alone,
    otlp_response_size_is_capped,
    oversized_propagation_headers_are_ignored,
-   text_logs_cannot_forge_lines].
+   text_logs_cannot_forge_lines,
+   unlabeled_fast_path_follows_series_lifecycle].
 
 init_per_suite(Config) ->
   _ = application:ensure_all_started(crypto),
@@ -301,4 +303,25 @@ text_logs_cannot_forge_lines(Config) ->
   ok = file:close(Dev),
   {ok, ConsoleData} = file:read_file(ConsolePath),
   ?assertEqual(1, length(binary:split(ConsoleData, <<"\n">>, [global, trim_all]))),
+  ok.
+
+%% Unlabeled writes go straight to the instrument's cell, but only while its
+%% series is live: no series before the first write, writes after clear revive
+%% it, and a descriptor held across unregister/re-create reaches the new metric.
+unlabeled_fast_path_follows_series_lifecycle(_Config) ->
+  M = meter(),
+  C = instrument_meter:create_counter(M, <<"fast_unlabeled">>),
+  Out0 = instrument_prometheus:format(),
+  ?assertEqual(nomatch, binary:match(Out0, <<"fast_unlabeled_total ">>)),
+  ok = instrument_meter:add(C, 2),
+  ok = instrument_meter:add(C, 3),
+  ?assertNotEqual(nomatch, binary:match(instrument_prometheus:format(), <<"fast_unlabeled_total 5">>)),
+  ok = instrument_registry:clear_labels({otel, <<"fast_unlabeled">>}),
+  ?assertEqual(nomatch, binary:match(instrument_prometheus:format(), <<"fast_unlabeled_total ">>)),
+  ok = instrument_meter:add(C, 1),
+  ?assertNotEqual(nomatch, binary:match(instrument_prometheus:format(), <<"fast_unlabeled_total 1">>)),
+  ok = instrument_meter:unregister_instrument(<<"fast_unlabeled">>),
+  _ = instrument_meter:create_counter(M, <<"fast_unlabeled">>),
+  ok = instrument_meter:add(C, 7),
+  ?assertNotEqual(nomatch, binary:match(instrument_prometheus:format(), <<"fast_unlabeled_total 7">>)),
   ok.
