@@ -48,7 +48,9 @@ with_label(VectorMetric, Label, Fun) ->
 with_label(VectorMetric, Label, Fun, V) ->
   with_label_1(VectorMetric, Label, module(Fun), Fun, [V]).
 
-%% that's pretty hackish but let's do it for now.
+%% Maps a vector operation name to the module implementing it. A name not
+%% listed here is not an operation of this API: with_label/3,4 then expects a
+%% fun and applies it to the row directly.
 module(inc_counter) -> instrument_counter;
 module(get_counter) -> instrument_counter;
 module(inc_gauge) -> instrument_gauge;
@@ -103,6 +105,14 @@ with(VectorMetric, Fun) ->
       []
   end.
 
+remove_label(Name, Label) when is_map(Label) ->
+  %% A map addresses the row by declared label names; resolve it to the
+  %% values list the row is keyed by.
+  VecName = vec_name(Name),
+  case label_values(VecName, Label) of
+    {error, _} = Error -> Error;
+    Values -> instrument_registry:remove_label(VecName, Values)
+  end;
 remove_label(Name, Label) ->
   instrument_registry:remove_label(vec_name(Name), Label).
 

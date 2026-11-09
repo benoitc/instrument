@@ -84,6 +84,17 @@ family_seq(N) ->
 -spec ensure_family(term(), atom(), binary(), [term()] | undefined,
                     [number()] | undefined) -> #family{}.
 ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
+  %% Repeated creates are common (new_counter/2 called per request). Return
+  %% the existing family before taking a slot in the family chain, so they do
+  %% not grow the chain that every scrape walks.
+  %% Only a fully published family takes the shortcut; otherwise
+  %% create_family/5 also repairs a creator that died before publishing.
+  case persistent_term:get({instrument_family, Name}, undefined) of
+    #family{} = Existing -> Existing;
+    _ -> create_family(Name, Kind, Help, DeclaredLabels, Boundaries)
+  end.
+
+create_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
   FamSeq = family_seq(),
   Meta = #family{
     kind = Kind,
@@ -102,7 +113,7 @@ ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries) ->
       case ets:lookup_element(?TAB, {Name, family}, 2, undefined) of
         undefined ->
           %% concurrent teardown deleted the arbiter row; the claim is free again
-          ensure_family(Name, Kind, Help, DeclaredLabels, Boundaries);
+          create_family(Name, Kind, Help, DeclaredLabels, Boundaries);
         Existing ->
           %% dead-creator repair: complete missing pt publications (two racing
           %% repairers can produce one redundant replacing put — recovery path
@@ -209,7 +220,7 @@ first_write(Name, CacheKey, CanonFun, WriteFun) ->
           %% no cardinality consumption, no overflow misroute at the cap.
           case ets:lookup_element(?TAB, {Name, Canon}, 2, undefined) of
             #metric{} = Existing ->
-              adopt_cache_key(Name, CacheKey, Existing),
+              adopt_cache_key(Name, CacheKey, Canon, Existing),
               WriteFun(Existing);
             undefined ->
               case over_limit(Name, Canon) of
@@ -299,7 +310,7 @@ claim_row(Name, #family{} = Fam, Canon, CacheKey, WriteFun) ->
               %% CacheKey racing the same Canon): adopt our own cache key so the
               %% next write with this shape hits the fast path instead of
               %% re-minting and discarding a cell every time.
-              adopt_cache_key(Name, CacheKey, Existing),
+              adopt_cache_key(Name, CacheKey, Canon, Existing),
               WriteFun(Existing)
           end
       end
@@ -309,11 +320,47 @@ claim_row(Name, #family{} = Fam, Canon, CacheKey, WriteFun) ->
 %% writer -- an aliased CacheKey, or a winner that died before publishing.
 %% Absent-only, so it never issues a replacing persistent_term:put on the create
 %% path; concurrent adopters of the same key store an identical Row.
-adopt_cache_key(Name, CacheKey, Row) ->
+%%
+%% Each alias is recorded as {{Name, alias, CacheKey}, Canon} so removal and
+%% teardown can erase it, and the number of aliases per family is capped at the
+%% cardinality limit: distinct raw values that canonicalize alike (floats
+%% differing past the 6th decimal, strings vs binaries) would otherwise add
+%% persistent_term keys without bound. Past the cap the write still lands on
+%% the right row, through the arbiter lookup instead of the fast path.
+adopt_cache_key(Name, CacheKey, Canon, Row) ->
   case persistent_term:get({instrument_label, Name, CacheKey}, undefined) of
-    undefined -> persistent_term:put({instrument_label, Name, CacheKey}, Row);
-    _ -> ok
+    undefined ->
+      case ets:insert_new(?TAB, {{Name, alias, CacheKey}, Canon}) of
+        false ->
+          ok;
+        true ->
+          Limit = instrument_config:get_metric_cardinality_limit(),
+          case ets:update_counter(?COUNTS, {aliases, Name}, {2, 1}, {{aliases, Name}, 0}) of
+            N when N =< Limit ->
+              persistent_term:put({instrument_label, Name, CacheKey}, Row);
+            _ ->
+              ets:delete(?TAB, {Name, alias, CacheKey}),
+              _ = ets:update_counter(?COUNTS, {aliases, Name}, {2, -1, 0, 0}),
+              ok
+          end
+      end;
+    _ ->
+      ok
   end.
+
+%% Erase the aliases of one series (Canon) or of the whole family ('_').
+erase_aliases(Name, Canon) ->
+  Aliases = ets:match(?TAB, {{Name, alias, '$1'}, Canon}),
+  lists:foreach(fun([CK]) ->
+    persistent_term:erase({instrument_label, Name, CK}),
+    ets:delete(?TAB, {Name, alias, CK})
+  end, Aliases),
+  case Canon of
+    '_' -> ets:delete(?COUNTS, {aliases, Name});
+    _ -> _ = ets:update_counter(?COUNTS, {aliases, Name},
+                                {2, -length(Aliases), 0, 0}, {{aliases, Name}, 0})
+  end,
+  ok.
 
 %% Cells are master's exact storage shapes; rows are the same unregistered
 %% #metric{} wrappers so per-kind ops work unmodified.
@@ -375,9 +422,14 @@ collect_all(FamSeq) ->
               Acc
             end;
           #family{} = Fam ->
-            case collect_family(Name, Fam) of
+            %% One unreadable family must not fail the whole scrape.
+            try collect_family(Name, Fam) of
               empty -> Acc;
               Entry -> [Entry | Acc]
+            catch Class:Reason:Stacktrace ->
+              logger:warning("Skipping metric ~p in collection: ~p:~p",
+                             [Name, Class, Reason], #{stacktrace => Stacktrace}),
+              Acc
             end
         end
     end
@@ -435,31 +487,42 @@ remove_row(Name, CacheKey) ->
         undefined ->
           ok;
         Row ->
+          %% The key may be the series' own cache key or an alias of it; either
+          %% way the whole series goes, with every key that points at it.
+          Match = case ets:lookup_element(?TAB, {Name, alias, CacheKey}, 2, undefined) of
+                    undefined -> {cache_key, CacheKey};
+                    Canon -> {canon, Canon}
+                  end,
           persistent_term:erase({instrument_label, Name, CacheKey}),
-          %% the chain slot carries the Canon, so erasing it also drops the
-          %% matching arbiter row (keyed by Canon)
-          erase_matching_slot(Name, Seq, CacheKey),
-          instrument_histogram:cleanup(Row),
-          _ = ets:update_counter(?COUNTS, {count, Name}, {2, -1, 0, 0}, {{count, Name}, 0}),
-          ok
+          case erase_matching_slot(Name, Seq, Match) of
+            {ok, SlotCanon} ->
+              erase_aliases(Name, SlotCanon),
+              instrument_histogram:cleanup(Row),
+              _ = ets:update_counter(?COUNTS, {count, Name}, {2, -1, 0, 0}, {{count, Name}, 0}),
+              ok;
+            not_found ->
+              ok
+          end
       end;
     _ ->
       ok
   end.
 
-%% Walk the chain to find the slot whose CacheKey matches; erase the chain slot
-%% and delete the arbiter row keyed by that slot's Canon.
-erase_matching_slot(Name, Seq, CacheKey) ->
+%% Walk the chain to find the series' slot; erase it, its own cache key and
+%% the arbiter row keyed by its Canon. Returns the Canon, or not_found.
+erase_matching_slot(Name, Seq, Match) ->
   N = atomics:get(Seq, 1),
-  lists:foreach(fun(S) ->
+  lists:foldl(fun(S, Acc) ->
     case persistent_term:get({instrument_row, Name, S}, undefined) of
-      {Canon, CK, _Row} when CK =:= CacheKey ->
+      {Canon, CK, _Row} when Match =:= {cache_key, CK}; Match =:= {canon, Canon} ->
         persistent_term:erase({instrument_row, Name, S}),
-        ets:delete(?TAB, {Name, Canon});
+        persistent_term:erase({instrument_label, Name, CK}),
+        ets:delete(?TAB, {Name, Canon}),
+        {ok, Canon};
       _ ->
-        ok
+        Acc
     end
-  end, lists:seq(1, N)).
+  end, not_found, lists:seq(1, N)).
 
 %% Clear every live label set of a family: erase all cache keys and chain
 %% slots, drop arbiter rows, release exemplar reservoirs, and delete the
@@ -488,6 +551,7 @@ clear_family_rows(Name) ->
             ok
         end
       end, lists:seq(1, N)),
+      erase_aliases(Name, '_'),
       ets:delete(?COUNTS, {count, Name}),
       ok;
     _ ->
@@ -518,6 +582,7 @@ teardown_family(Name) ->
         end
       end, lists:seq(1, N)),
       persistent_term:erase({instrument_family_idx, Idx}),
+      erase_aliases(Name, '_'),
       ets:delete(?COUNTS, {count, Name}),
       ets:delete(?COUNTS, {dropped, Name}),
       ok;
@@ -537,10 +602,23 @@ teardown_family(Name) ->
 %% Stringify a label value for the wire. One definition for all three APIs.
 -spec to_label_value(term()) -> binary().
 to_label_value(V) when is_binary(V)  -> V;
-to_label_value(V) when is_list(V)    -> list_to_binary(V);
 to_label_value(V) when is_atom(V)    -> atom_to_binary(V, utf8);
 to_label_value(V) when is_integer(V) -> integer_to_binary(V);
-to_label_value(V) when is_float(V)   -> float_to_binary(V, [{decimals, 6}, compact]).
+to_label_value(V) when is_float(V)   -> float_to_binary(V, [{decimals, 6}, compact]);
+to_label_value(V) when is_list(V) ->
+  %% Unicode strings and iolists; anything else is printed like other terms.
+  try unicode:characters_to_binary(V) of
+    B when is_binary(B) -> B;
+    _ -> term_label(V)
+  catch _:_ -> term_label(V)
+  end;
+to_label_value(V) ->
+  %% Tuples (IP addresses), pids, refs, maps: a printed form instead of
+  %% crashing the writer.
+  term_label(V).
+
+term_label(V) ->
+  unicode:characters_to_binary(io_lib:format("~0tp", [V])).
 
 %% Canonicalize a positional vec values list against the family's declared
 %% names: sort by name, reorder values to match, stringify. On an arity

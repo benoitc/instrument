@@ -542,10 +542,13 @@ register_family(RegName, Kind, Description, Opts) ->
   ok.
 
 family_boundaries({otel, Name}, histogram, Opts) ->
-  case find_view_boundaries(Name) of
+  Boundaries = case find_view_boundaries(Name) of
     undefined -> maps:get(boundaries, Opts, default_boundaries());
     B -> B
-  end;
+  end,
+  %% Fail at creation rather than on every record/2 call.
+  ok = instrument_histogram:validate_buckets(Boundaries),
+  Boundaries;
 family_boundaries(_RegName, _Kind, _Opts) ->
   undefined.
 
