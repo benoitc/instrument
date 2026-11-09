@@ -96,6 +96,12 @@ extract_tracestate(Carrier, Ctx) ->
       end
   end.
 
+%% Version 00 is exactly 55 bytes; later versions may add fields. Anything
+%% longer than this is ignored before parsing.
+-define(MAX_TRACEPARENT_BYTES, 512).
+
+parse_traceparent(Value, Ctx) when byte_size(Value) > ?MAX_TRACEPARENT_BYTES ->
+  Ctx;
 parse_traceparent(Value, Ctx) ->
   try
     %% Format: VERSION-TRACEID-SPANID-FLAGS
@@ -189,8 +195,16 @@ trim_ows_right(Bin) ->
     _ -> Bin
   end.
 
+%% A header longer than 32 full members is not a valid tracestate; it is
+%% ignored without being parsed. Otherwise members are taken one at a time,
+%% so parsing stops after the 32nd.
+-define(MAX_TRACESTATE_BYTES, (?MAX_TRACESTATE_ENTRIES * (?MAX_TRACESTATE_ENTRY_BYTES + 1))).
+
+decode_tracestate(Value) when byte_size(Value) > ?MAX_TRACESTATE_BYTES ->
+  [];
 decode_tracestate(Value) ->
-  Parts = binary:split(Value, <<",">>, [global, trim_all]),
+  Parts = instrument_lib:take_members(Value, <<",">>, ?MAX_TRACESTATE_ENTRIES,
+                                      ?MAX_TRACESTATE_BYTES),
   Decoded = lists:filtermap(fun(Part) ->
     case byte_size(Part) =< ?MAX_TRACESTATE_ENTRY_BYTES of
       false -> false;

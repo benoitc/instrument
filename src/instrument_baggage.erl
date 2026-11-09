@@ -135,7 +135,10 @@ decode(Header) when is_binary(Header) ->
   case Header of
     <<>> -> #{};
     _ ->
-      Entries = binary:split(Header, <<",">>, [global, trim_all]),
+      %% Entries are taken one at a time, so the rest of an oversized
+      %% header is never scanned.
+      Entries = instrument_lib:take_members(Header, <<",">>, ?MAX_BAGGAGE_ENTRIES,
+                                            ?MAX_BAGGAGE_BYTES),
       decode_entries(Entries, #{}, 0)
   end.
 
