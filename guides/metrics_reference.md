@@ -546,6 +546,16 @@ ContentType = instrument_prometheus:content_type().
 %% Returns: <<"text/plain; version=0.0.4; charset=utf-8">>
 ```
 
+`format/0` runs observable callbacks first, so scraped observable values are current. Labeled series appear under the metric's own name, one line per label combination:
+
+```
+# TYPE http_requests_total counter
+http_requests_total{method="GET",status="200"} 12.0
+http_requests_total{method="POST",status="201"} 3.0
+```
+
+When a meter instrument is written with different attribute key sets, all label names appear on every line and missing ones are empty. A meter instrument appears after its first write.
+
 ## Best Practices
 
 ### Naming Conventions
@@ -557,7 +567,7 @@ ContentType = instrument_prometheus:content_type().
 
 ### Labels
 
-- Keep cardinality bounded (< 100 unique combinations)
+- Keep cardinality bounded (< 100 unique combinations); past `OTEL_METRIC_CARDINALITY_LIMIT` (default 2000 per metric) new combinations go to one overflow series
 - Don't use high-cardinality values (user IDs, request IDs)
 - Use consistent label names across metrics
 - Order label values consistently

@@ -53,9 +53,9 @@ The supervisor (`instrument_sup`) starts these children with `one_for_all` strat
 
 **Lock-free Operations**: Counters and gauges use NIF-based C11 atomics for updates. Histograms use the OTP `atomics` module, with bucket counts stored as int64 slots and the running sum kept as IEEE-754 bits in a CAS-retry loop. Both paths avoid locks entirely.
 
-**Scheduler-aware Storage**: ETS tables are partitioned per-scheduler (`instrument_registry_1` through `instrument_registry_N`) to eliminate cross-scheduler contention.
+**Series Store**: Every metric series (one label set of one metric) is its own entry. Creating one is a single `ets:insert_new` plus `persistent_term` puts under fresh keys, so it never goes through a process and never triggers a VM-wide garbage collection. See [Series Store](#series-store).
 
-**Persistent Term Caching**: Metric lookups use `persistent_term` for O(1) read access with zero copying overhead.
+**Bounded Queues**: Every process that receives telemetry by message (span and log exporters, batch processor, flight recorder workers) has its intake checked by the sender, which drops instead of queuing past a limit.
 
 **Process Dictionary Context**: Span context is stored in the process dictionary for zero-cost reads within a process.
 
@@ -71,7 +71,8 @@ The supervisor (`instrument_sup`) starts these children with `one_for_all` strat
 | Context | `instrument_context`, `instrument_propagator`, `instrument_propagator_*` | Context propagation |
 | Processing | `instrument_span_processor`, `instrument_span_processor_*`, `instrument_exporter` | Span processing pipeline |
 | Flight Recorder | `instrument_flight_recorder`, `instrument_tracer_pool`, `instrument_tracer_nif` | Message/process tracing via `erl_tracer` NIF (not used by the span hot path) |
-| Registry | `instrument_registry`, `instrument_lib` | Metric storage |
+| Registry | `instrument_registry`, `instrument_series`, `instrument_lib` | Metric storage |
+| Export plumbing | `instrument_admission`, `instrument_export_batcher`, `instrument_export_server` | Bounded intake, batching, serialized exports |
 
 ### Module Dependencies
 
@@ -89,11 +90,13 @@ instrument_tracer
 
 **instrument_tracer**: Core span lifecycle management. Handles span creation, context attachment, and export hooks. Uses the process dictionary via `instrument_context` to maintain the current span stack.
 
-**instrument_registry**: Central metric storage using a gen_server with scheduler-partitioned ETS tables and persistent_term caching. The gen_server serializes writes while reads bypass it entirely.
+**instrument_series**: The metric store. Families (one per metric name) and series (one per label set) are created without any process hop; writes and scrapes read `persistent_term` only.
+
+**instrument_registry**: Owns the store's tables and runs the rare destructive operations (unregister, remove a label set, clear). It is on no create, write or scrape path.
 
 **instrument_span_processor**: Manages a chain of span processors, invoking `on_start/2` and `on_end/1` callbacks. Supports both simple (immediate) and batch processing.
 
-**instrument_exporter**: Batches completed spans and distributes them to registered exporters. Default batch size is 512 spans with a 5-second timeout.
+**instrument_exporter**: Batches completed spans and distributes them to registered exporters. Default batch size is 512 spans with a 5-second timeout, and at most 2048 spans wait; extra spans are dropped and counted. The tracer only calls it while an exporter is registered. Configured trace exporters (`OTEL_TRACES_EXPORTER`) go through the batch span processor instead.
 
 **instrument_flight_recorder**: Low-overhead message tracing using `erlang:trace` with a custom erl_tracer NIF. Distributes trace events across a worker pool to avoid single-process bottlenecks. The NIF (`instrument_tracer_nif`) implements BEAM `erl_tracer` callbacks (`enabled/3`, `trace/5`, plus the specialised variants) and is invoked by the VM, not by user code. It is not in the `start_span`/`end_span` path and cannot be reused to accelerate span operations; see [Span Export Path](#span-export-path) for how spans actually reach exporters.
 
@@ -158,8 +161,8 @@ instrument_tracer
 ```erlang
 -record(metric, {
   name,
-  handle :: term(),                % NIF resource or #vector{}
-  collect :: tuple(),              % {Module, Function, Args}
+  handle :: term(),                % NIF resource or atomics array
+  collect :: tuple() | undefined,  % {Module, Function, Args}
   description :: binary() | undefined,
   unit :: binary() | undefined,
   meter :: binary() | undefined,
@@ -167,16 +170,19 @@ instrument_tracer
 }).
 ```
 
-**#vector{}** - Labeled/dimensional metrics
+Each series is a `#metric{}` holding one cell. Simple-API records embed the cell, so their writes go straight to the NIF.
+
+**#family{}** - One metric name in the series store
 
 ```erlang
--record(vector, {
-  name,
-  help,
-  metric,                          % counter | gauge | histogram
-  buckets = [],                    % histogram boundaries
-  labels = [],                     % label keys
-  labels_map = #{}                 % {LabelValues} => #metric{}
+-record(family, {
+  kind,                            % counter | gauge | histogram | observable_*
+  help = <<>>,
+  declared_labels,                 % vec API: label names; meter: undefined
+  boundaries,                      % histograms only
+  start_time,                      % creation time, ns
+  idx,                             % slot in the family chain
+  row_seq                          % atomics counter numbering its series
 }).
 ```
 
@@ -273,29 +279,39 @@ instrument_tracer:end_span/1                     (src/instrument_tracer.erl:370)
 not an exported public API.)
 ```
 
-**Default state: nothing leaves the VM.** No processor or exporter is registered out of the box. Spans complete, `on_end_inline` finds an empty processor list, and the data is discarded. To export traces, register a processor (typically the batch processor) configured with the OTLP exporter, or set the OTLP env vars that `instrument_config` auto-wires (`src/instrument_config.erl:573`, `:644`). Non-recording spans (sampler decision = `drop`) short-circuit before the export path entirely; only spans with `trace_flags = 1` reach the direct `register_exporter/1` hooks.
+**Default state: nothing leaves the VM.** No processor or exporter is registered out of the box. Spans complete, `on_end_inline` finds an empty processor list, and the data is discarded. Setting `OTEL_TRACES_EXPORTER` (or the `span_exporter` application setting) registers the batch processor with that exporter at startup. Non-recording spans (sampler decision = `drop`) short-circuit before the export path entirely; only spans with `trace_flags = 1` reach the direct `register_exporter/1` hooks, which exist only while `instrument_exporter` has an exporter registered.
+
+**Backpressure.** `instrument_span_processor_batch:on_end/1` and `instrument_exporter:export_span/1` reserve a slot in an `atomics` counter before casting (`instrument_admission`). Past the queue limit the span is dropped in the ending process, so a slow collector cannot grow the receiver's mailbox.
 
 ### Metrics Recording Flow
 
 ```
-instrument_metric:inc_counter(Name, Value)
+instrument_meter:add(Counter, 1, #{method => <<"GET">>})
     |
     v
-[Lookup metric via persistent_term]
+[Sort attributes into the series key]
     |
-    +---> #metric{handle = NIF_Resource}
-    |         |
-    |         v
-    |     [Call NIF: atomic increment]
+    v
+[persistent_term:get({instrument_label, Name, Key})]
     |
-    +---> #metric{handle = #vector{}}
+    +---> found: #metric{} row --> [NIF atomic increment]
+    |
+    +---> first write of this label set:
               |
               v
-          [Lookup labeled metric from labels_map]
+          [Check the per-metric cardinality limit]
               |
               v
-          [Call NIF on resolved metric]
+          [ets:insert_new the row: exactly one writer wins]
+              |
+              v
+          [Winner publishes two fresh persistent_term keys]
+              |
+              v
+          [NIF atomic increment]
 ```
+
+Record-held simple-API metrics skip the lookup: the record holds the cell.
 
 ### Context Propagation Flow
 
@@ -478,6 +494,10 @@ shutdown(#{conn := Conn}) ->
 force_flush(State) ->
   {ok, State}.
 
+%% Optional: run exports outside the exporter server. Only for exporters
+%% whose state is usable from another process (no raw files).
+%% export_async() -> true.
+
 %% Register:
 %% instrument_exporter:register(#{module => my_exporter,
 %%                                config => #{endpoint => "..."}}).
@@ -555,45 +575,25 @@ Both paths give:
 - No contention between concurrent writers
 - Sub-microsecond update latency on the hot path
 
-### Scheduler-aware ETS Tables
+### Series Store
 
-The registry creates one ETS table per scheduler:
+`instrument_series` keeps every series as its own entry:
 
-```erlang
-% From instrument_lib.erl
-tables() ->
-  [table(S) || S <- lists:seq(1,erlang:system_info(schedulers))].
+| Where | Key | Value |
+|-------|-----|-------|
+| ETS `instrument_series` | `{Name, family}`, `{Name, SeriesKey}` | family meta, series row (the creation arbiter) |
+| `persistent_term` | `{instrument_family, Name}` | `#family{}` |
+| `persistent_term` | `{instrument_label, Name, CacheKey}` | series row, the write hot path |
+| `persistent_term` | `{instrument_row, Name, N}` | series N of a family, walked by scrapes |
+| `persistent_term` | `{instrument_family_idx, K}` | family K, walked by scrapes |
 
-table() ->
-  table(erlang:system_info(scheduler_id)).
+Rules that keep it cheap:
+- Creation is decided by `ets:insert_new`: one writer wins, the others reuse its row.
+- Only the winner writes that series' `persistent_term` keys, and only fresh ones. Replacing a `persistent_term` value makes every process scan its heap; adding a new key does not.
+- Scrapes count up the family and series counters and read `persistent_term`; they touch no ETS table.
+- Erasing keys (unregister, clear) does trigger the VM-wide scan. That only happens on administrative operations.
 
-table(1) -> instrument_registry_1;
-table(2) -> instrument_registry_2;
-% ... up to instrument_registry_64
-```
-
-Benefits:
-- Each scheduler accesses its own table
-- Eliminates cross-scheduler ETS lock contention
-- Linear scaling with core count
-
-### Persistent Term Caching
-
-Metric lookups use persistent_term for O(1) access:
-
-```erlang
-% From instrument_registry.erl
-lookup(Name) ->
-  persistent_term:get({instrument_metric, Name}, undefined).
-
-cache_label(Name, LabelValues, Metric) ->
-  persistent_term:put({instrument_label, Name, LabelValues}, Metric).
-```
-
-Characteristics:
-- Reads are essentially free (no copying)
-- Writes trigger global GC but are rare
-- Perfect for read-heavy metric lookups
+Labeled series export under the metric's own name. A family mixing attribute key sets renders the union of label names, with absent labels empty.
 
 ### Process Dictionary Context
 
@@ -637,15 +637,18 @@ Spans are batched before export:
 |---------|---------|---------|
 | max_export_batch_size | 512 | Spans per batch |
 | schedule_delay_millis | 5000 | Time trigger |
-| max_queue_size | 2048 | Queue limit |
+| max_queue_size | 2048 | Queue limit, enforced before the cast |
 | export_timeout_millis | 30000 | Export timeout |
+
+Each export sends at most `max_export_batch_size` spans. `force_flush/0` waits until the queue is exported or one export timeout passes.
 
 ### Performance Summary
 
 | Operation | Mechanism | Typical Latency | Concurrency |
 |-----------|-----------|-----------------|-------------|
 | Metric increment | NIF atomic CAS | <100ns | Lock-free |
-| Metric lookup | persistent_term | <10ns | Copy-free |
+| Labeled metric write | persistent_term + NIF | ~200ns | Lock-free |
+| New label set | ets:insert_new + fresh persistent_term keys | grows with the number of persistent_term keys in the VM | No process hop, no global GC |
 | Context read | Process dictionary | <10ns | Process-local |
 | Span start | Erlang + sampling | ~1-5us | Per-process |
 | Span end | Async cast | <1us | Non-blocking |

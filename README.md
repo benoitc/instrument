@@ -329,6 +329,7 @@ A step-by-step guide to instrumenting Erlang applications:
 - [Testing Instrumentation](guides/testing_instrumentation.md)
 - [Production Operations](guides/production_operations.md)
 - [Migration Guide](guides/migration.md)
+- [Migrating to 2.0](guides/migrating_to_2.0.md)
 
 ## Modules
 
@@ -352,7 +353,12 @@ A step-by-step guide to instrumenting Erlang applications:
 | `OTEL_TRACES_SAMPLER` | Sampler type (always_on, always_off, traceidratio, parentbased_*) |
 | `OTEL_TRACES_SAMPLER_ARG` | Sampler argument (e.g., probability ratio) |
 | `OTEL_PROPAGATORS` | Propagators (tracecontext, baggage, b3, b3multi) |
+| `OTEL_TRACES_EXPORTER` | Trace exporter (`otlp`, `console`); registers the batch span processor |
+| `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` | Metrics and log exporters |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint URL |
+| `OTEL_BSP_SCHEDULE_DELAY`, `OTEL_BSP_MAX_QUEUE_SIZE`, `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`, `OTEL_BSP_EXPORT_TIMEOUT` | Batch span processor tuning |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Metrics export interval in ms |
+| `OTEL_METRIC_CARDINALITY_LIMIT` | Label combinations per metric (default 2000) |
 
 ### Application Config
 
