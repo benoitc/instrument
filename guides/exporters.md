@@ -163,6 +163,8 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 | `timeout` | `integer` | `10000` | Request timeout in ms |
 | `traces_path` | `binary` | `<<"/v1/traces">>` | API path |
 
+Collector responses are read up to 64 KB; a larger response fails the export without a retry. OTLP responses are a few hundred bytes, so this only stops a broken or hostile collector from filling memory.
+
 ### With Authentication
 
 ```erlang
@@ -359,6 +361,8 @@ Output example:
 ```
 [2026-03-31T12:00:00.000000Z] INFO [trace_id=abc123... span_id=def456...] User logged in {"user":"john"}
 ```
+
+Each record is one line: newlines, carriage returns, tabs and other control characters in the message are written as `\n`, `\r`, `\t` and `\xHH`, so data from a request cannot fake extra log lines. Use the JSON format for logs that tools parse.
 
 #### JSON Format
 

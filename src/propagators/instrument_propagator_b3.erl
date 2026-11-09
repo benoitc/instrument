@@ -100,6 +100,12 @@ parse_b3_header(Value, Ctx) ->
     _:_ -> Ctx
   end.
 
+%% The longest valid value (128-bit trace id, span id, flag, parent id) is
+%% 68 bytes; longer values are ignored before parsing.
+-define(MAX_B3_BYTES, 128).
+
+parse_full_b3_header(Value, Ctx) when byte_size(Value) > ?MAX_B3_BYTES ->
+  Ctx;
 parse_full_b3_header(Value, Ctx) ->
   case binary:split(Value, <<"-">>, [global]) of
     [TraceIdHex, SpanIdHex] ->

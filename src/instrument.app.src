@@ -11,7 +11,7 @@
                 instrument_log_exporter, instrument_span_processor,
                 instrument_tracer_pool, instrument_flight_recorder]},
   {mod, {instrument_app, []}},
-  {applications, [kernel, stdlib]},
+  {applications, [kernel, stdlib, hackney]},
   {env,[]},
   {modules, []},
   {maintainers, ["Benoit Chesneau"]},

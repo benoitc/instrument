@@ -55,7 +55,7 @@ all() ->
 
 
 init_per_suite(Config) ->
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config.
 
 end_per_suite(Config) ->

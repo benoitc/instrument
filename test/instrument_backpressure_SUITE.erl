@@ -51,7 +51,7 @@ end_per_suite(_Config) ->
   ok.
 
 init_per_testcase(_TC, Config) ->
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   case ets:whereis(?TAB) of
     undefined -> ets:new(?TAB, [public, named_table, set, {write_concurrency, true}]);
     _ -> ets:delete_all_objects(?TAB)
@@ -73,12 +73,12 @@ default_trace_exporter_uses_batch_processor(_Config) ->
   ok = application:stop(instrument),
   os:putenv("OTEL_TRACES_EXPORTER", "otlp,console"),
   os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual([instrument_span_processor_batch], instrument_span_processor:list()),
   ?assertEqual([instrument_exporter_console], instrument_exporter:list()),
   ok = application:stop(instrument),
   os:putenv("OTEL_TRACES_EXPORTER", "console"),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   ?assertEqual([instrument_span_processor_batch], instrument_span_processor:list()),
   ?assertEqual([], instrument_exporter:list()),
   ok.

@@ -9,6 +9,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
+-include("instrument_otel.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
 
@@ -26,7 +27,10 @@
   trace_flags_round_trip/1,
   invalid_tracestate_keeps_traceparent/1,
   invalid_utf8_is_encoded/1,
-  other_tracer_is_left_alone/1
+  other_tracer_is_left_alone/1,
+  otlp_response_size_is_capped/1,
+  oversized_propagation_headers_are_ignored/1,
+  text_logs_cannot_forge_lines/1
 ]).
 
 all() ->
@@ -43,11 +47,14 @@ all() ->
    trace_flags_round_trip,
    invalid_tracestate_keeps_traceparent,
    invalid_utf8_is_encoded,
-   other_tracer_is_left_alone].
+   other_tracer_is_left_alone,
+   otlp_response_size_is_capped,
+   oversized_propagation_headers_are_ignored,
+   text_logs_cannot_forge_lines].
 
 init_per_suite(Config) ->
   _ = application:ensure_all_started(crypto),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config.
 
 end_per_suite(_Config) ->
@@ -204,3 +211,94 @@ other_tracer_is_left_alone(_Config) ->
     exit(Tracer, kill),
     instrument_flight_recorder:disable()
   end.
+
+%% A collector answering with a huge body is cut off at the size limit and
+%% the export is not retried; a normal answer still succeeds.
+otlp_response_size_is_capped(_Config) ->
+  {ok, Listen} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+  {ok, Port} = inet:port(Listen),
+  Requests = atomics:new(1, []),
+  Server = spawn_link(fun() -> serve(Listen, Requests) end),
+  try
+    Url = iolist_to_binary(["http://127.0.0.1:", integer_to_list(Port), "/big"]),
+    ?assertEqual({error, permanent, body_too_large},
+                 instrument_otlp_retry:send_with_retry(post, Url, [], <<"x">>,
+                                                       [{recv_timeout, 5000}],
+                                                       #{max_retries => 3})),
+    ?assertEqual(1, atomics:get(Requests, 1)),
+    Small = iolist_to_binary(["http://127.0.0.1:", integer_to_list(Port), "/small"]),
+    ?assertEqual(ok, instrument_otlp_retry:send_with_retry(post, Small, [], <<"x">>,
+                                                          [{recv_timeout, 5000}]))
+  after
+    unlink(Server),
+    exit(Server, kill),
+    gen_tcp:close(Listen)
+  end.
+
+serve(Listen, Requests) ->
+  {ok, Sock} = gen_tcp:accept(Listen),
+  {ok, Req} = read_request(Sock, <<>>),
+  atomics:add(Requests, 1, 1),
+  Body = case binary:match(Req, <<"/big">>) of
+           nomatch -> <<"{}">>;
+           _ -> binary:copy(<<"x">>, 1024 * 1024)
+         end,
+  gen_tcp:send(Sock, [<<"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ">>,
+                      integer_to_binary(byte_size(Body)), <<"\r\n\r\n">>, Body]),
+  gen_tcp:close(Sock),
+  serve(Listen, Requests).
+
+read_request(Sock, Acc) ->
+  case binary:match(Acc, <<"\r\n\r\n">>) of
+    nomatch ->
+      {ok, Data} = gen_tcp:recv(Sock, 0, 5000),
+      read_request(Sock, <<Acc/binary, Data/binary>>);
+    _ ->
+      {ok, Acc}
+  end.
+
+%% Oversized propagation headers are ignored without being parsed in full.
+oversized_propagation_headers_are_ignored(_Config) ->
+  TP = <<"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01">>,
+  Huge = binary:copy(<<"k=v,">>, 256 * 1024),
+  {Time, Ctx} = timer:tc(fun() ->
+    instrument_propagation:extract(#{<<"traceparent">> => TP, <<"tracestate">> => Huge,
+                                     <<"baggage">> => Huge})
+  end),
+  %% traceparent kept, oversized tracestate ignored
+  #{span_ctx := SpanCtx} = Ctx,
+  ?assertEqual([], SpanCtx#span_ctx.trace_state),
+  %% baggage keeps at most the first entries within the W3C limits
+  ?assert(map_size(instrument_baggage:decode(Huge)) =< 180),
+  ?assert(Time < 1000000),
+  %% too long to be a traceparent or a b3 header
+  ?assertEqual(error, maps:find(span_ctx, instrument_propagation:extract(
+    #{<<"traceparent">> => <<TP/binary, (binary:copy(<<"-x">>, 300))/binary>>}))),
+  ?assertEqual(error, maps:find(span_ctx, instrument_propagator_b3:extract(
+    #{<<"b3">> => <<"0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-1-",
+                    (binary:copy(<<"0">>, 200))/binary>>}, #{}))),
+  ok.
+
+%% A text log body containing a newline stays on one line.
+text_logs_cannot_forge_lines(Config) ->
+  Dir = proplists:get_value(priv_dir, Config),
+  Path = filename:join(Dir, "forge.log"),
+  Record = #log_record{timestamp = erlang:system_time(nanosecond),
+                       observed_timestamp = erlang:system_time(nanosecond),
+                       severity_number = 9, severity_text = <<"INFO">>,
+                       body = <<"ok\nERROR fake entry\r\n">>, attributes = #{}},
+  {ok, S0} = instrument_log_exporter_file:exporter_init(#{path => list_to_binary(Path),
+                                                          format => text}),
+  {ok, S1} = instrument_log_exporter_file:exporter_export([Record], S0),
+  ok = instrument_log_exporter_file:exporter_shutdown(S1),
+  {ok, Data} = file:read_file(Path),
+  ?assertEqual(1, length(binary:split(Data, <<"\n">>, [global, trim_all]))),
+  ?assertNotEqual(nomatch, binary:match(Data, <<"ok\\nERROR fake entry\\r\\n">>)),
+  ConsolePath = filename:join(Dir, "forge_console.log"),
+  {ok, Dev} = file:open(ConsolePath, [write]),
+  {ok, C0} = instrument_log_exporter_console:exporter_init(#{format => text, output => Dev}),
+  {ok, _} = instrument_log_exporter_console:exporter_export([Record], C0),
+  ok = file:close(Dev),
+  {ok, ConsoleData} = file:read_file(ConsolePath),
+  ?assertEqual(1, length(binary:split(ConsoleData, <<"\n">>, [global, trim_all]))),
+  ok.

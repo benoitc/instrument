@@ -85,7 +85,7 @@ all() ->
 init_per_suite(Config) ->
   %% crypto might already be started
   _ = application:ensure_all_started(crypto),
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config.
 
 end_per_suite(Config) ->

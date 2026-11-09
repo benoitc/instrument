@@ -16,7 +16,9 @@
   json_encode/1,
   chars_to_binary/1,
   redact_status/1,
-  redact_message/1
+  redact_message/1,
+  take_members/4,
+  escape_control/1
 ]).
 
 -include("instrument.hrl").
@@ -122,3 +124,49 @@ redact_status(Status) ->
 -spec redact_message(term()) -> term().
 redact_message({register, Module, _Config}) -> {register, Module, redacted};
 redact_message(Msg) -> Msg.
+
+%% @doc The first members of a separated header value, at most `MaxCount'
+%% members and `MaxBytes' bytes of them. Splits one member at a time, so the
+%% rest of an oversized header is never scanned or copied. Empty members are
+%% skipped.
+-spec take_members(binary(), binary(), non_neg_integer(), non_neg_integer()) -> [binary()].
+take_members(Bin, Sep, MaxCount, MaxBytes) ->
+  take_members(Bin, Sep, MaxCount, MaxBytes, []).
+
+take_members(<<>>, _Sep, _Count, _Bytes, Acc) ->
+  lists:reverse(Acc);
+take_members(_Bin, _Sep, 0, _Bytes, Acc) ->
+  lists:reverse(Acc);
+take_members(Bin, Sep, Count, Bytes, Acc) ->
+  {Member, Rest} = case binary:split(Bin, Sep) of
+                     [M, R] -> {M, R};
+                     [M] -> {M, <<>>}
+                   end,
+  case byte_size(Member) of
+    0 -> take_members(Rest, Sep, Count, Bytes, Acc);
+    Size when Size > Bytes -> lists:reverse(Acc);
+    Size -> take_members(Rest, Sep, Count - 1, Bytes - Size - 1, [Member | Acc])
+  end.
+
+%% @doc Escapes control characters so a text value stays on one line: `\n',
+%% `\r' and `\t' become two-character escapes, other control bytes and DEL
+%% become `\xHH'. Other bytes, including UTF-8, are unchanged.
+-spec escape_control(binary()) -> binary().
+escape_control(Bin) when is_binary(Bin) ->
+  case has_control(Bin) of
+    false -> Bin;
+    true -> << <<(escape_byte(C))/binary>> || <<C>> <= Bin >>
+  end.
+
+has_control(<<>>) -> false;
+has_control(<<C, _/binary>>) when C < 32; C =:= 127 -> true;
+has_control(<<_, Rest/binary>>) -> has_control(Rest).
+
+escape_byte($\n) -> <<"\\n">>;
+escape_byte($\r) -> <<"\\r">>;
+escape_byte($\t) -> <<"\\t">>;
+escape_byte(C) when C < 32; C =:= 127 ->
+  Hex = string:lowercase(integer_to_binary(C, 16)),
+  Pad = case byte_size(Hex) of 1 -> <<"0">>; _ -> <<>> end,
+  <<"\\x", Pad/binary, Hex/binary>>;
+escape_byte(C) -> <<C>>.

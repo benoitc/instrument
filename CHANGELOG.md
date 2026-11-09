@@ -5,6 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [2.0.0] - Unreleased
 
 ### Breaking
+- `instrument` now declares `hackney` as an application dependency. Start
+  it with `application:ensure_all_started(instrument)` (releases do this
+  already); `application:start(instrument)` alone returns `not_started`.
 - Labeled meter metrics now export under the instrument's own name, with the
   attributes as labels. A counter `requests` written with `method` and
   `status` used to export as `requests_method_status_total`; it now exports as
@@ -57,6 +60,16 @@ All notable changes to this project will be documented in this file.
   avoids exporting spans twice when a processor is also configured.
 
 ### Fixed
+- OTLP export works without starting `hackney` by hand: it was not listed as
+  a dependency, so in a release it could be missing or not started and every
+  export failed silently.
+- OTLP collector responses are read up to 64 KB. Without a limit a broken or
+  malicious collector could make the node hold up to 512 MB per request.
+- Oversized `traceparent`, `tracestate`, `baggage` and `b3` headers are
+  ignored or cut at their limits before being parsed, instead of being split
+  in full first.
+- The text log format escapes control characters in messages, so a message
+  carrying request data cannot fake additional log lines.
 - Creating new label sets no longer slows down as a node accumulates series.
   Each new series used to add two `persistent_term` keys, and every key
   added copies the VM's whole key table; cells are now created ahead of time

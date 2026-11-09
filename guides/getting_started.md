@@ -22,10 +22,10 @@ Add instrument to your `rebar.config`:
 
 ## Starting the Application
 
-Instrument starts automatically when included as a dependency. You can also start it manually:
+Instrument starts automatically when included as a dependency. You can also start it manually, together with the applications it depends on (hackney, for OTLP export):
 
 ```erlang
-application:start(instrument).
+{ok, _} = application:ensure_all_started(instrument).
 ```
 
 ## Your First Metrics

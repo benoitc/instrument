@@ -47,7 +47,7 @@ end_per_suite(_Config) ->
   ok.
 
 init_per_testcase(_TC, Config) ->
-  ok = application:start(instrument),
+  {ok, _} = application:ensure_all_started(instrument),
   Config.
 
 end_per_testcase(_TC, _Config) ->
