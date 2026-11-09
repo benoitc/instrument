@@ -111,7 +111,8 @@ too_many_crashes_stop_the_app(_Config) ->
   Ref = monitor(process, whereis(instrument_sup)),
   kill_repeatedly(instrument_log_exporter, 11),
   receive {'DOWN', Ref, process, _, _} -> ok after 30000 -> ct:fail(sup_still_running) end,
-  ?assertNot(app_running()),
+  %% The application controller handles the supervisor's exit right after.
+  ?assertNot(wait_until(fun app_running/0, fun(Running) -> not Running end, 10000)),
   ok.
 
 %% ============================================================================
