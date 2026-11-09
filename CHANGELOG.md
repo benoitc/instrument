@@ -32,6 +32,9 @@ All notable changes to this project will be documented in this file.
   (description, unit) and no callback of their own, to be fed this way.
 
 ### Changed
+- Require `hackney` 4.10 or newer (`~> 4.10`). Releases before 4.9.0 are
+  affected by security advisories, which the previous `~> 4.4` range still
+  allowed.
 - Creating an instrument or writing a new label set no longer goes through the
   registry process and no longer triggers a garbage collection pass across the
   whole VM. Bursts of new label values used to queue every writer behind the
