@@ -169,11 +169,11 @@ All notable changes to this project will be documented in this file.
   reopening its file.
 
 ### Removed
-- `instrument_registry:lookup_label/2`, `cache_label/3`,
-  `create_vector_metric/2` and `get_or_create_overflow/1`.
-- `instrument_lib:table/0` and `tables/0`, along with the per-scheduler
+- `instrument_registry:lookup_label`, `cache_label`,
+  `create_vector_metric` and `get_or_create_overflow`.
+- `instrument_lib:table` and `tables`, along with the per-scheduler
   registry tables.
-- `instrument_vector:collect/1`.
+- `instrument_vector:collect`.
 
 ## [1.1.5] - 2026-07-18
 
