@@ -183,37 +183,28 @@ force_flush() ->
 init([]) ->
   %% Initialize processor cache (empty list initially)
   persistent_term:put(?PROCESSORS_CACHE_KEY, []),
+  %% Processors registered before a crash are registered again once init has
+  %% returned: starting the batch processor calls instrument_sup, which is
+  %% still waiting for this init while it restarts children.
+  case instrument_registrations:list(span_processor) of
+    [] -> ok;
+    _ -> self() ! restore_processors
+  end,
   {ok, #state{processors = []}}.
 
 handle_call({register, ProcessorModule, Config}, _From, State) ->
-  %% Batch processor needs its own gen_server for timers and async handling
-  case ProcessorModule of
-    instrument_span_processor_batch ->
-      case start_batch_processor(Config) of
-        {ok, _Pid} ->
-          %% Store with a marker that it's externally managed
-          NewProcessors = [{ProcessorModule, external} | State#state.processors],
-          NewState = State#state{processors = NewProcessors},
-          refresh_processor_cache(NewState),
-          {reply, ok, NewState};
-        {error, Reason} ->
-          {reply, {error, Reason}, State}
-      end;
-    _ ->
-      case ProcessorModule:init(Config) of
-        {ok, ProcessorState} ->
-          NewProcessors = [{ProcessorModule, ProcessorState} | State#state.processors],
-          NewState = State#state{processors = NewProcessors},
-          refresh_processor_cache(NewState),
-          {reply, ok, NewState};
-        {error, Reason} ->
-          {reply, {error, Reason}, State}
-      end
+  case do_register(ProcessorModule, Config, State) of
+    {ok, NewState} ->
+      ok = instrument_registrations:put(span_processor, ProcessorModule, Config),
+      {reply, ok, NewState};
+    {error, _} = Error ->
+      {reply, Error, State}
   end;
 
 handle_call({unregister, ProcessorModule}, _From, State) ->
   case lists:keyfind(ProcessorModule, 1, State#state.processors) of
     {ProcessorModule, external} ->
+      ok = instrument_registrations:delete(span_processor, ProcessorModule),
       %% Stop externally managed gen_server (batch processor)
       instrument_lib:safe_apply(ProcessorModule, shutdown, [], ok),
       instrument_lib:safe_call(fun() -> stop_batch_processor() end, ok),
@@ -222,6 +213,7 @@ handle_call({unregister, ProcessorModule}, _From, State) ->
       refresh_processor_cache(NewState),
       {reply, ok, NewState};
     {ProcessorModule, ProcessorState} ->
+      ok = instrument_registrations:delete(span_processor, ProcessorModule),
       instrument_lib:safe_apply(ProcessorModule, shutdown, [ProcessorState], ok),
       NewProcessors = lists:keydelete(ProcessorModule, 1, State#state.processors),
       NewState = State#state{processors = NewProcessors},
@@ -266,7 +258,10 @@ handle_call(shutdown, _From, State) ->
     end,
     State#state.processors
   ),
-  {reply, ok, State#state{processors = []}};
+  ok = instrument_registrations:clear(span_processor),
+  NewState = State#state{processors = []},
+  refresh_processor_cache(NewState),
+  {reply, ok, NewState};
 
 handle_call(force_flush, _From, State) ->
   lists:foreach(
@@ -304,6 +299,17 @@ handle_cast({on_end, Span}, State) ->
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
+handle_info(restore_processors, State) ->
+  NewState = lists:foldl(fun({Module, Config}, Acc) ->
+      case do_register(Module, Config, Acc) of
+        {ok, Acc1} -> Acc1;
+        {error, Reason} ->
+          logger:warning("Could not restore span processor ~p: ~p", [Module, Reason]),
+          Acc
+      end
+    end, State, instrument_registrations:list(span_processor)),
+  {noreply, NewState};
+
 handle_info(_Info, State) ->
   {noreply, State}.
 
@@ -327,7 +333,26 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Functions
 %% ============================================================================
 
-%% @private Start batch processor under the instrument supervisor
+%% Batch processor needs its own gen_server for timers and async handling;
+%% other processors keep their state here.
+do_register(instrument_span_processor_batch = Module, Config, State) ->
+  case start_batch_processor(Config) of
+    {ok, _Pid} -> {ok, add_processor({Module, external}, State)};
+    {error, Reason} -> {error, Reason}
+  end;
+do_register(Module, Config, State) ->
+  case Module:init(Config) of
+    {ok, ProcessorState} -> {ok, add_processor({Module, ProcessorState}, State)};
+    {error, Reason} -> {error, Reason}
+  end.
+
+add_processor({Module, _} = Entry, #state{processors = Processors} = State) ->
+  NewState = State#state{processors = [Entry | lists:keydelete(Module, 1, Processors)]},
+  refresh_processor_cache(NewState),
+  NewState.
+
+%% @private Start batch processor under the instrument supervisor. After a
+%% restart of this manager the supervisor may already be running it.
 start_batch_processor(Config) ->
   %% Set shutdown timeout based on export_timeout_millis plus buffer
   ExportTimeout = maps:get(export_timeout_millis, Config, 30000),
@@ -340,7 +365,17 @@ start_batch_processor(Config) ->
     type => worker,
     modules => [instrument_span_processor_batch]
   },
-  supervisor:start_child(instrument_sup, ChildSpec).
+  case supervisor:start_child(instrument_sup, ChildSpec) of
+    {error, {already_started, Pid}} -> {ok, Pid};
+    {error, already_present} ->
+      case supervisor:restart_child(instrument_sup, instrument_span_processor_batch) of
+        {error, running} -> {ok, whereis(instrument_span_processor_batch)};
+        {ok, Pid, _Info} -> {ok, Pid};
+        Other -> Other
+      end;
+    Other ->
+      Other
+  end.
 
 %% @private Stop batch processor
 stop_batch_processor() ->

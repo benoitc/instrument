@@ -169,13 +169,24 @@ init([]) ->
     max_queue => max_queue(),
     export_timeout => export_timeout()
   }),
-  {ok, #state{batcher = Batcher, hook_fun = HookFun}}.
+  %% After a restart, initialize the exporters registered before the crash.
+  B = lists:foldl(fun({Module, Config}, Acc) ->
+        case instrument_lib:safe_apply(Module, init, [Config], error) of
+          {ok, S} ->
+            instrument_export_batcher:add_exporter(
+              #{module => Module, config => Config, state => S}, Acc);
+          _ ->
+            Acc
+        end
+      end, Batcher, instrument_registrations:list(span_exporter)),
+  {ok, update_hook(#state{batcher = B, hook_fun = HookFun})}.
 
 handle_call({register, Module, Config}, _From, #state{batcher = B} = State) ->
   case Module:init(Config) of
     {ok, ExporterState} ->
       Exporter = #{module => Module, config => Config, state => ExporterState},
       B1 = instrument_export_batcher:add_exporter(Exporter, B),
+      ok = instrument_registrations:put(span_exporter, Module, Config),
       {reply, ok, update_hook(State#state{batcher = B1})};
     {error, Reason} ->
       {reply, {error, Reason}, State}
@@ -186,6 +197,7 @@ handle_call({unregister, Module}, _From, #state{batcher = B} = State) ->
   lists:foreach(fun(#{module := M, state := S}) ->
     instrument_lib:safe_apply(M, shutdown, [S], ok)
   end, Removed),
+  ok = instrument_registrations:delete(span_exporter, Module),
   {reply, ok, update_hook(State#state{batcher = B1})};
 
 handle_call(list, _From, #state{batcher = B} = State) ->
@@ -197,6 +209,7 @@ handle_call(flush, From, #state{batcher = B} = State) ->
 
 handle_call(shutdown, _From, #state{batcher = B} = State) ->
   B1 = instrument_export_batcher:shutdown_exporters(instrument_export_batcher:drain(B)),
+  ok = instrument_registrations:clear(span_exporter),
   {reply, ok, update_hook(State#state{batcher = B1})};
 
 handle_call(_Request, _From, State) ->
