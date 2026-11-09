@@ -169,8 +169,7 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 instrument_exporter:register(instrument_exporter_otlp:new(#{
     endpoint => "https://otel.example.com:4318",
     headers => #{
-        <<"Authorization">> => <<"Bearer your-api-key">>,
-        <<"X-Custom-Header">> => <<"value">>
+        <<"Authorization">> => <<"Bearer ", (list_to_binary(os:getenv("OTLP_TOKEN")))/binary>>
     }
 })).
 ```
@@ -281,7 +280,7 @@ instrument_metrics_exporter:register(instrument_metrics_exporter_otlp:new(#{
 instrument_metrics_exporter:register(instrument_metrics_exporter_otlp:new(#{
     endpoint => "https://otel.example.com:4318",
     headers => #{
-        <<"Authorization">> => <<"Bearer your-api-key">>
+        <<"Authorization">> => <<"Bearer ", (list_to_binary(os:getenv("OTLP_TOKEN")))/binary>>
     }
 })).
 ```
@@ -442,7 +441,7 @@ instrument_log_exporter:register(instrument_log_exporter_otlp:new(#{
 instrument_log_exporter:register(instrument_log_exporter_otlp:new(#{
     endpoint => "https://otel.example.com:4318",
     headers => #{
-        <<"Authorization">> => <<"Bearer your-api-key">>
+        <<"Authorization">> => <<"Bearer ", (list_to_binary(os:getenv("OTLP_TOKEN")))/binary>>
     },
     compression => gzip
 })).
@@ -497,8 +496,8 @@ You can create custom exporters by implementing the exporter behaviour.
 %% Config is the map passed during registration
 -spec init(Config :: map()) -> {ok, State} | {error, Reason}.
 init(Config) ->
-    %% Setup your exporter
-    {ok, #state{...}}.
+    %% Keep what export/2 needs in the state
+    {ok, #{endpoint => maps:get(endpoint, Config)}}.
 
 %% Export a batch of spans
 %% Called periodically or when batch is full
@@ -591,7 +590,8 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 })),
 
 %% Custom exporter for specific needs
-instrument_exporter:register(my_custom_exporter:new(#{...})).
+instrument_exporter:register(#{module => my_exporter,
+                               config => #{endpoint => "http://backend:9000"}}).
 ```
 
 ### Listing Exporters
@@ -777,14 +777,19 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 
 Most cloud observability platforms support OTLP. The pattern is similar: provide the endpoint URL and authentication headers.
 
+Read endpoints and keys from the environment instead of writing them in code:
+
+```erlang
+env(Name) -> list_to_binary(os:getenv(Name)).
+```
+
 **Generic OTLP Pattern:**
 
 ```erlang
 instrument_exporter:register(instrument_exporter_otlp:new(#{
-    endpoint => "https://otlp.your-provider.com:4318",
+    endpoint => os:getenv("OTLP_ENDPOINT"),
     headers => #{
-        <<"Authorization">> => <<"Bearer your-api-key">>,
-        <<"X-Custom-Header">> => <<"value">>
+        <<"Authorization">> => <<"Bearer ", (env("OTLP_TOKEN"))/binary>>
     },
     compression => gzip
 })).
@@ -796,7 +801,7 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 instrument_exporter:register(instrument_exporter_otlp:new(#{
     endpoint => "https://trace.agent.datadoghq.com:4318",
     headers => #{
-        <<"DD-API-KEY">> => <<"your-datadog-api-key">>
+        <<"DD-API-KEY">> => env("DD_API_KEY")
     }
 })).
 ```
@@ -807,8 +812,8 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 instrument_exporter:register(instrument_exporter_otlp:new(#{
     endpoint => "https://api.honeycomb.io:443",
     headers => #{
-        <<"x-honeycomb-team">> => <<"your-api-key">>,
-        <<"x-honeycomb-dataset">> => <<"your-dataset">>
+        <<"x-honeycomb-team">> => env("HONEYCOMB_API_KEY"),
+        <<"x-honeycomb-dataset">> => env("HONEYCOMB_DATASET")
     }
 })).
 ```
@@ -819,7 +824,7 @@ instrument_exporter:register(instrument_exporter_otlp:new(#{
 instrument_exporter:register(instrument_exporter_otlp:new(#{
     endpoint => "https://otlp.nr-data.net:4318",
     headers => #{
-        <<"api-key">> => <<"your-license-key">>
+        <<"api-key">> => env("NEW_RELIC_LICENSE_KEY")
     }
 })).
 ```
@@ -831,8 +836,10 @@ Configure endpoints via environment variables for flexibility across environment
 ```bash
 export OTEL_TRACES_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel-collector:4318"
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer token"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20${OTLP_TOKEN}"
 ```
+
+Headers are `key=value` pairs separated by commas, with values percent-encoded (`%20` for a space). `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `_METRICS_HEADERS` and `_LOGS_HEADERS` override them for one signal. They apply to exporters registered from these variables.
 
 With `OTEL_TRACES_EXPORTER` set, spans go through the batch span processor, tuned by the `OTEL_BSP_*` variables. When several exporters are listed, the first goes through the batch processor and the others through the exporter manager.
 

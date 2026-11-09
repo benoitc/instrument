@@ -29,6 +29,7 @@
   batch_processor_config_test/1,
   batch_processor_invalid_env_test/1,
   metric_export_interval_test/1,
+  otlp_headers_test/1,
   otlp_endpoint_test/1,
   otlp_signal_endpoints_test/1,
   log_level_test/1,
@@ -56,6 +57,7 @@ all() ->
     batch_processor_config_test,
     batch_processor_invalid_env_test,
     metric_export_interval_test,
+    otlp_headers_test,
     otlp_endpoint_test,
     otlp_signal_endpoints_test,
     log_level_test,
@@ -99,6 +101,8 @@ clear_otel_env() ->
     "OTEL_BSP_MAX_EXPORT_BATCH_SIZE",
     "OTEL_BSP_EXPORT_TIMEOUT",
     "OTEL_METRIC_EXPORT_INTERVAL",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
     "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
@@ -405,4 +409,17 @@ exporter_toggle_test(_Config) ->
   ok = instrument_config:enable_exporter(another_fake_exporter),
   ?assertEqual(true,
                instrument_config:is_exporter_enabled(another_fake_exporter)),
+  ok.
+
+%% OTEL_EXPORTER_OTLP_HEADERS, with per-signal override and percent-decoding.
+otlp_headers_test(_Config) ->
+  ?assertEqual(#{}, instrument_config:get_otlp_headers(traces)),
+  os:putenv("OTEL_EXPORTER_OTLP_HEADERS",
+            "Authorization=Bearer%20abc, x-team = ops ,broken,=nokey"),
+  ?assertEqual(#{<<"Authorization">> => <<"Bearer abc">>, <<"x-team">> => <<"ops">>},
+               instrument_config:get_otlp_headers(metrics)),
+  os:putenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "api-key=k1"),
+  ?assertEqual(#{<<"api-key">> => <<"k1">>}, instrument_config:get_otlp_headers(traces)),
+  ?assertEqual(#{<<"Authorization">> => <<"Bearer abc">>, <<"x-team">> => <<"ops">>},
+               instrument_config:get_otlp_headers(logs)),
   ok.

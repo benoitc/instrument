@@ -35,9 +35,9 @@ order_service/
 ```erlang
 %% rebar.config
 {deps, [
-    {instrument, "0.3.0"},
+    {instrument, "~> 2.0"},
     {cowboy, "2.10.0"},
-    {hackney, "1.20.1"},
+    {hackney, "~> 4.4"},
     {jiffy, "1.1.1"}
 ]}.
 ```

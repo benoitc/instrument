@@ -413,7 +413,7 @@ Carrier = #{},
 Carrier2 = instrument_propagation:inject(Ctx, Carrier).
 
 %% Extract from any carrier map
-Carrier = #{<<"traceparent">> => Value, ...},
+Carrier = #{<<"traceparent">> => TraceParent, <<"tracestate">> => TraceState},
 Ctx = instrument_propagation:extract(Carrier).
 
 %% Or extract into existing context

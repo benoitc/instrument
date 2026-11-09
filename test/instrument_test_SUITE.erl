@@ -465,11 +465,21 @@ metrics_otel_tuple_name_matching(_Config) ->
 %% Log Tests
 %% ============================================================================
 
+%% A log emitted through the logger integration reaches the test collector.
 log_collection(_Config) ->
-    %% The log collector is set up but logs come from instrument_logger
-    %% For now just verify the collector infrastructure works
-    Logs = instrument_test:get_logs(),
-    true = is_list(Logs),
+    ok = instrument_logger:install(#{filter => false, exporter => true}),
+    try
+        %% warning: the primary logger level may filter info under common_test
+        instrument_logger:emit(warning, "collected by the test exporter"),
+        ok = instrument_log_exporter:flush(),
+        Logs = instrument_test:get_logs(),
+        true = lists:any(fun(#log_record{body = Body}) ->
+                             string:find(iolist_to_binary(io_lib:format("~ts", [Body])),
+                                         <<"collected by the test exporter">>) =/= nomatch
+                         end, Logs)
+    after
+        instrument_logger:uninstall()
+    end,
     ok.
 
 log_assert_exists(_Config) ->

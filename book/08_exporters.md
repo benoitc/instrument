@@ -67,7 +67,7 @@ Or programmatically:
 %% Configure OTLP exporter
 Exporter = instrument_exporter_otlp:new(#{
     endpoint => "http://localhost:4318/v1/traces",
-    headers => [{<<"Authorization">>, <<"Bearer token">>}]
+    headers => #{<<"Authorization">> => list_to_binary(os:getenv("OTLP_AUTH"))}
 }).
 ```
 
