@@ -5,7 +5,7 @@
 
 {application, instrument,
  [{description, "Fast metrics library for Erlang with Prometheus export and OpenTelemetry support"},
-  {vsn, "1.1.5"},
+  {vsn, "2.0.0"},
   {registered, [instrument_sup, instrument_table_owner, instrument_registry,
                 instrument_exporter, instrument_metrics_exporter,
                 instrument_log_exporter, instrument_span_processor,
