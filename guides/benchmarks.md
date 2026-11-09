@@ -16,9 +16,33 @@ erl -pa _build/default/lib/*/ebin -noshell -eval \
 # Run client tracing strategy benchmarks
 erl -pa _build/default/lib/*/ebin -noshell -eval \
   "c:c(\"bench/instrument_client_bench.erl\"), instrument_client_bench:run(), halt()."
+
+# Compare the series store between two builds (same compiled module)
+erlc -o /tmp/bench -I include bench/instrument_series_bench.erl
+escript bench/run_series_bench.escript hot   _build/default/lib /tmp/bench /tmp/hot.json
+escript bench/run_series_bench.escript storm _build/default/lib /tmp/bench /tmp/storm.json
 ```
 
-## Results
+## 2.0 Compared With 1.1.5
+
+Apple M4 Pro, OTP 29, 14 schedulers (November 2026). Steady-state rows are medians of five runs of one million operations after warm-up; each build was measured twice.
+
+| Operation | 1.1.5 | 2.0 |
+|-----------|-------|-----|
+| Labeled meter write, `add/3` with 2 attributes | 325 ns | 122 ns |
+| Labeled histogram write, `record/3` | 766 ns | 625 ns |
+| Unlabeled meter write, `add/2` | 15 ns | 21 ns |
+| Vector increment by name, `inc_counter_vec/3` | 70 ns | 50 ns |
+| Simple API increment on a held record | 21 ns | 20 ns |
+| Scrape of 2,000 series (`collect` + Prometheus format) | 1.9 ms | 2.3 ms |
+| Span start and end with the batch processor | 5.7 µs | 1.6 µs |
+| 32 processes creating 500 new label sets each | timed out, VM stopped | 0.2 to 0.3 s |
+
+Creating new series stays at about 5 µs per series from 10,000 to 200,000 series (100 metrics), using about 1,000 `persistent_term` keys in total. At 100,000 series the store uses about 150 MB, part of it in ETS; each process that writes label sets keeps a cache of about 220 bytes per label set it has written.
+
+Scrapes are slightly slower: each series' labels are now read from ETS, and one family carries every label combination of an instrument.
+
+## Results (1.x)
 
 Benchmarks run on Apple M1 Pro, OTP 28, 100,000 iterations per test (April 2026).
 

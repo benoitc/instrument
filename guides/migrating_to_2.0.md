@@ -75,4 +75,4 @@ These internal functions are gone. If you called them, switch to the public API:
 ## Notes
 
 - Upgrading a running node in place from 1.x cleans the old internal state when the registry starts.
-- Labeled writes are about twice as fast. Unlabeled meter writes are slower by a few tens of nanoseconds. If an unlabeled counter is on a very hot path, use the simple API (`instrument_metric:new_counter/2` and `inc_counter/1`), which writes to the counter directly.
+- Labeled writes are more than twice as fast. Unlabeled meter writes take about 21 ns instead of 15 ns; the simple API (`instrument_metric:new_counter/2` and `inc_counter/1`) stays at about 20 ns. See [Benchmarks](benchmarks.md).

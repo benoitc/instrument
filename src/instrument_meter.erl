@@ -222,12 +222,12 @@ add(Instrument, Value) ->
 %% @doc Adds a value to a Counter or UpDownCounter with attributes.
 -spec add(instrument(), number(), map()) -> any().
 %% Unlabeled fast path (no attrs): bare kind/value, no per-call closures.
-add(#otel_instrument{kind = counter, handle = RegName}, Value, Attrs)
+add(#otel_instrument{kind = counter} = I, Value, Attrs)
     when is_number(Value), Value >= 0, map_size(Attrs) =:= 0 ->
-  instrument_series:write_unlabeled(RegName, counter, Value);
-add(#otel_instrument{kind = up_down_counter, handle = RegName}, Value, Attrs)
+  unlabeled(I, counter, Value);
+add(#otel_instrument{kind = up_down_counter} = I, Value, Attrs)
     when is_number(Value), map_size(Attrs) =:= 0 ->
-  instrument_series:write_unlabeled(RegName, up_down_counter, Value);
+  unlabeled(I, up_down_counter, Value);
 %% Labeled path (unchanged behavior; map_size guard made explicit).
 add(#otel_instrument{kind = counter, handle = RegName}, Value, Attrs)
     when is_number(Value), Value >= 0, map_size(Attrs) > 0 ->
@@ -241,6 +241,24 @@ add(#otel_instrument{kind = up_down_counter, handle = RegName}, Value, Attrs)
 add(_, _, _) ->
   {error, invalid_operation}.
 
+%% Unlabeled write through the cell held by the instrument. A slot that is not
+%% live (never written, cleared, or the metric was removed) goes through the
+%% series store, which creates or revives the series, or reaches a metric
+%% re-created under the same name.
+unlabeled(#otel_instrument{unlabeled = {Epochs, Cell}, handle = RegName}, Kind, Value) ->
+  case atomics:get(Epochs, 1) band 1 of
+    1 -> write_cell(Kind, Cell, Value);
+    0 -> instrument_series:write_unlabeled(RegName, Kind, Value)
+  end;
+unlabeled(#otel_instrument{handle = RegName}, Kind, Value) ->
+  instrument_series:write_unlabeled(RegName, Kind, Value).
+
+write_cell(counter, Cell, V)                     -> instrument_counter:inc_counter(Cell, V);
+write_cell(up_down_counter, Cell, V) when V >= 0 -> instrument_gauge:inc_gauge(Cell, V);
+write_cell(up_down_counter, Cell, V)             -> instrument_gauge:dec_gauge(Cell, -V);
+write_cell(gauge, Cell, V)                       -> instrument_gauge:set_gauge(Cell, V);
+write_cell(histogram, Cell, V)                   -> instrument_histogram:observe_histogram(Cell, V).
+
 %% @doc Records a value in a Histogram.
 -spec record(instrument(), number()) -> ok.
 record(Instrument, Value) ->
@@ -248,9 +266,9 @@ record(Instrument, Value) ->
 
 %% @doc Records a value in a Histogram with attributes.
 -spec record(instrument(), number(), map()) -> any().
-record(#otel_instrument{kind = histogram, handle = RegName}, Value, Attrs)
+record(#otel_instrument{kind = histogram} = I, Value, Attrs)
     when is_number(Value), map_size(Attrs) =:= 0 ->
-  instrument_series:write_unlabeled(RegName, histogram, Value);
+  unlabeled(I, histogram, Value);
 record(#otel_instrument{kind = histogram, handle = RegName}, Value, Attrs)
     when is_number(Value), map_size(Attrs) > 0 ->
   do_write(RegName, Attrs, fun(R) -> instrument_histogram:observe_histogram(R, Value) end);
@@ -264,9 +282,9 @@ set(Instrument, Value) ->
 
 %% @doc Sets a value on a Gauge with attributes.
 -spec set(instrument(), number(), map()) -> any().
-set(#otel_instrument{kind = gauge, handle = RegName}, Value, Attrs)
+set(#otel_instrument{kind = gauge} = I, Value, Attrs)
     when is_number(Value), map_size(Attrs) =:= 0 ->
-  instrument_series:write_unlabeled(RegName, gauge, Value);
+  unlabeled(I, gauge, Value);
 set(#otel_instrument{kind = gauge, handle = RegName}, Value, Attrs)
     when is_number(Value), map_size(Attrs) > 0 ->
   do_write(RegName, Attrs, fun(R) -> instrument_gauge:set_gauge(R, Value) end);
@@ -481,7 +499,7 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_m
   case get_instrument(Name) of
     undefined ->
       RegName = {otel, Name},
-      register_family(RegName, Kind, Description, Opts),
+      #family{chunk0 = {Epochs, Rows}} = register_family(RegName, Kind, Description, Opts),
       Instrument = #otel_instrument{
         name = Name,
         kind = Kind,
@@ -489,7 +507,9 @@ create_instrument(#meter{} = Meter, Name, Kind, Opts) when is_binary(Name), is_m
         unit = Unit,
         meter = Meter,
         handle = RegName,
-        temporality = Temporality
+        temporality = Temporality,
+        %% slot 1 always holds the unlabeled series and is never reused
+        unlabeled = {Epochs, element(1, Rows)}
       },
       persistent_term:put({otel_instrument, Name}, Instrument),
       Instrument;
@@ -538,8 +558,7 @@ register_family(RegName, Kind, Description, Opts) ->
     _ -> Description
   end,
   Boundaries = family_boundaries(RegName, Kind, Opts),
-  _ = instrument_series:ensure_family(RegName, Kind, Help, undefined, Boundaries),
-  ok.
+  instrument_series:ensure_family(RegName, Kind, Help, undefined, Boundaries).
 
 family_boundaries({otel, Name}, histogram, Opts) ->
   Boundaries = case find_view_boundaries(Name) of
