@@ -65,10 +65,10 @@ These internal functions are gone. If you called them, switch to the public API:
 
 | Removed | Use instead |
 |---|---|
-| `instrument_registry:lookup_label/2`, `cache_label/3`, `create_vector_metric/2` | `instrument_metric:with_label/3,4` or `instrument_vector:get_or_create_label/2` |
-| `instrument_registry:get_or_create_overflow/1` | `instrument_registry:overflow_sentinel/1` |
-| `instrument_lib:table/0`, `tables/0` | nothing; the per-scheduler tables no longer exist |
-| `instrument_vector:collect/1` | `instrument_registry:collect_all/0` |
+| `instrument_registry:lookup_label`, `cache_label`, `create_vector_metric` | `instrument_metric:with_label/3,4` or `instrument_vector:get_or_create_label/2` |
+| `instrument_registry:get_or_create_overflow` | `instrument_registry:overflow_sentinel/1` |
+| `instrument_lib:table`, `tables` | nothing; the per-scheduler tables no longer exist |
+| `instrument_vector:collect` | `instrument_registry:collect_all/0` |
 
 `instrument_registry:lookup/1` still exists but returns metric metadata instead of the internal `#metric{}` record. Treat its result as opaque.
 

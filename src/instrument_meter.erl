@@ -285,10 +285,7 @@ get_instrument(Name) when is_binary(Name) ->
   Key = {otel_instrument, Name},
   persistent_term:get(Key, undefined).
 
-%% @doc Lists all registered instruments.
-%% Walks the series-store family chain and resolves the meter descriptor for
-%% every {otel, _} family name. The chain is the single source of truth — the
-%% old per-create `otel_instruments` pt list (and its sweep) is gone.
+%% @doc Lists all registered instruments, in creation order.
 -spec list_instruments() -> [instrument()].
 list_instruments() ->
   case persistent_term:get(instrument_family_seq, undefined) of

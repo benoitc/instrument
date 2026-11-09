@@ -275,8 +275,8 @@ cardinality_dropped(Name) ->
 %% has been hit (and the overflow series therefore created), `undefined'
 %% otherwise. The overflow series is an ordinary series-store row whose canon
 %% is the per-API overflow shape: for a vec family that is the declared label
-%% names (sorted) with every value <<"otel.metric.overflow">>; for a
-%% schema-free family it is {[<<"otel.metric.overflow">>], [<<"true">>]}. The
+%% names (sorted) with every value `<<"otel.metric.overflow">>'; for a
+%% schema-free family it is `{[<<"otel.metric.overflow">>], [<<"true">>]}'. The
 %% row carries the accumulated dropped writes, so callers can read its value.
 -spec overflow_sentinel(term()) -> #metric{} | undefined.
 overflow_sentinel(Name) ->
