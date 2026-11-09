@@ -143,8 +143,14 @@ parse_traceparent(Value, Ctx) ->
       Ctx
   end.
 
-format_trace_flags(0) -> <<"00">>;
-format_trace_flags(1) -> <<"01">>.
+%% Any flags byte round-trips as two lowercase hex digits (W3C level 2 adds
+%% the random-trace-id bit, 02).
+format_trace_flags(Flags) when is_integer(Flags) ->
+  F = Flags band 16#FF,
+  <<(hex_digit(F bsr 4)), (hex_digit(F band 16#F))>>.
+
+hex_digit(D) when D < 10 -> $0 + D;
+hex_digit(D) -> $a + D - 10.
 
 parse_trace_flags(<<"00">>) -> 0;
 parse_trace_flags(<<"01">>) -> 1;
@@ -168,6 +174,21 @@ encode_tracestate(TraceState) ->
   end, Limited),
   iolist_to_binary(lists:join(<<",">>, Parts)).
 
+%% Strip spaces and tabs around a member. Byte-wise, so a malformed (non
+%% UTF-8) header cannot raise and take the valid traceparent down with it.
+trim_ows(Bin) ->
+  trim_ows_right(trim_ows_left(Bin)).
+
+trim_ows_left(<<C, Rest/binary>>) when C =:= $\s; C =:= $\t -> trim_ows_left(Rest);
+trim_ows_left(Bin) -> Bin.
+
+trim_ows_right(<<>>) -> <<>>;
+trim_ows_right(Bin) ->
+  case binary:last(Bin) of
+    C when C =:= $\s; C =:= $\t -> trim_ows_right(binary:part(Bin, 0, byte_size(Bin) - 1));
+    _ -> Bin
+  end.
+
 decode_tracestate(Value) ->
   Parts = binary:split(Value, <<",">>, [global, trim_all]),
   Decoded = lists:filtermap(fun(Part) ->
@@ -175,7 +196,7 @@ decode_tracestate(Value) ->
       false -> false;
       true ->
         case binary:split(Part, <<"=">>, [trim_all]) of
-          [K, V] -> {true, {string:trim(K), string:trim(V)}};
+          [K, V] -> {true, {trim_ows(K), trim_ows(V)}};
           _ -> false
         end
     end

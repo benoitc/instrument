@@ -253,7 +253,7 @@ Events = instrument_flight_recorder:get_trace(TraceId).
 |---------|---------|---------|
 | `flight_recorder_buffer_size` | `65536` | Events kept in the buffer; the oldest are evicted |
 | `flight_recorder_max_queue` | `1000` | Events each worker may have waiting; extra events are dropped |
-| `flight_recorder_max_payload_bytes` | `1024` | Larger message payloads are stored as `{truncated, Size}`; `0` keeps only the size |
+| `flight_recorder_max_payload_bytes` | `1024` | Larger message payloads are stored as `{truncated, Size}`; `0` keeps only the size; at most 1 MB |
 | `flight_recorder_pool_size` | schedulers | Worker processes, from 1 to 1024 |
 
 These are read at startup. Values out of range are ignored with a warning and the default applies.
@@ -264,7 +264,7 @@ All events from one process go to the same worker, so a single process sending m
 #{dropped_events := Dropped, table_size := Size} = instrument_flight_recorder:stats().
 ```
 
-For large nested terms, `Size` in `{truncated, Size}` is a lower bound; for binaries it is exact.
+For large or deeply nested terms, and for funs and big integers, `Size` in `{truncated, Size}` is a lower bound; for binaries it is exact.
 
 ## Graceful Shutdown
 

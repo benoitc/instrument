@@ -20,7 +20,13 @@
   vec_aliases_are_bounded_and_removed/1,
   invalid_histogram_boundaries_fail_at_create/1,
   non_numbers_are_rejected_before_any_update/1,
-  registry_survives_unknown_call/1
+  registry_survives_unknown_call/1,
+  unicode_log_keeps_handler/1,
+  bad_header_names_are_skipped/1,
+  trace_flags_round_trip/1,
+  invalid_tracestate_keeps_traceparent/1,
+  invalid_utf8_is_encoded/1,
+  other_tracer_is_left_alone/1
 ]).
 
 all() ->
@@ -31,7 +37,13 @@ all() ->
    vec_aliases_are_bounded_and_removed,
    invalid_histogram_boundaries_fail_at_create,
    non_numbers_are_rejected_before_any_update,
-   registry_survives_unknown_call].
+   registry_survives_unknown_call,
+   unicode_log_keeps_handler,
+   bad_header_names_are_skipped,
+   trace_flags_round_trip,
+   invalid_tracestate_keeps_traceparent,
+   invalid_utf8_is_encoded,
+   other_tracer_is_left_alone].
 
 init_per_suite(Config) ->
   _ = application:ensure_all_started(crypto),
@@ -123,3 +135,60 @@ registry_survives_unknown_call(_Config) ->
   _ = sys:get_state(instrument_registry),
   ?assertEqual(Pid, whereis(instrument_registry)),
   ok.
+
+%% A log call whose output is not Latin-1 must not remove the handler.
+unicode_log_keeps_handler(_Config) ->
+  ok = instrument_logger:install(#{filter => false, exporter => true}),
+  try
+    logger:warning("user ~ts", [<<"日本"/utf8>>]),
+    logger:warning("bad format ~p ~p", [only_one]),
+    logger:warning("trace", #{trace_id => binary:copy(<<"z">>, 32)}),
+    ?assertMatch({ok, _}, logger:get_handler_config(instrument_log_exporter_handler))
+  after
+    instrument_logger:uninstall()
+  end.
+
+%% Headers come from the network; unreadable ones are skipped.
+bad_header_names_are_skipped(_Config) ->
+  TP = <<"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01">>,
+  Ctx = instrument_propagation:extract_headers(
+          [{<<"x-bad", 255>>, <<"v">>}, {[16#65E5], "v"}, not_a_pair,
+           {<<"Traceparent">>, TP}]),
+  ?assertMatch(#{span_ctx := _}, Ctx),
+  ok.
+
+%% Flags other than 00/01 (W3C level 2) are injected again, not dropped.
+trace_flags_round_trip(_Config) ->
+  TP = <<"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-03">>,
+  Ctx = instrument_propagation:extract(#{<<"traceparent">> => TP}),
+  Out = instrument_propagation:inject(Ctx, #{}),
+  ?assertEqual(TP, maps:get(<<"traceparent">>, Out)),
+  ok.
+
+invalid_tracestate_keeps_traceparent(_Config) ->
+  TP = <<"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01">>,
+  Ctx = instrument_propagation:extract(#{<<"traceparent">> => TP,
+                                         <<"tracestate">> => <<"a=", 255, ",b=ok">>}),
+  ?assertMatch(#{span_ctx := _}, Ctx),
+  ok.
+
+%% Invalid UTF-8 in a value no longer makes JSON encoding raise.
+invalid_utf8_is_encoded(_Config) ->
+  Json = iolist_to_binary(instrument_lib:json_encode(#{<<"k">> => <<"a", 255, "b">>})),
+  ?assertEqual(#{<<"k">> => <<"a", 16#EF, 16#BF, 16#BD, "b">>}, json:decode(Json)),
+  ok.
+
+%% A process traced by another tool keeps its tracer and flags.
+other_tracer_is_left_alone(_Config) ->
+  ok = instrument_flight_recorder:enable(),
+  Tracer = spawn(fun Loop() -> receive _ -> Loop() end end),
+  try
+    1 = erlang:trace(self(), true, [send, {tracer, Tracer}]),
+    instrument_tracer:with_span(<<"traced_elsewhere">>, fun() -> ok end),
+    ?assertEqual({flags, [send]}, erlang:trace_info(self(), flags)),
+    ?assertEqual({tracer, Tracer}, erlang:trace_info(self(), tracer))
+  after
+    erlang:trace(self(), false, [send]),
+    exit(Tracer, kill),
+    instrument_flight_recorder:disable()
+  end.

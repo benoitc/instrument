@@ -134,7 +134,7 @@ encode_spans(Spans) ->
   %% Group spans by resource and scope
   ResourceSpans = group_spans(Spans),
   Payload = #{<<"resourceSpans">> => ResourceSpans},
-  json:encode(Payload).
+  instrument_lib:json_encode(Payload).
 
 group_spans(Spans) ->
   %% For simplicity, group all spans under a single resource
@@ -247,16 +247,14 @@ encode_attribute(Key, Value) ->
 
 encode_attr_value(V) when is_binary(V) ->
   #{<<"stringValue">> => V};
+encode_attr_value(V) when is_boolean(V) ->
+  #{<<"boolValue">> => V};
 encode_attr_value(V) when is_atom(V) ->
   #{<<"stringValue">> => atom_to_binary(V, utf8)};
 encode_attr_value(V) when is_integer(V) ->
   #{<<"intValue">> => integer_to_binary(V)};
 encode_attr_value(V) when is_float(V) ->
   #{<<"doubleValue">> => V};
-encode_attr_value(true) ->
-  #{<<"boolValue">> => true};
-encode_attr_value(false) ->
-  #{<<"boolValue">> => false};
 encode_attr_value(V) when is_list(V) ->
   #{<<"arrayValue">> => #{<<"values">> => [encode_attr_value(E) || E <- V]}};
 encode_attr_value(V) ->

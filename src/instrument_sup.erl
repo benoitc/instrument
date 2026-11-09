@@ -14,6 +14,7 @@
 -export([init/1]).
 
 -define(SERVER, ?MODULE).
+-define(EXPORT_SHUTDOWN, 35000).
 
 %%====================================================================
 %% API functions
@@ -34,9 +35,12 @@ start_link() ->
 init([]) ->
   TableOwner = child_spec(worker, table_owner, instrument_table_owner, permanent, []),
   Registry = child_spec(worker, registry, instrument_registry, permanent, []),
-  Exporter = child_spec(worker, exporter, instrument_exporter, permanent, []),
+  %% Exporters drain on shutdown: allow one export plus margin.
+  Exporter = (child_spec(worker, exporter, instrument_exporter, permanent, []))#{
+               shutdown => ?EXPORT_SHUTDOWN},
   MetricsExporter = child_spec(worker, metrics_exporter, instrument_metrics_exporter, permanent, []),
-  LogExporter = child_spec(worker, log_exporter, instrument_log_exporter, permanent, []),
+  LogExporter = (child_spec(worker, log_exporter, instrument_log_exporter, permanent, []))#{
+                  shutdown => ?EXPORT_SHUTDOWN},
   SpanProcessor = child_spec(worker, span_processor, instrument_span_processor, permanent, []),
   TracerPool = child_spec(supervisor, tracer_pool, instrument_tracer_pool, permanent, []),
   FlightRecorder = child_spec(worker, flight_recorder, instrument_flight_recorder, permanent, []),

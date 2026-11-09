@@ -468,7 +468,8 @@ mark_preserved(Text, Patterns) ->
     end, {Text, []}, Patterns).
 
 mark_matches(Text, Markers, Matches, _Pattern) ->
-    lists:foldl(fun([Match], {Acc, M}) ->
+    %% A user pattern may have capture groups; the whole match comes first.
+    lists:foldl(fun([Match | _Groups], {Acc, M}) ->
         Marker = <<"__PRESERVE_", (integer_to_binary(length(M)))/binary, "__">>,
         NewAcc = binary:replace(Acc, Match, Marker, []),
         {NewAcc, [{Marker, Match} | M]}

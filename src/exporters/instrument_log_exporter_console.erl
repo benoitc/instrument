@@ -140,7 +140,7 @@ format_log_record_json(#log_record{
     <<"attributes">> => format_attributes_json(Attributes)
   },
   LogMap2 = add_trace_context_json(LogMap, TraceId, SpanId, TraceFlags),
-  [json:encode(LogMap2), "\n"].
+  [instrument_lib:json_encode(LogMap2), "\n"].
 
 ensure_timestamp(Ts) when is_integer(Ts) ->
   Ts;
@@ -225,7 +225,7 @@ format_attributes_text(Attrs) when map_size(Attrs) =:= 0 ->
   "";
 format_attributes_text(Attrs) ->
   try
-    [" ", json:encode(Attrs)]
+    [" ", instrument_lib:json_encode(Attrs)]
   catch
     _:_ ->
       io_lib:format(" ~p", [Attrs])

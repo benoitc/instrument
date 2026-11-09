@@ -54,6 +54,50 @@ All notable changes to this project will be documented in this file.
   avoids exporting spans twice when a processor is also configured.
 
 ### Fixed
+- A flight recorder message nested deeply enough (a long left-nested iolist)
+  could crash the whole VM when the payload limit was 64 KB or more; and
+  tracing a process that registers a name with `procs` hung the node. Both
+  are fixed, and the payload limit is capped at 1 MB.
+- Prometheus output is always valid: dotted OpenTelemetry names and unusual
+  label names are converted to the allowed characters (one such name used to
+  make Prometheus reject the whole scrape, and a crafted label name could
+  add lines), and one metric that cannot be rendered is skipped instead of
+  failing the scrape.
+- Label values of any type (IP address tuples, pids, non-Latin-1 strings)
+  no longer crash the code writing the metric.
+- Vector label values that print the same (floats differing past the sixth
+  decimal, strings versus binaries) no longer grow memory without bound, and
+  are removed with their series.
+- Calling `new_counter/2` and the like repeatedly for an existing metric no
+  longer makes every scrape slower.
+- Invalid histogram boundaries are rejected when the histogram is created,
+  instead of failing every recording; non-numbers are rejected before any
+  count changes; a gauge that overflows now saturates instead of becoming
+  unreadable.
+- One log call with non-Latin-1 text, a bad format, or a malformed trace id
+  in its metadata no longer removes the log export handler for the rest of
+  the node's life.
+- Header extraction skips unreadable headers instead of crashing the request
+  handler; an invalid `tracestate` no longer discards a valid `traceparent`;
+  trace flags other than 00 and 01 are propagated instead of dropped.
+- One invalid UTF-8 string in a span, log or metric no longer drops the whole
+  OTLP or JSON export batch; boolean attributes export as booleans.
+- Non-Latin-1 `OTEL_SERVICE_NAME`, `OTEL_SERVICE_VERSION` and resource
+  attributes no longer crash startup or drop all resource attributes;
+  `OTEL_RESOURCE_ATTRIBUTES` values are percent-decoded.
+- Flight tracing leaves processes traced by another tool (dbg, recon_trace)
+  untouched instead of switching their tracing off.
+- The simple and tail-sampling processors drop spans once 2048 exports are
+  waiting, and skip requests whose caller already gave up.
+- Exporter configuration, including authorization headers, no longer appears
+  in crash reports.
+- Queued spans and logs are exported when the application stops, and export
+  workers stop with it.
+- Exception details recorded on spans are printed with a depth limit.
+- `OTEL_EXPORTER_OTLP_HEADERS` (and its per-signal variants) is now applied
+  to OTLP exporters configured from the environment. It was documented but
+  ignored, so requests to authenticated collectors went out without
+  credentials.
 - A crash in any of instrument's processes no longer stops the whole
   application. Before, any single crash took it down, which in a release
   also stops the node. The crashed process is now restarted with the ones

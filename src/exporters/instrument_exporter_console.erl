@@ -190,7 +190,7 @@ format_span_json(#span{
     <<"status">> => format_status_json(Status)
   },
 
-  [json:encode(SpanMap), "\n"].
+  [instrument_lib:json_encode(SpanMap), "\n"].
 
 format_duration(Nanos) when Nanos < 1000 ->
   io_lib:format("~Bns", [Nanos]);

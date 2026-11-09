@@ -143,5 +143,6 @@ parse_sampling(Carrier) ->
   end.
 
 %% Format trace_flags to X-B3-Sampled value
-format_sampled(0) -> <<"0">>;
-format_sampled(1) -> <<"1">>.
+%% Only the sampled bit maps to B3; other W3C flag bits are ignored.
+format_sampled(Flags) when Flags band 1 =:= 1 -> <<"1">>;
+format_sampled(_) -> <<"0">>.

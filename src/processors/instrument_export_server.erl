@@ -28,13 +28,20 @@
   handle_cast/2,
   handle_info/2,
   terminate/2,
-  code_change/3
+  code_change/3,
+  format_status/1
 ]).
 
 -record(state, {
+  name :: atom(),
   exporter :: module(),
   exporter_state :: term()
 }).
+
+%% At most this many export requests wait for the server; past it, spans are
+%% dropped in the calling process instead of piling up while the exporter is
+%% slow.
+-define(MAX_PENDING, 2048).
 
 %% @doc Starts a server registered as `Name' for `Exporter', supervised by
 %% instrument_sup when it is running.
@@ -43,7 +50,7 @@ start(Name, Exporter, ExporterConfig, Timeout) ->
   Spec = #{
     id => {?MODULE, Name},
     start => {gen_server, start_link,
-              [{local, Name}, ?MODULE, {Exporter, ExporterConfig}, []]},
+              [{local, Name}, ?MODULE, {Name, Exporter, ExporterConfig}, []]},
     restart => transient,
     shutdown => Timeout + 5000,
     type => worker,
@@ -52,7 +59,7 @@ start(Name, Exporter, ExporterConfig, Timeout) ->
   _ = stop(Name),
   Result = case whereis(instrument_sup) of
              undefined ->
-               gen_server:start({local, Name}, ?MODULE, {Exporter, ExporterConfig}, []);
+               gen_server:start({local, Name}, ?MODULE, {Name, Exporter, ExporterConfig}, []);
              _ ->
                supervisor:start_child(instrument_sup, Spec)
            end,
@@ -79,7 +86,17 @@ stop(Name) ->
 %% server is missing or the export times out.
 -spec export(atom(), [term()], timeout()) -> ok.
 export(Name, Spans, Timeout) ->
-  instrument_lib:safe_call(fun() -> gen_server:call(Name, {export, Spans}, Timeout) end, ok).
+  case instrument_admission:admit({?MODULE, Name}, 1) of
+    false ->
+      ok;
+    true ->
+      %% A caller that gave up is not waited for: the server skips requests
+      %% past their deadline.
+      Deadline = erlang:monotonic_time(millisecond) + Timeout,
+      instrument_lib:safe_call(fun() ->
+        gen_server:call(Name, {export, Spans, Deadline}, Timeout)
+      end, ok)
+  end.
 
 -spec force_flush(atom(), timeout()) -> ok.
 force_flush(Name, Timeout) ->
@@ -89,17 +106,35 @@ force_flush(Name, Timeout) ->
 %% gen_server callbacks
 %% ============================================================================
 
-init({Exporter, ExporterConfig}) ->
+init({Name, Exporter, ExporterConfig}) ->
   %% Trap exits so terminate/2 shuts the exporter down on supervisor stop.
   process_flag(trap_exit, true),
+  ok = instrument_admission:init({?MODULE, Name}, ?MAX_PENDING),
   case Exporter:init(ExporterConfig) of
     {ok, ExporterState} ->
-      {ok, #state{exporter = Exporter, exporter_state = ExporterState}};
+      {ok, #state{name = Name, exporter = Exporter, exporter_state = ExporterState}};
     {error, Reason} ->
       {stop, Reason}
   end.
 
-handle_call({export, Spans}, _From, #state{exporter = E, exporter_state = S} = State) ->
+handle_call({export, Spans, Deadline}, _From, #state{name = Name} = State) ->
+  ok = instrument_admission:release({?MODULE, Name}, 1),
+  case erlang:monotonic_time(millisecond) > Deadline of
+    true -> {reply, ok, State};
+    false -> {reply, ok, do_export(Spans, State)}
+  end;
+
+handle_call(force_flush, _From, #state{exporter = E, exporter_state = S} = State) ->
+  NewS = case instrument_lib:safe_apply(E, force_flush, [S], S) of
+           {ok, S1} -> S1;
+           _ -> S
+         end,
+  {reply, ok, State#state{exporter_state = NewS}};
+
+handle_call(_Request, _From, State) ->
+  {reply, {error, unknown_request}, State}.
+
+do_export(Spans, #state{exporter = E, exporter_state = S} = State) ->
   NewS = try E:export(Spans, S) of
            {ok, S1} -> S1;
            {error, _Reason, S1} -> S1;
@@ -111,17 +146,7 @@ handle_call({export, Spans}, _From, #state{exporter = E, exporter_state = S} = S
                             #{mfa => {E, export, 2}, stacktrace => Stack}),
              S
          end,
-  {reply, ok, State#state{exporter_state = NewS}};
-
-handle_call(force_flush, _From, #state{exporter = E, exporter_state = S} = State) ->
-  NewS = case instrument_lib:safe_apply(E, force_flush, [S], S) of
-           {ok, S1} -> S1;
-           _ -> S
-         end,
-  {reply, ok, State#state{exporter_state = NewS}};
-
-handle_call(_Request, _From, State) ->
-  {reply, {error, unknown_request}, State}.
+  State#state{exporter_state = NewS}.
 
 handle_cast(_Msg, State) ->
   {noreply, State}.
@@ -135,3 +160,8 @@ terminate(_Reason, #state{exporter = E, exporter_state = S}) ->
 
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+%% Exporter state holds connection settings such as authorization headers;
+%% keep them out of crash reports and sys:get_status/1.
+format_status(Status) ->
+  instrument_lib:redact_status(Status).

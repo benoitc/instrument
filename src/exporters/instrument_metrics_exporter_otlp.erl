@@ -120,7 +120,7 @@ exporter_shutdown(_State) ->
 encode_metrics(Metrics) ->
   ResourceMetrics = group_metrics(Metrics),
   Payload = #{<<"resourceMetrics">> => ResourceMetrics},
-  json:encode(Payload).
+  instrument_lib:json_encode(Payload).
 
 group_metrics(Metrics) ->
   ScopeMetrics = group_by_scope(Metrics),

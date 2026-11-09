@@ -50,7 +50,8 @@
   handle_cast/2,
   handle_info/2,
   terminate/2,
-  code_change/3
+  code_change/3,
+  format_status/1
 ]).
 
 -include("instrument.hrl").
@@ -162,7 +163,7 @@ init([]) ->
   {ok, schedule_export(State)}.
 
 handle_call({register, Module, Config}, _From, State) ->
-  case Module:exporter_init(Config) of
+  case instrument_lib:safe_call(fun() -> Module:exporter_init(Config) end, {error, init_failed}) of
     {ok, ExporterState} ->
       Exporter = #{module => Module, config => Config, state => ExporterState},
       NewExporters = [Exporter | State#state.exporters],
@@ -229,6 +230,11 @@ terminate(_Reason, State) ->
 
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+%% Exporter state holds connection settings such as authorization headers;
+%% keep them out of crash reports and sys:get_status/1.
+format_status(Status) ->
+  instrument_lib:redact_status(Status).
 
 %% ============================================================================
 %% Internal functions

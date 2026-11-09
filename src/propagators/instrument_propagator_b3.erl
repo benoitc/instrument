@@ -157,8 +157,9 @@ parse_sampling_state(<<"D">>) -> 1;     %% Debug (case-insensitive)
 parse_sampling_state(_) -> 1.           %% Default to sampled
 
 %% Format OTel trace_flags to B3 sampling state
-format_sampling_state(0) -> <<"0">>;
-format_sampling_state(1) -> <<"1">>.
+%% Only the sampled bit maps to B3; other W3C flag bits are ignored.
+format_sampling_state(Flags) when Flags band 1 =:= 1 -> <<"1">>;
+format_sampling_state(_) -> <<"0">>.
 
 %% Get parent span ID from the full span record in context
 get_parent_span_id(Ctx) ->

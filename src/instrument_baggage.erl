@@ -237,11 +237,16 @@ percent_encode_char(C) ->
 hex_char(N) when N < 10 -> $0 + N;
 hex_char(N) -> $A + N - 10.
 
+%% A `%' not followed by two hex digits is kept as is instead of failing
+%% the whole header.
+-define(IS_HEX(C), ((C >= $0 andalso C =< $9) orelse (C >= $a andalso C =< $f)
+                    orelse (C >= $A andalso C =< $F))).
+
 percent_decode(Bin) ->
   percent_decode(Bin, <<>>).
 
 percent_decode(<<>>, Acc) -> Acc;
-percent_decode(<<$%, H1, H2, Rest/binary>>, Acc) ->
+percent_decode(<<$%, H1, H2, Rest/binary>>, Acc) when ?IS_HEX(H1), ?IS_HEX(H2) ->
   C = (hex_val(H1) bsl 4) bor hex_val(H2),
   percent_decode(Rest, <<Acc/binary, C>>);
 percent_decode(<<C, Rest/binary>>, Acc) ->
