@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.0] - Unreleased
+## [2.0.0] - 2026-11-09
 
 ### Breaking
 - `instrument` now declares `hackney` as an application dependency. Start
