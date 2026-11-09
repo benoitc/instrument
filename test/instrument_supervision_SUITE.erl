@@ -110,7 +110,7 @@ span_processor_crash_keeps_batch_processor(_Config) ->
 too_many_crashes_stop_the_app(_Config) ->
   Ref = monitor(process, whereis(instrument_sup)),
   kill_repeatedly(instrument_log_exporter, 11),
-  receive {'DOWN', Ref, process, _, _} -> ok after 5000 -> ct:fail(sup_still_running) end,
+  receive {'DOWN', Ref, process, _, _} -> ok after 30000 -> ct:fail(sup_still_running) end,
   ?assertNot(app_running()),
   ok.
 
@@ -130,16 +130,23 @@ kill_and_wait(Name) ->
   _ = sys:get_state(instrument_sup),
   ok.
 
+%% Kill the process N times, each time waiting for the supervisor to restart
+%% it. The name is unregistered while the children after it restart, which
+%% can take a while on a slow machine; stop early only once the supervisor
+%% itself is gone.
 kill_repeatedly(_Name, 0) ->
   ok;
 kill_repeatedly(Name, N) ->
-  case whereis(Name) of
-    undefined -> ok;
-    Pid ->
+  Pid = wait_until(fun() -> whereis(Name) end,
+                   fun(P) -> is_pid(P) orelse whereis(instrument_sup) =:= undefined end,
+                   10000),
+  case is_pid(Pid) of
+    true ->
       exit(Pid, kill),
-      _ = wait_until(fun() -> whereis(Name) end,
-                     fun(P) -> P =/= Pid end, 1000),
-      kill_repeatedly(Name, N - 1)
+      _ = wait_until(fun() -> whereis(Name) end, fun(P) -> P =/= Pid end, 10000),
+      kill_repeatedly(Name, N - 1);
+    false ->
+      ok
   end.
 
 wait_until(Producer, Pred) ->
