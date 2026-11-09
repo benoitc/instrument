@@ -116,7 +116,9 @@ format_log_record_text(#log_record{
     S -> S
   end,
   TraceInfo = format_trace_info(TraceId, SpanId),
-  BodyStr = format_body(Body),
+  %% One record per line: control characters in the body (CR/LF from
+  %% request data) are escaped so they cannot forge log lines.
+  BodyStr = text_body(Body),
   AttrsStr = format_attributes_text(Attributes),
   io_lib:format("[~s] ~s~s ~s~s~n", [TimeStr, SevStr, TraceInfo, BodyStr, AttrsStr]).
 
@@ -194,6 +196,12 @@ format_trace_info(TraceId, SpanId) ->
   TraceIdHex = format_trace_id_hex(TraceId),
   SpanIdHex = format_span_id_hex(SpanId),
   io_lib:format(" [trace_id=~s span_id=~s]", [TraceIdHex, SpanIdHex]).
+
+text_body(Body) ->
+  Bin = try format_body(Body)
+        catch _:_ -> instrument_lib:chars_to_binary(Body)
+        end,
+  instrument_lib:escape_control(instrument_lib:chars_to_binary(Bin)).
 
 format_body(Body) when is_binary(Body) ->
   Body;
