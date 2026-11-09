@@ -26,8 +26,13 @@ start_link() ->
 %% Supervisor callbacks
 %%====================================================================
 
-%% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
+%% rest_for_one: a crashed child is restarted together with the children
+%% started after it, which may depend on it. The table owner comes first and
+%% holds the shared ETS tables, so restarting the registry or an exporter
+%% keeps metrics and registrations. Ten restarts within a minute stop the
+%% application.
 init([]) ->
+  TableOwner = child_spec(worker, table_owner, instrument_table_owner, permanent, []),
   Registry = child_spec(worker, registry, instrument_registry, permanent, []),
   Exporter = child_spec(worker, exporter, instrument_exporter, permanent, []),
   MetricsExporter = child_spec(worker, metrics_exporter, instrument_metrics_exporter, permanent, []),
@@ -35,8 +40,9 @@ init([]) ->
   SpanProcessor = child_spec(worker, span_processor, instrument_span_processor, permanent, []),
   TracerPool = child_spec(supervisor, tracer_pool, instrument_tracer_pool, permanent, []),
   FlightRecorder = child_spec(worker, flight_recorder, instrument_flight_recorder, permanent, []),
-  {ok, { {one_for_all, 0, 1}, [Registry, Exporter, MetricsExporter, LogExporter, SpanProcessor,
-                               TracerPool, FlightRecorder]} }.
+  SupFlags = #{strategy => rest_for_one, intensity => 10, period => 60},
+  {ok, {SupFlags, [TableOwner, Registry, Exporter, MetricsExporter, LogExporter,
+                   SpanProcessor, TracerPool, FlightRecorder]}}.
 
 %%====================================================================
 %% Internal functions
