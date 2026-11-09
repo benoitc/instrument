@@ -129,6 +129,16 @@ instrument_metric:inc_counter_vec(requests, [<<"/users/456">>]).
 instrument_metric:inc_counter_vec(requests, [<<"/users/{id}">>]).
 ```
 
+### The Cardinality Limit
+
+Each metric holds at most 2000 label combinations by default (`OTEL_METRIC_CARDINALITY_LIMIT`). Writes for new combinations past the limit go to one overflow series instead of creating more, and are counted:
+
+```erlang
+instrument_registry:cardinality_dropped(http_requests_total).
+```
+
+If that number grows, a label has unbounded values; fix the label rather than raising the limit.
+
 ## Removing Labels
 
 You can remove specific label combinations, or clear all values for a metric:
@@ -166,6 +176,15 @@ instrument_meter:add(Counter, 1, #{method => <<"POST">>, status => 201}).
 ```
 
 The OTel API uses maps for attributes instead of ordered lists of label values. That is easier to read at call sites, especially when a metric has several dimensions.
+
+Attributes are exported as labels on the metric's own name:
+
+```
+http_requests_total{method="GET",status="200"} 1.0
+http_requests_total{method="POST",status="201"} 1.0
+```
+
+A metric appears in the output after its first write.
 
 ## Practical Example
 

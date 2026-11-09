@@ -51,12 +51,15 @@ OTLP, the OpenTelemetry Protocol, is the standard format for sending telemetry t
 
 ### Configuration
 
-```erlang
-%% Via environment variables
-os:putenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318"),
-os:putenv("OTEL_SERVICE_NAME", "my-service"),
-instrument_config:init().
+Set the exporter and endpoint before the application starts:
+
+```bash
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_SERVICE_NAME=my-service
 ```
+
+At startup this registers the batch span processor with the OTLP exporter. Tune it with the `OTEL_BSP_*` variables (see [Batch Processing](#batch-processing)).
 
 Or programmatically:
 
@@ -71,7 +74,7 @@ Exporter = instrument_exporter_otlp:new(#{
 ### Trace Export
 
 ```erlang
-%% Register OTLP span exporter (goes through the batched manager)
+%% Register OTLP span exporter by hand (goes through the batched manager)
 instrument_exporter:register(instrument_exporter_otlp:new(#{
     endpoint => "http://jaeger:4318/v1/traces"
 })).
@@ -179,10 +182,16 @@ instrument_span_processor:register(instrument_span_processor_batch, #{
 ```
 
 Batch processing:
-- Buffers spans in memory
-- Exports in batches periodically
+- Buffers up to `max_queue_size` spans in memory
+- Exports at most `max_export_batch_size` spans per request, periodically
 - Reduces network overhead
-- Handles temporary backend unavailability
+- Retries a failed batch a few times while the backend is unavailable
+
+When the queue is full, for example during a long collector outage, new spans are dropped rather than held in memory. Watch the count:
+
+```erlang
+instrument_span_processor_batch:dropped_spans().
+```
 
 ## Resource Configuration
 
